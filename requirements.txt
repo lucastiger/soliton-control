@@ -1,0 +1,10 @@
+jax
+jaxlib
+torch
+numpy
+scipy
+matplotlib
+pyyaml
+tqdm
+h5py
+einops
