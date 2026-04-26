@@ -45,8 +45,7 @@ def _thermal_params(config_path: str | Path | None = None) -> dict[str, float]:
 
 def _build_omega_grid(n_tau: int, t_r: float) -> jnp.ndarray:
     """Build angular-frequency grid used for FFT-domain linear step."""
-    dt = t_r / n_tau
-    return 2.0 * jnp.pi * jnp.fft.fftfreq(n_tau, d=dt)
+    return 2.0 * jnp.pi * jnp.fft.fftfreq(n_tau, d=t_r / n_tau)
 
 
 def _dispersion_operator(omega: jnp.ndarray, beta: jnp.ndarray) -> jnp.ndarray:
@@ -74,30 +73,41 @@ def _single_trajectory_solver(
     """Solve one detuning trajectory with SSFM + thermal Euler update."""
     omega = _build_omega_grid(n_tau, t_r)
     disp = _dispersion_operator(omega, beta)
-    pump_amp = jnp.sqrt(jnp.maximum(kappa_c * pin, 0.0))
+    pump_amp = (jnp.sqrt(jnp.maximum(kappa_c * pin, 0.0)) * t_r).astype(jnp.complex64)
     kappa_i = jnp.maximum(kappa - kappa_c, 0.0)
     omega0 = 2.0 * jnp.pi * 299_792_458.0 / thermal["pump_wavelength_m"]
 
-    def _step(carry, _):
+    def _step(carry, step_idx):
         e_t, delta_t = carry
+        e_t = e_t.astype(jnp.complex64)
+        e_t = jax.lax.cond(
+            step_idx == 1000,
+            lambda x: (x + 1e-6 * jnp.ones(n_tau, dtype=jnp.complex64)).astype(jnp.complex64),
+            lambda x: x,
+            e_t,
+        )
 
         delta_omega_eff = delta_omega + (omega0 / thermal["n0"]) * thermal["dn_dT"] * delta_t
 
-        # (a) Nonlinear phase kick in time domain.
-        nl_phase = jnp.exp(1j * gamma * jnp.abs(e_t) ** 2 * l_eff)
-        e_nl = e_t * nl_phase
+        # (a) Half linear step in frequency domain.
+        lin_exp = (-kappa / 2.0 + 1j * disp - 1j * delta_omega_eff) * t_r
+        h_half = jnp.exp(lin_exp / 2.0).astype(jnp.complex64)
+        e_w = jnp.fft.fft(e_t)
+        e_half = jnp.fft.ifft(e_w * h_half).astype(jnp.complex64)
 
-        # (b) Dispersion + loss + detuning in frequency domain.
-        lin_exp = (-kappa / 2.0 + 1j * (disp + delta_omega_eff)) * t_r
-        h_omega = jnp.exp(lin_exp)
-        e_w = jnp.fft.fft(e_nl)
-        e_lin = jnp.fft.ifft(e_w * h_omega)
+        # (b) Nonlinear phase kick in time domain.
+        nl_phase = jnp.exp(1j * gamma * jnp.abs(e_half) ** 2 * t_r).astype(jnp.complex64)
+        e_nl = (e_half * nl_phase).astype(jnp.complex64)
 
-        # (c) Mean-field pump injection.
-        e_next = e_lin + pump_amp
+        # (c) Second half linear step in frequency domain.
+        e_w2 = jnp.fft.fft(e_nl)
+        e_lin = jnp.fft.ifft(e_w2 * h_half).astype(jnp.complex64)
+
+        # (d) Mean-field pump injection.
+        e_next = (e_lin + pump_amp).astype(jnp.complex64)
 
         p_trans = jnp.mean(jnp.abs(e_next) ** 2)
-        u_int = jnp.sum(jnp.abs(e_next) ** 2)
+        u_int = jnp.sum(jnp.abs(e_next) ** 2) * (t_r / n_tau)
 
         d_delta_t = (
             -delta_t / thermal["tau_th"]
@@ -117,7 +127,7 @@ def _single_trajectory_solver(
     e0 = jnp.zeros((n_tau,), dtype=jnp.complex64)
     delta_t0 = jnp.array(0.0, dtype=jnp.float32)
 
-    (_, _), hist = jax.lax.scan(_step, (e0, delta_t0), xs=None, length=t_slow)
+    (_, _), hist = jax.lax.scan(_step, (e0, delta_t0), xs=jnp.arange(t_slow), length=t_slow)
 
     snapshot_idx = jnp.arange(0, t_slow, 10)
     return {
@@ -161,18 +171,17 @@ def solve_lle_ssfm_jax(
     thermal = _thermal_params(config_path)
     t_r = 1.0 / thermal["fsr_hz"]
 
-    delta_arr = jnp.atleast_1d(jnp.asarray(delta_omega, dtype=jnp.float32))
+    delta_omega_input = delta_omega
+    delta_omega = jnp.array(delta_omega_input, dtype=jnp.float32)
+    delta_arr = jnp.atleast_1d(delta_omega)
     beta_arr = jnp.asarray(beta, dtype=jnp.float32)
-    if beta_arr.shape[0] < 3:
-        beta_arr = jnp.pad(beta_arr, (0, 3 - beta_arr.shape[0]))
-    else:
-        beta_arr = beta_arr[:3]
 
     per_traj = jax.jit(
         jax.vmap(
             _single_trajectory_solver,
             in_axes=(0, None, None, None, None, None, None, None, None, None, None),
-        )
+        ),
+        static_argnums=(2, 7),
     )
 
     out = per_traj(
