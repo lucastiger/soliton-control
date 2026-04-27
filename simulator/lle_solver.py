@@ -149,9 +149,12 @@ def _single_trajectory_solver(
     e_cw = jnp.sqrt(kappa_c * pin / ((kappa / 2) ** 2 + delta_omega_eff**2)) * jnp.ones(
         n_tau, dtype=jnp.complex64
     )
+    
+    key, subkey_r, subkey_i = jax.random.split(rng_key, 3)
     noise = 1e-4 * (
-        jax.random.normal(subkey, (n_tau,)) + 1j * jax.random.normal(subkey, (n_tau,))
+        jax.random.normal(subkey_r, (n_tau,)) + 1j * jax.random.normal(subkey_i, (n_tau,))
     ).astype(jnp.complex64)
+        
     e0 = e_cw + noise
     delta_t0 = jnp.array(0.0, dtype=jnp.float32)
     e_snapshots0 = jnp.zeros((n_snapshots, n_tau), dtype=jnp.complex64)
