@@ -92,23 +92,24 @@ def _single_trajectory_solver(
 
         delta_omega_eff = delta_omega + (omega0 / thermal["n0"]) * thermal["dn_dT"] * delta_t
 
-        # (a) Half linear step in frequency domain.
+        # (a) Inject pump before the symmetric split so the full round-trip
+        #     linear operator acts on the pumped field.
+        e_pumped = (e_t + pump_amp).astype(jnp.complex64)
+        
+        # (b) Half linear step in frequency domain.
         lin_exp = (-kappa / 2.0 + 1j * disp - 1j * delta_omega_eff) * t_r
         lin_exp_half = lin_exp / 2.0
         h_half = jnp.exp(lin_exp_half).astype(jnp.complex64)
-        e_w = jnp.fft.fft(e_t)
+        e_w = jnp.fft.fft(e_pumped)
         e_half = jnp.fft.ifft(e_w * h_half).astype(jnp.complex64)
-
-        # (b) Nonlinear phase kick in time domain.
+        
+        # (c) Nonlinear phase kick in time domain.
         nl_phase = jnp.exp(1j * gamma * jnp.abs(e_half) ** 2 * t_r).astype(jnp.complex64)
         e_nl = (e_half * nl_phase).astype(jnp.complex64)
-
-        # (c) Second half linear step in frequency domain.
+        
+        # (d) Second half linear step in frequency domain.
         e_w2 = jnp.fft.fft(e_nl)
-        e_lin = jnp.fft.ifft(e_w2 * h_half).astype(jnp.complex64)
-
-        # (d) Mean-field pump injection.
-        e_next = (e_lin + pump_amp).astype(jnp.complex64)
+        e_next = jnp.fft.ifft(e_w2 * h_half).astype(jnp.complex64)
 
         p_trans = kappa_c * jnp.sum(jnp.abs(e_next) ** 2) * (t_r / n_tau)
         u_int = jnp.sum(jnp.abs(e_next) ** 2) * (t_r / n_tau)
