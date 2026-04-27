@@ -312,11 +312,15 @@ def validate_solver(
     rel_u = np.std(u_tail) / max(np.mean(u_tail), 1e-12)
     rel_p = np.std(p_tail) / max(np.mean(p_tail), 1e-12)
     check_c = (rel_u < 5e-2) and (rel_p < 5e-2)
-    delta_omega_test = kappa
-    u_ss = jnp.mean(jnp.asarray(solution["U_int_history"])[..., -100:])
+
+    delta_omega_eff_hist = np.asarray(solution["delta_omega_eff_history"])
+    if delta_omega_eff_hist.ndim == 2:
+        delta_omega_eff_hist = delta_omega_eff_hist[traj_idx]
+    delta_omega_test = float(np.mean(delta_omega_eff_hist[-100:]))
+    u_ss = float(np.mean(u_int[-100:]))     # u_int already sliced in bug 6 fix
     u_expected = kappa_c * pin / ((kappa / 2) ** 2 + delta_omega_test**2)
-    rel_error = jnp.abs(u_ss - u_expected) / u_expected
-    print(f"CW steady-state energy error: {float(rel_error):.3%} (pass if <10%)")
+    rel_error = abs(u_ss - u_expected) / u_expected
+    print(f"CW steady-state energy error: {rel_error:.3%} (pass if <10%)")
     assert rel_error < 0.10, "Steady-state energy deviates >10% from analytical CW solution"
 
     results = {
