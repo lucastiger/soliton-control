@@ -144,9 +144,7 @@ def _single_trajectory_solver(
             "delta_omega_eff": delta_omega_eff,
         }
         return (e_next, delta_t_next, e_snapshots, label_history, next_snap_count), out
-
-    delta_omega_eff = delta_omega
-    key, subkey = jax.random.split(rng_key)
+        
     e_cw = jnp.sqrt(kappa_c * pin / ((kappa / 2) ** 2 + delta_omega_eff**2)) * jnp.ones(
         n_tau, dtype=jnp.complex64
     )
