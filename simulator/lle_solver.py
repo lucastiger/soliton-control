@@ -18,6 +18,8 @@ import yaml
 
 from simulator.state_labeler import make_state_labeler
 
+_STATE_LABELER = make_state_labeler()
+
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "tfln_params.yaml"
 
 
@@ -242,7 +244,6 @@ def solve_lle_ssfm_jax(
     beta_arr = tuple(float(b) for b in beta)
     key_arr = jax.random.split(rng_key, delta_arr.shape[0])
 
-    _state_labeler = make_state_labeler()
 
     per_traj = jax.jit(
         jax.vmap(
@@ -266,7 +267,7 @@ def solve_lle_ssfm_jax(
         int(snapshot_interval),
         key_arr,
         thermal,
-        _state_labeler,
+        _STATE_LABELER,    # <-- was _state_labeler
     )
 
     return {k: np.asarray(v) for k, v in out.items()}
