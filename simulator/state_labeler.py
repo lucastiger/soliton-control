@@ -55,7 +55,8 @@ def make_state_labeler():
                 jnp.where(is_mi,      2,
                 jnp.where(is_chaotic, 3,
                 jnp.where(is_multi,   4,
-                                      5)))))
+                jnp.where(is_single,  5,
+                                      5))))))  # final fallback = single soliton
         return label.astype(jnp.int32)
 
     return state_labeler
