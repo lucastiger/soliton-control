@@ -183,7 +183,6 @@ def solve_lle_ssfm_jax(
     delta_omega: float | np.ndarray | jnp.ndarray,
     t_slow: int,
     beta: list[float] | tuple[float, ...] | np.ndarray,
-    gamma: float,
     kappa: float,
     kappa_c: float,
     rng_key: jax.Array,
@@ -204,7 +203,6 @@ def solve_lle_ssfm_jax(
         delta_omega: Laser detuning(s) in rad/s; scalar or 1D array.
         t_slow: Number of round trips.
         beta: Dispersion coefficient list [beta2, beta3, beta4].
-        gamma: Deprecated input; gamma is loaded from config gamma_LLE_per_W_per_s.
         kappa: Total cavity loss rate (rad/s).
         kappa_c: Coupling rate (rad/s).
         rng_key: PRNG key for initial noise seeding.
