@@ -36,9 +36,9 @@ def make_state_labeler():
 
         # number of peaks: count points above 50% of max with positive->negative
         # zero-crossings of the gradient (proxy for peak count, JAX-traceable)
-        grad = jnp.diff(p, append=p[:1])
+        grad = jnp.diff(p, append=p[:1])          # length n_tau
         sign_changes = jnp.sum(
-            (grad[:-1] > 0) & (grad[1:] <= 0)
+            (grad > 0) & (jnp.roll(grad, -1) <= 0)
         ).astype(jnp.float32)
 
         # --- decision tree (all jnp.where for JAX traceability) ---
