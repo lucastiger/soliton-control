@@ -232,7 +232,11 @@ def solve_lle_ssfm_jax(
     assert 1e6 < thermal["kappa_i"] < 1e12, (
         f"kappa_i={thermal['kappa_i']} should be in rad/s (1e6 to 1e12)"
     )
+    
     t_r = 1.0 / thermal["fsr_hz"]
+
+    # convert every leaf to a scalar JAX array so vmap can trace through it
+    thermal = {k: jnp.array(v, dtype=jnp.float32) for k, v in thermal.items()}
 
     delta_omega_input = delta_omega
     delta_omega = jnp.array(delta_omega_input, dtype=jnp.float32)
