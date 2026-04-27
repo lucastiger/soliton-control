@@ -279,6 +279,7 @@ def validate_solver(
     kappa: float,
     kappa_c: float,
     gamma: float,
+    traj_idx: int = 0,
     print_results: bool = True,
 ) -> dict[str, bool]:
     """Run basic solver validation checks and print pass/fail status."""
@@ -286,12 +287,18 @@ def validate_solver(
     p_trans = np.asarray(solution["P_trans_history"])
     e_hist = np.asarray(solution["E_snapshots"])
 
+    # Select single trajectory if batched — shapes are (n_traj, t_slow) and (n_traj, n_snapshots, n_tau)
+    if u_int.ndim == 2:
+        u_int  = u_int[traj_idx]           # (t_slow,)
+        p_trans = p_trans[traj_idx]        # (t_slow,)
+        e_hist  = e_hist[traj_idx]         # (n_snapshots, n_tau)
+
     p_th = max((kappa**3) / (8.0 * max(gamma, 1e-30) * max(kappa_c, 1e-30)), 1e-30)
     arg = 8.0 * pin / p_th - 1.0
     delta_omega_sol = (kappa / 2.0) * math.sqrt(max(arg, 0.0))
     check_a = np.isfinite(delta_omega_sol) and (delta_omega_sol >= 0.0)
 
-    final_spec = np.abs(np.fft.fftshift(np.fft.fft(e_hist.reshape(-1, e_hist.shape[-1])[-1]))) ** 2
+    final_spec = np.abs(np.fft.fftshift(np.fft.fft(e_hist[-1]))) ** 2
     final_spec /= max(final_spec.max(), 1e-12)
     x = np.linspace(-3.0, 3.0, final_spec.size)
     sech2 = 1.0 / np.cosh(x) ** 2
@@ -299,11 +306,9 @@ def validate_solver(
     corr = np.corrcoef(final_spec, sech2)[0, 1]
     check_b = np.isfinite(corr) and corr > 0.7
 
-    u_flat = u_int.reshape(-1, u_int.shape[-1])[-1]
-    p_flat = p_trans.reshape(-1, p_trans.shape[-1])[-1]
-    ss_start = int(0.8 * u_flat.size)
-    u_tail = u_flat[ss_start:]
-    p_tail = p_flat[ss_start:]
+    u_tail = u_int[int(0.8 * u_int.size):]
+    p_tail = p_trans[int(0.8 * p_trans.size):]
+
     rel_u = np.std(u_tail) / max(np.mean(u_tail), 1e-12)
     rel_p = np.std(p_tail) / max(np.mean(p_tail), 1e-12)
     check_c = (rel_u < 5e-2) and (rel_p < 5e-2)
