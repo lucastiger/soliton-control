@@ -112,7 +112,7 @@ def _single_trajectory_solver(
 
         p_trans = kappa_c * jnp.sum(jnp.abs(e_next) ** 2) * (t_r / n_tau)
         u_int = jnp.sum(jnp.abs(e_next) ** 2) * (t_r / n_tau)
-        p_abs = (kappa_i / (2.0 * jnp.pi)) * u_int
+        p_abs = kappa_i * u_int
 
         d_delta_t = (
             -delta_t / thermal["tau_th"]
