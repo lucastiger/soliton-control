@@ -7,7 +7,11 @@ physical_parameters:
   d2_rad_per_s2: 1.2566370614e7     # 2π × 2 MHz
   tau_th_s: 5.0e-6
   dn_dT_per_k: 4.0e-5
+  Gamma_th: 0.1
+  kappa_i_rad_per_s: 5.0e8
   pyroelectric_coeff_c_per_m2_k: 9.6e-2
   eo_r33_m_per_v: 3.1e-11
   surface_state_density_per_m2: 1.0e16
   pump_wavelength_m: 1.55e-6
+  gamma_LLE_per_W_per_s: 2.0         # LLE nonlinear coefficient = gamma_NLSE * vg / (2*pi*R)
+  gamma_NLSE_per_W_per_m: 2.0        # NLSE coefficient, for reference only
