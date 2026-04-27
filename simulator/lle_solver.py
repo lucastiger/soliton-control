@@ -16,6 +16,8 @@ import jax.numpy as jnp
 import numpy as np
 import yaml
 
+from simulator.state_labeler import make_state_labeler
+
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "tfln_params.yaml"
 
 
@@ -240,10 +242,7 @@ def solve_lle_ssfm_jax(
     beta_arr = tuple(float(b) for b in beta)
     key_arr = jax.random.split(rng_key, delta_arr.shape[0])
 
-    def _state_labeler(e_t: jnp.ndarray) -> jnp.int32:
-        p = jnp.abs(e_t) ** 2
-        contrast = jnp.max(p) / jnp.maximum(jnp.mean(p), 1e-20)
-        return jnp.where(contrast > 10.0, 2, jnp.where(contrast > 2.0, 1, 0)).astype(jnp.int32)
+    _state_labeler = make_state_labeler()
 
     per_traj = jax.jit(
         jax.vmap(
