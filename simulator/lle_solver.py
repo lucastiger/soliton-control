@@ -18,16 +18,6 @@ import yaml
 
 from simulator.state_labeler import make_state_labeler
 
-_STATE_LABELER = make_state_labeler()
-
-_PER_TRAJ = jax.jit(
-        jax.vmap(
-            _single_trajectory_solver,
-            in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None),
-        ),
-        static_argnums=(2, 3, 7, 10, 13),
-    )
-
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "tfln_params.yaml"
 
 
@@ -188,6 +178,16 @@ def _single_trajectory_solver(
         "DeltaT_history": hist["DeltaT"],
         "delta_omega_eff_history": hist["delta_omega_eff"],
     }
+
+
+_STATE_LABELER = make_state_labeler()
+_PER_TRAJ = jax.jit(
+    jax.vmap(
+        _single_trajectory_solver,
+        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None),
+    ),
+    static_argnums=(2, 3, 7, 10, 13),
+)
 
 
 def solve_lle_ssfm_jax(
