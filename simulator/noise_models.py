@@ -161,8 +161,11 @@ class TotalNoise:
         self.dn_dT = self.trn.dn_dT
         self.r33 = self.pyroeo.r33
         self.p = self.pyroeo.p
+        
         self.eps0 = self.pyroeo.eps0
         self.eps_r_z = self.pyroeo.eps_r_z
+        self.eps_r_eff = self.pyroeo.eps_r_eff
+        
         self.tau_th = self.trn.tau_th
         self.var_delta_t = self.trn.var_delta_t
         self.tau_carrier = self.tccr.tau_carrier
@@ -171,7 +174,7 @@ class TotalNoise:
         key_thermal, key_tccr = jax.random.split(key, 2)
         temp_noise = _ar1_samples(key_thermal, N, self.tau_th, math.sqrt(self.var_delta_t), self.t_r)
         trn_noise = (self.omega_0 / self.n0 * self.dn_dT) * temp_noise
-        pyroeo_noise = (self.omega_0 * self.n0**2 * self.r33 * self.p / (2.0 * self.eps0 * self.eps_r_z)) * temp_noise
+        pyroeo_noise = (self.omega_0 * self.n0**2 * self.r33 * self.p / (2.0 * self.eps0 * self.eps_r_eff)) * temp_noise
         tccr_noise = self.tccr.sample(key_tccr, N)
         return (trn_noise - pyroeo_noise + tccr_noise).astype(jnp.float32)
 
