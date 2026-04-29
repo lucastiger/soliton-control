@@ -146,6 +146,7 @@ class TotalNoise:
         self.eps0 = self.pyroeo.eps0
         self.tau_th = self.trn.tau_th
         self.var_delta_t = self.trn.var_delta_t
+        self.tau_carrier = self.tccr.tau_carrier
 
     def sample(self, key, N) -> jnp.ndarray:
         key_thermal, key_tccr = jax.random.split(key, 2)
