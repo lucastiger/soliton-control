@@ -118,7 +118,6 @@ class TCCRNoise:
             self.alpha_tccr
             * (self.k_b * self.T_k / self.v_eff)
             * self.omega_0 ** 2
-            * (2.0 * self.tau_carrier)
         )
         self.var_tccr = self.s0_tccr / (4.0 * self.tau_carrier)
         self.sigma_tccr = math.sqrt(self.var_tccr)
