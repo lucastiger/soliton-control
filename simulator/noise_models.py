@@ -186,7 +186,7 @@ def plot_noise_psd() -> None:
     t_k = float(cfg.get("T_k", 300.0))
     omega_0 = 2.0 * math.pi * c / float(cfg.get("pump_wavelength_m", 1.55e-6))
     s_delta_t_si3n4 = (
-        (4.0 * k_b * t_k**2 * kappa_si3n4) / (rho_si3n4**2 * cp_si3n4**2 * v_si3n4)
+        (4.0 * k_b * t_k**2 * tau_si3n4) / (rho_si3n4 * cp_si3n4 * v_si3n4)
     ) / (1.0 + (2.0 * np.pi * f * tau_si3n4) ** 2)
     s_si3n4 = ((omega_0 / n0_si3n4) * dn_dt_si3n4) ** 2 * s_delta_t_si3n4
 
