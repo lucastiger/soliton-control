@@ -93,7 +93,7 @@ class PyroEONoise:
         s_delta_t = (
             (4.0 * self.k_b * self.T_k**2 * self.tau_th) / (self.rho * self.cp * self.v)
         ) / (1.0 + (2.0 * jnp.pi * f * self.tau_th) ** 2)
-        scale = (self.omega_0 * self.n0**2 * self.r33 * self.p / (2.0 * self.eps0)) ** 2
+        scale = (self.omega_0 * self.n0**2 * self.r33 * self.p / (2.0 * self.eps0 * self.eps_r_z)) ** 2
         return scale * s_delta_t
 
 
@@ -144,6 +144,7 @@ class TotalNoise:
         self.r33 = self.pyroeo.r33
         self.p = self.pyroeo.p
         self.eps0 = self.pyroeo.eps0
+        self.eps_r_z = self.pyroeo.eps_r_z
         self.tau_th = self.trn.tau_th
         self.var_delta_t = self.trn.var_delta_t
         self.tau_carrier = self.tccr.tau_carrier
@@ -152,7 +153,7 @@ class TotalNoise:
         key_thermal, key_tccr = jax.random.split(key, 2)
         temp_noise = _ar1_samples(key_thermal, N, self.tau_th, math.sqrt(self.var_delta_t), self.t_r)
         trn_noise = (self.omega_0 / self.n0 * self.dn_dT) * temp_noise
-        pyroeo_noise = (self.omega_0 * self.n0**2 * self.r33 * self.p / (2.0 * self.eps0)) * temp_noise
+        pyroeo_noise = (self.omega_0 * self.n0**2 * self.r33 * self.p / (2.0 * self.eps0 * self.eps_r_z)) * temp_noise
         tccr_noise = self.tccr.sample(key_tccr, N)
         return (trn_noise - pyroeo_noise + tccr_noise).astype(jnp.float32)
 
