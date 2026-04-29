@@ -61,7 +61,7 @@ class TRNoise:
 
     def psd(self, f) -> jnp.ndarray:
         s_delta_t = (
-            (4.0 * self.k_b * self.T_k**2 * self.kappa_th) / (self.rho**2 * self.cp**2 * self.v)
+            (4.0 * self.k_b * self.T_k**2 * self.tau_th) / (self.rho * self.cp * self.v)
         ) / (1.0 + (2.0 * jnp.pi * f * self.tau_th) ** 2)
         return ((self.omega_0 / self.n0) * self.dn_dT) ** 2 * s_delta_t
 
