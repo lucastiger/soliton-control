@@ -109,12 +109,21 @@ class TCCRNoise:
         self.tau_carrier = float(cfg.get("tau_carrier_s", 1.0e-7))
         self.eps0 = 8.8541878128e-12
         self.k_b = 1.380649e-23
-        pref = (self.omega_0 * self.n0**3 * self.r33 / (2.0 * self.eps0)) ** 2
-        charge_fluc = (4.0 * self.k_b * self.T_k * self.rho_surface * self.tau_carrier) / (self.eps0**2 * self.v_eff)
-        self.s0_tccr = pref * charge_fluc
+        
+        # alpha_tccr is a dimensionless coupling factor encoding EO + surface-state
+        # contributions; loaded from config so it can be tuned to match experiment.
+        self.alpha_tccr = float(cfg.get("alpha_tccr", 1e-3))
+        # S_TCCR(0) = alpha_tccr * (k_B T / V_eff) * omega_0^2 * 2*tau  (one-sided)
+        self.s0_tccr = (
+            self.alpha_tccr
+            * (self.k_b * self.T_k / self.v_eff)
+            * self.omega_0 ** 2
+            * (2.0 * self.tau_carrier)
+        )
         self.var_tccr = self.s0_tccr / (4.0 * self.tau_carrier)
         self.sigma_tccr = math.sqrt(self.var_tccr)
 
+    
     def sample(self, key, N) -> jnp.ndarray:
         return _ar1_samples(key, N, self.tau_carrier, self.sigma_tccr, self.t_r)
 
