@@ -228,7 +228,9 @@ def validate_noise_models() -> None:
 
     trn_std = float(jnp.std(total.trn.sample(jax.random.PRNGKey(1), 100_000)))
     tccr_std = float(jnp.std(total.tccr.sample(jax.random.PRNGKey(2), 100_000)))
-    assert tccr_std > trn_std
+    assert tccr_std > trn_std, (
+        f"TCCR ({tccr_std:.3e}) should dominate TRN ({trn_std:.3e}) in TFLN"
+    )
 
     tccr_samples = np.asarray(total.tccr.sample(jax.random.PRNGKey(3), 200_000), dtype=np.float64)
     r1 = np.corrcoef(tccr_samples[:-1], tccr_samples[1:])[0, 1]
