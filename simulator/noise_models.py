@@ -81,9 +81,10 @@ class PyroEONoise:
         self.kappa_th = float(cfg.get("kappa_th_w_per_m_k", 4.6))
         self.T_k = float(cfg.get("T_k", 300.0))
         self.eps0 = 8.8541878128e-12
+        self.eps_r_z = float(cfg.get("eps_r_z", 28.0))   # LN c-axis relative permittivity
         self.k_b = 1.380649e-23
         self.var_delta_t = self.k_b * self.T_k**2 / (self.rho * self.cp * self.v)
-        self.sigma_pyroeo = (self.omega_0 * self.n0**2 * self.r33 * self.p / (2.0 * self.eps0)) * math.sqrt(self.var_delta_t)
+        self.sigma_pyroeo = (self.omega_0 * self.n0**2 * self.r33 * self.p / (2.0 * self.eps0 * self.eps_r_z)) * math.sqrt(self.var_delta_t)
 
     def sample(self, key, N) -> jnp.ndarray:
         return _ar1_samples(key, N, self.tau_th, self.sigma_pyroeo, self.t_r)
