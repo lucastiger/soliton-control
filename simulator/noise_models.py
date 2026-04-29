@@ -243,7 +243,8 @@ def validate_noise_models() -> None:
 
     s100k = total.sample(key, 100_000)
     std_total = float(jnp.std(s100k))
-    expected_sigma = math.sqrt(total.tccr.var_tccr + total.trn.sigma_trn**2)
+    sigma_thermal_combined = abs(total.trn.sigma_trn - total.pyroeo.sigma_pyroeo)  # correlated, opposite sign
+    expected_sigma = math.sqrt(sigma_thermal_combined**2 + total.tccr.var_tccr)
     assert 0.1 * expected_sigma < std_total < 10.0 * expected_sigma, (
         f"Total noise std {std_total:.3e} outside expected range "
         f"[{0.1*expected_sigma:.3e}, {10.0*expected_sigma:.3e}]"
