@@ -13,6 +13,11 @@ physical_parameters:
   eo_r33_m_per_v: 3.1e-11
   surface_state_density_per_m2: 1.0e16
   pump_wavelength_m: 1.55e-6
-  gamma_LLE_per_W_per_s: 2.0         # LLE nonlinear coefficient = gamma_NLSE * vg / (2*pi*R)
-  gamma_NLSE_per_W_per_m: 2.0        # NLSE coefficient, for reference only
-  eps_r_z: 28.0          # LN c-axis (z) relative permittivity ε₃₃ at room temperature
+  gamma_LLE_per_W_per_s: 2.0        # LLE nonlinear coefficient = gamma_NLSE * vg / (2*pi*R)
+  gamma_NLSE_per_W_per_m: 2.0       # NLSE coefficient, for reference only
+  eps_r_z: 28.0                     # LN c-axis (z) relative permittivity ε₃₃ at room temperature
+  t_ln_m: 4.0e-7                    # LN film thickness, 400 nm
+  t_clad_top_m: 1.0e-6              # top cladding (SiO2 or air) thickness
+  t_clad_bot_m: 2.0e-6              # buried oxide thickness
+  eps_r_clad_top: 1.0               # air cladding (use 3.9 if SiO2-clad)
+  eps_r_clad_bot: 3.9               # SiO2 substrate
