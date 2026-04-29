@@ -15,3 +15,4 @@ physical_parameters:
   pump_wavelength_m: 1.55e-6
   gamma_LLE_per_W_per_s: 2.0         # LLE nonlinear coefficient = gamma_NLSE * vg / (2*pi*R)
   gamma_NLSE_per_W_per_m: 2.0        # NLSE coefficient, for reference only
+  eps_r_z: 28.0          # LN c-axis (z) relative permittivity ε₃₃ at room temperature
