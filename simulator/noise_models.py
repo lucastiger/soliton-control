@@ -124,7 +124,6 @@ class TCCRNoise:
         self.T_k = float(cfg.get("T_k", 300.0))
         self.v_eff = float(cfg.get("mode_volume_m3", 1.0e-15))
         self.tau_carrier = float(cfg.get("tau_carrier_s", 1.0e-7))
-        self.eps0 = 8.8541878128e-12
         self.k_b = 1.380649e-23
         
         # alpha_tccr is a dimensionless coupling factor encoding EO + surface-state
