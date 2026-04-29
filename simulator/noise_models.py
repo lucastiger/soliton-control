@@ -111,7 +111,7 @@ class PyroEONoise:
         s_delta_t = (
             (4.0 * self.k_b * self.T_k**2 * self.tau_th) / (self.rho * self.cp * self.v)
         ) / (1.0 + (2.0 * jnp.pi * f * self.tau_th) ** 2)
-        scale = (self.omega_0 * self.n0**2 * self.r33 * self.p / (2.0 * self.eps0 * self.eps_r_z)) ** 2
+        scale = (self.omega_0 * self.n0**2 * self.r33 * self.p / (2.0 * self.eps0 * self.eps_r_eff)) ** 2
         return scale * s_delta_t
 
 
