@@ -121,10 +121,8 @@ class TCCRNoise:
         self.t_r = 1.0 / float(cfg.get("fsr_hz", 2.0e11))
         self.omega_0 = 2.0 * math.pi * 299_792_458.0 / float(cfg.get("pump_wavelength_m", 1.55e-6))
         self.n0 = float(cfg.get("n0", 2.2))
-        self.r33 = float(cfg.get("eo_r33_m_per_v", 3.1e-11))
         self.T_k = float(cfg.get("T_k", 300.0))
         self.v_eff = float(cfg.get("mode_volume_m3", 1.0e-15))
-        self.rho_surface = float(cfg.get("surface_state_density_per_m2", 1.0e16))
         self.tau_carrier = float(cfg.get("tau_carrier_s", 1.0e-7))
         self.eps0 = 8.8541878128e-12
         self.k_b = 1.380649e-23
