@@ -200,7 +200,7 @@ def plot_noise_psd() -> None:
     plt.loglog(f_emp[1:], p_emp[1:], "k:", lw=2.2, label="Empirical total (Welch)")
     plt.loglog(f, s_si3n4, color="gray", lw=1.6, label="Si₃N₄ TRN reference")
     plt.xlim(1e3, 1e9)
-    plt.ylim(1e3, None)
+    plt.ylim(None, None)
     plt.xlabel("Frequency [Hz]")
     plt.ylabel("S_δω(f)  [(rad/s)²/Hz]")
     plt.legend()
