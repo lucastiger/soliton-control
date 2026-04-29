@@ -81,10 +81,28 @@ class PyroEONoise:
         self.kappa_th = float(cfg.get("kappa_th_w_per_m_k", 4.6))
         self.T_k = float(cfg.get("T_k", 300.0))
         self.eps0 = 8.8541878128e-12
-        self.eps_r_z = float(cfg.get("eps_r_z", 28.0))   # LN c-axis relative permittivity
         self.k_b = 1.380649e-23
         self.var_delta_t = self.k_b * self.T_k**2 / (self.rho * self.cp * self.v)
-        self.sigma_pyroeo = (self.omega_0 * self.n0**2 * self.r33 * self.p / (2.0 * self.eps0 * self.eps_r_z)) * math.sqrt(self.var_delta_t)
+
+        self.eps_r_z = float(cfg.get("eps_r_z", 28.0))
+        # Geometric screening from dielectric boundary conditions in thin-film stack.
+        # 1D approximation: E_LN = P / (ε₀ * ε_r_eff) where ε_r_eff accounts for
+        # the fraction of field extending into cladding layers.
+        _t_ln  = float(cfg.get("t_ln_m", 4.0e-7))
+        _t_top = float(cfg.get("t_clad_top_m", 1.0e-6))
+        _t_bot = float(cfg.get("t_clad_bot_m", 2.0e-6))
+        _er_top = float(cfg.get("eps_r_clad_top", 1.0))
+        _er_bot = float(cfg.get("eps_r_clad_bot", 3.9))
+        self.eps_r_eff = (
+            self.eps_r_z
+            + _er_top * (_t_top / _t_ln)
+            + _er_bot * (_t_bot / _t_ln)
+        )
+        # η_geom = eps_r_z / eps_r_eff  (implicitly encoded by using eps_r_eff)
+        self.sigma_pyroeo = (
+            self.omega_0 * self.n0**2 * self.r33 * self.p
+            / (2.0 * self.eps0 * self.eps_r_eff)
+        ) * math.sqrt(self.var_delta_t)
 
     def sample(self, key, N) -> jnp.ndarray:
         return _ar1_samples(key, N, self.tau_th, self.sigma_pyroeo, self.t_r)
