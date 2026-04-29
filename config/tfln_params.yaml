@@ -21,3 +21,11 @@ physical_parameters:
   t_clad_bot_m: 2.0e-6              # buried oxide thickness
   eps_r_clad_top: 1.0               # air cladding (use 3.9 if SiO2-clad)
   eps_r_clad_bot: 3.9               # SiO2 substrate
+  n0: 2.2                           # refractive index at pump wavelength
+  rho_kg_per_m3: 4640.0             # LN mass density
+  Cp_j_per_kg_k: 700.0              # LN specific heat capacity
+  T_k: 300.0                        # ambient temperature
+  kappa_th_w_per_m_k: 4.6           # LN thermal conductivity
+  mode_volume_m3: 1.0e-15           # effective optical mode volume
+  tau_carrier_s: 1.0e-7             # surface carrier relaxation time
+  alpha_tccr: 1.0e-3                # TCCR dimensionless coupling factor
