@@ -220,7 +220,11 @@ def validate_noise_models() -> None:
 
     s100k = total.sample(key, 100_000)
     std_total = float(jnp.std(s100k))
-    assert 1e4 < std_total < 1e9
+    expected_sigma = math.sqrt(total.tccr.var_tccr + total.trn.sigma_trn**2)
+    assert 0.1 * expected_sigma < std_total < 10.0 * expected_sigma, (
+        f"Total noise std {std_total:.3e} outside expected range "
+        f"[{0.1*expected_sigma:.3e}, {10.0*expected_sigma:.3e}]"
+    )
 
     trn_std = float(jnp.std(total.trn.sample(jax.random.PRNGKey(1), 100_000)))
     tccr_std = float(jnp.std(total.tccr.sample(jax.random.PRNGKey(2), 100_000)))
