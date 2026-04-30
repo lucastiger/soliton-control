@@ -324,7 +324,8 @@ def solve_lle_ssfm_jax(
         int(snapshot_interval),
         key_arr,
         thermal,
-        _STATE_LABELER,    # <-- was _state_labeler
+        _STATE_LABELER,
+        noise_sequences,
     )
 
     return {k: np.asarray(v) for k, v in out.items()}
