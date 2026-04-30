@@ -147,7 +147,21 @@ def _single_trajectory_solver(
         e_w2 = jnp.fft.fft(e_nl)
         e_next = jnp.fft.ifft(e_w2 * h_half).astype(jnp.complex64)
 
-        p_trans = kappa_c * jnp.sum(jnp.abs(e_next) ** 2) * (t_r / n_tau)
+        # Through-port power for an all-pass ring resonator.
+        # The detector sees interference between the directly transmitted pump
+        # and the field coupled out of the resonator:
+        #   E_through = -E_in,direct + i·√κ_c · E_circ,avg
+        # In the round-trip normalisation (|E|² ~ J), the CW pump amplitude is
+        # sqrt(P_in) and the coupling adds a π/2 phase.
+        e_circ_mean = jnp.mean(e_next)           # mean field = DC / CW component
+        pump_cw_amp = jnp.sqrt(jnp.maximum(pin, 0.0)).astype(jnp.complex64)
+        # Coupled-out field amplitude (single roundtrip, scalar)
+        e_coupled_out = 1j * jnp.sqrt(jnp.maximum(kappa_c, 0.0)) * e_circ_mean * jnp.sqrt(t_r)
+        e_through = -pump_cw_amp + e_coupled_out
+        p_trans = jnp.abs(e_through) ** 2         # W; matches photodetector measurement
+
+        # Also retain the raw intra-cavity emission for energy-balance checks.
+        p_emitted = kappa_c * jnp.sum(jnp.abs(e_next) ** 2) * (t_r / n_tau)
         u_int = jnp.sum(jnp.abs(e_next) ** 2) * (t_r / n_tau)
         p_abs = kappa_i * u_int
 
