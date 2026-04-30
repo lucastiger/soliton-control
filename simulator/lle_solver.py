@@ -118,10 +118,15 @@ def _single_trajectory_solver(
     n_snapshots = (t_slow + snapshot_interval - 1) // snapshot_interval
 
     def _step(carry, step_idx):
+    def _step(carry, step_idx):
         e_t, delta_t, e_snapshots, label_history, snap_count = carry
         e_t = e_t.astype(jnp.complex64)
 
-        delta_omega_eff = delta_omega + (omega0 / thermal["n0"]) * thermal["dn_dT"] * delta_t
+        # Deterministic thermal detuning shift
+        thermal_shift = (omega0 / thermal["n0"]) * thermal["dn_dT"] * delta_t
+        # Stochastic TCCR/TRN/PyroEO detuning noise at this round trip
+        freq_noise = noise_sequence[step_idx]
+        delta_omega_eff = delta_omega + thermal_shift + freq_noise   # <-- CHANGED
 
         # (a) Inject pump before the symmetric split so the full round-trip
         #     linear operator acts on the pumped field.
