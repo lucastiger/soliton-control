@@ -188,7 +188,8 @@ def _single_trajectory_solver(
         )
 
         out = {
-            "P_trans": p_trans,  # Watts; detector-measured transmitted power
+            "P_trans": p_trans,        # through-port power (detector-matched)
+            "P_emitted": p_emitted,    # raw cavity emission (for energy balance)
             "U_int": u_int,
             "DeltaT": delta_t_next,
             "delta_omega_eff": delta_omega_eff,
