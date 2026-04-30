@@ -21,6 +21,33 @@ from simulator.state_labeler import make_state_labeler
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "tfln_params.yaml"
 
 
+def d2_to_beta2_lle(d2_rad_per_s2: float, fsr_hz: float) -> float:
+    """Convert integrated dispersion D2 [rad/s²] to LLE beta_2 [s].
+
+    In the microresonator LLE the dispersion polynomial is parameterised by the
+    integrated dispersion coefficients Dₖ (rad/s^k).  The mapping to the LLE
+    β coefficients (units: s^(k-1)) is:
+
+        β₂ = D₂ / D₁²     (s)
+        β₃ = D₃ / D₁³     (s²)
+
+    where D₁ = 2π·FSR.
+
+    Sign convention: D₂ > 0  →  β₂ > 0  →  anomalous dispersion.
+
+    Example (TFLN, 200 GHz FSR, D₂ = 2π × 2 MHz):
+        d2_to_beta2_lle(1.2566e7, 2e11) ≈ 7.9e-18  s
+    """
+    d1 = 2.0 * math.pi * fsr_hz          # rad/s
+    return d2_rad_per_s2 / d1 ** 2
+
+
+def d3_to_beta3_lle(d3_rad_per_s3: float, fsr_hz: float) -> float:
+    """Convert D3 [rad/s³] to LLE beta_3 [s²].  See d2_to_beta2_lle."""
+    d1 = 2.0 * math.pi * fsr_hz
+    return d3_rad_per_s3 / d1 ** 3
+
+
 def _load_config(config_path: str | Path | None = None) -> dict[str, Any]:
     """Load YAML config and return physical parameters dict."""
     cfg_path = Path(config_path) if config_path is not None else _DEFAULT_CONFIG_PATH
