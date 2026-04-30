@@ -218,7 +218,7 @@ _STATE_LABELER = make_state_labeler()
 _PER_TRAJ = jax.jit(
     jax.vmap(
         _single_trajectory_solver,
-        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None),
+        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0),
     ),
     static_argnums=(2, 3, 7, 10, 13),
 )
