@@ -173,6 +173,11 @@ class TotalNoise:
         trn_noise = (self.omega_0 / self.n0 * self.dn_dT) * temp_noise
         pyroeo_noise = (self.omega_0 * self.n0**2 * self.r33 * self.p / (2.0 * self.eps0 * self.eps_r_eff)) * temp_noise
         tccr_noise = self.tccr.sample(key_tccr, N)
+        
+        # Sign convention: PyroEO *partially cancels* TRN for z-cut TFLN with
+        # air top-cladding (Yu lab geometry).  For SiO₂-clad or flipped substrate,
+        # the sign of pyroeo_noise may need to flip.  Verify against Fig. 2 of the
+        # TCCR paper (DOI to be added) before generating the training dataset.
         return (trn_noise - pyroeo_noise + tccr_noise).astype(jnp.float32)
 
 
