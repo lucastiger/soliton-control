@@ -278,6 +278,18 @@ def solve_lle_ssfm_jax(
     delta_omega = jnp.array(delta_omega_input, dtype=jnp.float32)
     delta_arr = jnp.atleast_1d(delta_omega)
     beta_arr = tuple(float(b) for b in beta)
+
+    # Guard: catch accidental use of fiber-optics β₂ units (s²/m).
+    # LLE β₂ = D₂/D₁² ≈ 1e-18–1e-16 s for typical microresonators.
+    if len(beta_arr) >= 1 and beta_arr[0] != 0.0:
+        b2_mag = abs(beta_arr[0])
+        if not (1e-20 < b2_mag < 1e-12):
+            raise ValueError(
+                f"beta[0] (β₂) = {beta_arr[0]:.3e} is outside the expected LLE range "
+                f"[1e-20, 1e-12] s.  Fiber-optics β₂ (s²/m) must be converted first: "
+                f"use d2_to_beta2_lle(d2_rad_per_s2, fsr_hz)."
+            )
+    
     key_arr = jax.random.split(rng_key, delta_arr.shape[0])
 
 
