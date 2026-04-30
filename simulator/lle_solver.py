@@ -60,7 +60,8 @@ def build_dispersion(omega: jnp.ndarray, beta_list: tuple[float, ...]) -> jnp.nd
     disp = jnp.zeros_like(omega)
     for i, b in enumerate(beta_list):
         k = i + 2
-        disp = disp + float(b) / math.factorial(k) * omega**k
+        sign = (-1) ** k   # +1 for even, -1 for odd
+        disp = disp + sign * float(b) / math.factorial(k) * omega ** k
     return disp
 
 
