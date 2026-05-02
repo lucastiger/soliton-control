@@ -16,7 +16,8 @@ physical_parameters:
   surface_state_density_per_m2: 1.0e16
   pump_wavelength_m: 1.55e-6
   gamma_LLE_per_W_per_s: 2.0        # LLE nonlinear coefficient = gamma_NLSE * vg / (2*pi*R)
-  gamma_NLSE_per_W_per_m: 2.0       # NLSE coefficient, for reference only
+  gamma_LLE_per_W_per_s: 1.364e-3    # = gamma_NLSE * L_RT  [J⁻¹·s]; was 2.0 (wrong)
+  # Equivalently: gamma_LLE = gamma_NLSE / FSR / n_eff * c
   eps_r_z: 28.0                     # LN c-axis (z) relative permittivity ε₃₃ at room temperature
   t_ln_m: 4.0e-7                    # LN film thickness, 400 nm
   t_clad_top_m: 1.0e-6              # top cladding (SiO2 or air) thickness
