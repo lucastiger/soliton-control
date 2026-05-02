@@ -283,6 +283,26 @@ def solve_lle_ssfm_jax(
     )
     thermal["Gamma_th"] = float(physical.get("Gamma_th", thermal["Gamma_th"]))
     thermal["kappa_i"] = float(physical.get("kappa_i_rad_per_s", max(kappa - kappa_c, 0.0)))
+
+    # --- κ_i / Q consistency check ---
+    import warnings as _warnings
+    physical = _load_config(config_path)
+    _lam = float(physical.get("pump_wavelength_m", 1.55e-6))
+    _omega0_est = 2.0 * math.pi * 299_792_458.0 / _lam
+    _q_i = float(physical.get("intrinsic_q", 0))
+    if _q_i > 0:
+        _kappa_i_from_q = _omega0_est / _q_i
+        _kappa_i_direct = thermal["kappa_i"]
+        _rel_diff = abs(_kappa_i_from_q - _kappa_i_direct) / max(_kappa_i_direct, 1e-30)
+        if _rel_diff > 0.15:
+            _warnings.warn(
+                f"κ_i from Q_i ({_kappa_i_from_q:.3e} rad/s) differs from "
+                f"kappa_i_rad_per_s ({_kappa_i_direct:.3e} rad/s) by {_rel_diff:.1%}. "
+                f"Reconcile config: either remove intrinsic_q or update kappa_i_rad_per_s "
+                f"to {_kappa_i_from_q:.3e}.",
+                stacklevel=2,
+            )
+    
     assert 1e-5 < thermal["Gamma_th"] < 1.0, (
         f"Gamma_th={thermal['Gamma_th']} must be dimensionless fraction (1e-5 to 1.0)"
     )
