@@ -21,6 +21,16 @@ from simulator.state_labeler import make_state_labeler
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "tfln_params.yaml"
 
 
+def gamma_nlse_to_lle(gamma_nlse_per_w_per_m: float, fsr_hz: float, n_eff: float = 2.2) -> float:
+    """Convert fiber-style γ_NLSE [W⁻¹m⁻¹] to LLE γ [J⁻¹].
+    """
+    
+    c = 299_792_458.0
+    v_g = c / n_eff
+    L_rt = v_g / fsr_hz          # round-trip length in metres
+    
+    return gamma_nlse_per_w_per_m * L_rt   # W⁻¹ = J⁻¹s
+
 def d2_to_beta2_lle(d2_rad_per_s2: float, fsr_hz: float) -> float:
     """Convert integrated dispersion D2 [rad/s²] to LLE beta_2 [s].
 
