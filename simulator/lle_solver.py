@@ -355,6 +355,7 @@ def validate_solver(
     gamma: float,
     traj_idx: int = 0,
     print_results: bool = True,
+    config_path=None,
 ) -> dict[str, bool]:
     """Run basic solver validation checks and print pass/fail status."""
     u_int = np.asarray(solution["U_int_history"])
@@ -392,10 +393,24 @@ def validate_solver(
         delta_omega_eff_hist = delta_omega_eff_hist[traj_idx]
     delta_omega_test = float(np.mean(delta_omega_eff_hist[-100:]))
     u_ss = float(np.mean(u_int[-100:]))     # u_int already sliced in bug 6 fix
-    u_expected = kappa_c * pin / ((kappa / 2) ** 2 + delta_omega_test**2)
-    rel_error = abs(u_ss - u_expected) / u_expected
+    
+    # --- CW steady-state energy balance ---
+    # In the round-trip field normalisation |E|² ~ J, the analytic CW energy is:
+    #   U_cw = κ_c · P_in · t_r / ((κ/2)² + Δω²)
+    # The t_r factor converts from power-normalised (W) to energy-normalised (J).
+    thermal_p = _thermal_params(config_path)   # need t_r — pass config_path through
+    t_r_val = 1.0 / thermal_p["fsr_hz"]
+
+    delta_omega_test = float(np.mean(delta_omega_eff_hist[-100:]))
+    u_ss = float(np.mean(u_int[-100:]))
+    u_expected = kappa_c * pin * t_r_val / ((kappa / 2) ** 2 + delta_omega_test ** 2)
+    rel_error = abs(u_ss - u_expected) / max(u_expected, 1e-30)
     print(f"CW steady-state energy error: {rel_error:.3%} (pass if <10%)")
-    assert rel_error < 0.10, "Steady-state energy deviates >10% from analytical CW solution"
+    assert rel_error < 0.10, (
+        f"Steady-state energy deviates {rel_error:.1%} from analytical CW solution. "
+        f"u_ss={u_ss:.3e} J, u_expected={u_expected:.3e} J, "
+        f"delta_omega_eff={delta_omega_test:.3e} rad/s"
+    )
 
     results = {
         "soliton_existence_condition": bool(check_a),
