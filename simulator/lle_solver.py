@@ -128,7 +128,6 @@ def _single_trajectory_solver(
     n_snapshots = (t_slow + snapshot_interval - 1) // snapshot_interval
 
     def _step(carry, step_idx):
-    def _step(carry, step_idx):
         e_t, delta_t, e_snapshots, label_history, snap_count = carry
         e_t = e_t.astype(jnp.complex64)
 
