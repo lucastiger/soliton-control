@@ -117,28 +117,45 @@ class PyroEONoise:
 
 class TCCRNoise:
     def __init__(self, cfg):
-        self.cfg = cfg
-        self.t_r = 1.0 / float(cfg.get("fsr_hz", 2.0e11))
-        self.omega_0 = 2.0 * math.pi * 299_792_458.0 / float(cfg.get("pump_wavelength_m", 1.55e-6))
-        self.n0 = float(cfg.get("n0", 2.2))
-        self.T_k = float(cfg.get("T_k", 300.0))
-        self.v_eff = float(cfg.get("mode_volume_m3", 1.0e-15))
+        self.t_r         = 1.0 / float(cfg.get("fsr_hz", 2.0e11))
+        self.omega_0     = 2.0 * math.pi * 299_792_458.0 / float(cfg.get("pump_wavelength_m", 1.55e-6))
         self.tau_carrier = float(cfg.get("tau_carrier_s", 1.0e-7))
-        self.k_b = 1.380649e-23
-        
-        # alpha_tccr is a dimensionless coupling factor encoding EO + surface-state
-        # contributions; loaded from config so it can be tuned to match experiment.
-        self.alpha_tccr = float(cfg.get("alpha_tccr", 1e-3))
-        # S_TCCR(0) = alpha_tccr * (k_B T / V_eff) * omega_0^2 * 2*tau  (one-sided)
-        self.s0_tccr = (
-            self.alpha_tccr
-            * (self.k_b * self.T_k / self.v_eff)
-            * self.omega_0 ** 2
-        )
-        self.var_tccr = self.s0_tccr / (4.0 * self.tau_carrier)
-        self.sigma_tccr = math.sqrt(self.var_tccr)
+        self.k_b         = 1.380649e-23
+        self.T_k         = float(cfg.get("T_k", 300.0))
 
-    
+        # Physical path: surface carrier shot noise → EO frequency shift
+        n_s       = float(cfg.get("surface_state_density_per_m2", 1.0e16))   # m⁻²
+        r33       = float(cfg.get("eo_r33_m_per_v",  3.1e-11))               # m/V
+        n0        = float(cfg.get("n0", 2.2))
+        eps0      = 8.8541878128e-12
+        eps_r_eff = float(cfg.get("eps_r_z", 28.0))   # simplified; use PyroEO value for full model
+        A_eff     = float(cfg.get("effective_mode_area_m2", 1.0e-12))         # m²
+        t_ln      = float(cfg.get("t_ln_m", 4.0e-7))                         # m
+        e_charge  = 1.602176634e-19                                            # C
+
+        # Equilibrium surface carrier number within mode footprint
+        N_s_eq = n_s * A_eff                                                   # dimensionless
+
+        # EO frequency shift per carrier: dω/dN_s [rad/s / carrier]
+        # Field from one surface charge over mode area and LN thickness
+        E_per_carrier = e_charge / (eps0 * eps_r_eff * A_eff)                 # V/m per carrier
+        dw_dNs = -self.omega_0 * n0**2 * r33 * E_per_carrier / (2.0 * t_ln)   # rad/s per carrier
+
+        # One-sided TCCR PSD at f=0: S0 = (dω/dNs)² · N_s_eq · 2·τ_carrier
+        self.s0_tccr    = dw_dNs**2 * N_s_eq * 2.0 * self.tau_carrier        # (rad/s)²/Hz ✓
+        self.var_tccr   = self.s0_tccr / (4.0 * self.tau_carrier)             # stationary variance
+        self.sigma_tccr = math.sqrt(max(self.var_tccr, 0.0))
+
+        # Sanity: sigma_tccr should be in range [1e4, 1e11] rad/s for TFLN
+        if not (1e4 < self.sigma_tccr < 1e11):
+            import warnings
+            warnings.warn(
+                f"TCCRNoise.sigma_tccr = {self.sigma_tccr:.2e} rad/s is outside the "
+                f"expected physical range [1e4, 1e11] rad/s. "
+                f"Check surface_state_density_per_m2 and eo_r33_m_per_v in config.",
+                stacklevel=2,
+            )
+
     def sample(self, key, N) -> jnp.ndarray:
         return _ar1_samples(key, N, self.tau_carrier, self.sigma_tccr, self.t_r)
 
