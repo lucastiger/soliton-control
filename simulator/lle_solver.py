@@ -341,7 +341,10 @@ def solve_lle_ssfm_jax(
                 f"use d2_to_beta2_lle(d2_rad_per_s2, fsr_hz)."
             )
     
-    key_arr = jax.random.split(rng_key, delta_arr.shape[0])
+    # Split into three independent groups from a single chain
+    key, key_field, key_noise = jax.random.split(rng_key, 3)
+    key_arr    = jax.random.split(key_field, delta_arr.shape[0])   # for e0
+    noise_keys = jax.random.split(key_noise, delta_arr.shape[0])   # for AR(1)
 
     # --- Generate per-trajectory noise sequences ---
     from simulator.noise_models import TotalNoise, _load_config as _nm_load_cfg
@@ -352,7 +355,6 @@ def solve_lle_ssfm_jax(
     def _gen_noise(key):
         return _noise_model.sample(key, int(t_slow))
 
-    noise_keys = jax.random.split(rng_key, delta_arr.shape[0] + 1)[1:]  # don't reuse key_arr
     noise_sequences = jax.vmap(_gen_noise)(noise_keys)   # (n_traj, t_slow)
     
     out = _PER_TRAJ(
