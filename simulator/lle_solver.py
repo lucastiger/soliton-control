@@ -282,10 +282,10 @@ def solve_lle_ssfm_jax(
     """
     thermal = _thermal_params(config_path)
     physical = _load_config(config_path)
-    gamma = float(physical.get("gamma_LLE_per_W_per_s"))
-    assert 1e-6 < gamma < 1.0, (
-        f"gamma={gamma:.3e} looks wrong. Expected ~1e-3 J⁻¹s for TFLN at 200 GHz FSR. "
-        f"Use gamma_nlse_to_lle() to convert from γ_NLSE."
+    gamma = float(physical.get("gamma_LLE_per_J_per_s"))
+    assert 1e15 < gamma < 1e25, (
+        f"gamma_LLE = {gamma:.3e} J⁻¹s⁻¹ outside expected range for TFLN at 200 GHz FSR. "
+        f"Use gamma_nlse_to_lle() to compute from γ_NLSE."
     )
     thermal["Gamma_th"] = float(physical.get("Gamma_th", thermal["Gamma_th"]))
     thermal["kappa_i"] = float(physical.get("kappa_i_rad_per_s", max(kappa - kappa_c, 0.0)))
