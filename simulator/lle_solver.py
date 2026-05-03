@@ -22,14 +22,19 @@ _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "tfln_pa
 
 
 def gamma_nlse_to_lle(gamma_nlse_per_w_per_m: float, fsr_hz: float, n_eff: float = 2.2) -> float:
-    """Convert fiber-style γ_NLSE [W⁻¹m⁻¹] to LLE γ [J⁻¹].
+    """Convert γ_NLSE [W⁻¹m⁻¹] to γ_LLE [J⁻¹s⁻¹].
+
+    Derivation: equating NLSE and LLE nonlinear phases,
+        γ_NLSE · P · L_RT  =  γ_LLE · U_int · t_r
+        γ_NLSE · (U/t_r) · v_g·t_r  =  γ_LLE · U · t_r
+        γ_LLE  =  γ_NLSE · v_g / t_r  =  γ_NLSE · v_g · FSR
+
+    Units check: [W⁻¹m⁻¹] · [m/s] · [1/s] = W⁻¹s⁻²
+                 = (J/s)⁻¹ · s⁻¹ = J⁻¹s⁻¹  ✓
     """
-    
-    c = 299_792_458.0
+    c   = 299_792_458.0
     v_g = c / n_eff
-    L_rt = v_g / fsr_hz          # round-trip length in metres
-    
-    return gamma_nlse_per_w_per_m * L_rt   # W⁻¹ = J⁻¹s
+    return gamma_nlse_per_w_per_m * v_g * fsr_hz   # J⁻¹s⁻¹
 
 def d2_to_beta2_lle(d2_rad_per_s2: float, fsr_hz: float) -> float:
     """Convert integrated dispersion D2 [rad/s²] to LLE beta_2 [s].
