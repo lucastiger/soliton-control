@@ -280,15 +280,6 @@ def solve_lle_ssfm_jax(
         Dictionary containing requested histories.
     """
 
-    p_th_check = (kappa / 2.0)**2 / (gamma * t_r * kappa_c)
-    if not (0.5 * min(pin_range) < p_th_check < 2.0 * max(pin_range)):
-        import warnings
-        warnings.warn(
-            f"P_th = {p_th_check*1e3:.1f} mW is outside [0.5×, 2×] of your pump range. "
-            f"All trajectories may be in the same dynamical regime. "
-            f"Adjust config parameters or the pump sweep range.",
-            stacklevel=2,
-        )
     
     thermal = _thermal_params(config_path)
     physical = _load_config(config_path)
@@ -327,6 +318,21 @@ def solve_lle_ssfm_jax(
     )
     
     t_r = 1.0 / thermal["fsr_hz"]
+
+    # --- Pre-flight: verify pin is in a physically meaningful regime ---
+    # P_th = (kappa/2)^2 / (gamma_LLE * t_r * kappa_c): the MI onset threshold.
+    # The simulation only produces interesting states (MI, multi-soliton, single-soliton)
+    # for pin > P_th. Warn if pin is more than 10x below threshold so the caller
+    # knows their dataset will be all-CW.
+    _p_th = (kappa / 2.0) ** 2 / (gamma * t_r * kappa_c)
+    if pin < 0.1 * _p_th:
+        import warnings as _w
+        _w.warn(
+            f"pin={pin*1e3:.1f} mW is {_p_th/pin:.0f}x below the MI threshold "
+            f"P_th={_p_th*1e3:.1f} mW. All trajectories will be CW (label 1). "
+            f"Increase pin or adjust Q_i / A_eff in config.",
+            stacklevel=2,
+        )
 
     # convert every leaf to a scalar JAX array so vmap can trace through it
     thermal = {k: jnp.array(v, dtype=jnp.float32) for k, v in thermal.items()}
