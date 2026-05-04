@@ -158,6 +158,20 @@ class TCCRNoise:
                 stacklevel=2,
             )
 
+        kappa_estimate = 2.0 * 2.0 * math.pi * 299_792_458.0 / (
+            float(cfg.get("pump_wavelength_m", 1.55e-6)) * float(cfg.get("intrinsic_q", 2e6))
+        )
+        if self.sigma_tccr > kappa_estimate:
+            import warnings
+            warnings.warn(
+                f"sigma_tccr ({self.sigma_tccr:.2e} rad/s) > kappa ({kappa_estimate:.2e} rad/s). "
+                f"TCCR noise is non-perturbative and will destabilize all solitons. "
+                f"Reduce surface_state_density_per_m2 (currently {n_s:.1e} m^-2) or calibrate "
+                f"against the Yu lab's measured noise floor before generating the training dataset.",
+                stacklevel=2,
+            )
+
+
     def sample(self, key, N) -> jnp.ndarray:
         return _ar1_samples(key, N, self.tau_carrier, self.sigma_tccr, self.t_r)
 
