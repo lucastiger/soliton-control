@@ -371,7 +371,6 @@ def solve_lle_ssfm_jax(
     )
 
     return {k: np.asarray(v) for k, v in out.items()}
-    # hist will now also contain "P_emitted" automatically
 
 
 def validate_solver(
