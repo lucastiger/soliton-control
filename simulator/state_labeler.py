@@ -49,7 +49,6 @@ def make_state_labeler():
         is_cw      = contrast < 2.0
         is_mi      = (contrast >= 2.0) & (contrast < 8.0)
         is_chaotic = (contrast >= 8.0) & (norm_entropy > 0.5)
-        is_multi   = (contrast >= 8.0) & (norm_entropy <= 0.5) & (sign_changes > 1.5)
 
 
         # ---- crystal detection: peak spacing coefficient of variation ----
