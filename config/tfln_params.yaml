@@ -3,7 +3,7 @@ physical_parameters:
   intrinsic_q: 1.0e7                # was 2.0e6
   coupling_q: 1.0e7
   n2_m2_per_w: 1.8e-19
-  effective_mode_area_m2: 5.0e-13      # 0.5 um^2, realistic for TFLN ridge
+  effective_mode_area_m2: 1.0e-13      # 0.1 µm² — tight ridge mode
   d2_rad_per_s2: 1.2566370614e7     # 2π × 2 MHz
   tau_th_s: 5.0e-6
   dn_dT_per_k: 4.0e-5
@@ -16,9 +16,9 @@ physical_parameters:
   surface_state_density_per_m2: 1.0e16
   pump_wavelength_m: 1.55e-6
   # gamma_LLE = gamma_NLSE * v_g * FSR
-  # gamma_NLSE = n2 * omega0 / (c * A_eff) = 1.8e-19 * 1.215e15 / (3e8 * 5e-13) = 1.46 W^-1m^-1
-  # gamma_LLE = 1.46 * (3e8/2.2) * 2e11 = 3.98e19
-  gamma_LLE_per_J_per_s: 3.98e19       # from A_eff=0.5um^2
+  # gamma_NLSE = n2*omega0/(c*A_eff) = 1.8e-19*1.215e15/(3e8*1e-13) = 7.29 W^-1m^-1
+  # gamma_LLE = 7.29 * (3e8/2.2) * 2e11 = 1.989e20 J^-1s^-1
+  gamma_LLE_per_J_per_s: 1.99e20
   # Equivalently: gamma_LLE = gamma_NLSE / FSR / n_eff * c
   eps_r_z: 28.0                     # LN c-axis (z) relative permittivity ε₃₃ at room temperature
   t_ln_m: 4.0e-7                    # LN film thickness, 400 nm
