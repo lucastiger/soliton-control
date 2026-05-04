@@ -19,6 +19,7 @@ def make_state_labeler():
     """
 
     def state_labeler(e_t: jnp.ndarray) -> jnp.int32:
+        n_tau = e_t.shape[0]
         p = jnp.abs(e_t) ** 2
         total_power = jnp.sum(p)
 
