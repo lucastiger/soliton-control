@@ -13,7 +13,7 @@ physical_parameters:
   kappa_i_rad_per_s: 1.215e8           # omega0 / 1e7
   pyroelectric_coeff_c_per_m2_k: 9.6e-2
   eo_r33_m_per_v: 3.1e-11
-  surface_state_density_per_m2: 1.0e16
+  surface_state_density_per_m2: 1.0e12
   pump_wavelength_m: 1.55e-6
   # gamma_LLE = gamma_NLSE * v_g * FSR
   # gamma_NLSE = n2*omega0/(c*A_eff) = 1.8e-19*1.215e15/(3e8*1e-13) = 7.29 W^-1m^-1
