@@ -49,25 +49,34 @@ def make_state_labeler():
         is_chaotic = (contrast >= 8.0) & (norm_entropy > 0.5)
         is_multi   = (contrast >= 8.0) & (norm_entropy <= 0.5) & (sign_changes > 1.5)
 
-        # --- peak spacing variance for crystal detection ---
-        # Indices where gradient goes positive→negative (peak locations)
-        peak_mask = (grad > 0) & (jnp.roll(grad, -1) <= 0)
-        peak_indices = jnp.where(peak_mask, jnp.arange(n_tau, dtype=jnp.float32), 0.0)
+
+        # ---- crystal detection: peak spacing coefficient of variation ----
+        # Extract peak positions as a sorted array of length n_tau,
+        # with non-peak slots filled by n_tau (a sentinel beyond all valid indices).
+        # After sorting, the first sign_changes entries are the true peak positions.
+        sentinel = jnp.float32(n_tau)
+        peak_locs = jnp.where(peak_mask, jnp.arange(n_tau, dtype=jnp.float32), sentinel)
+        peak_locs_sorted = jnp.sort(peak_locs)          # real peaks first, sentinels at end
         
-        # Sort non-zero indices to get ordered peak positions
-        # (JAX-traceable: use cumsum trick to extract first sign_changes peaks)
-        # Compute spacing between consecutive detected peaks
-        # Variance of spacings: low = regular (crystal), high = disordered (multi-soliton)
-        spacings = jnp.diff(peak_indices, append=peak_indices[:1])
-        # Only spacings between real peaks matter; mask out zero-crossings from padding
-        valid_spacings = jnp.where(peak_mask, spacings, jnp.nan)
-        # JAX nan-safe variance: use jnp.nanmean / jnp.nanvar equivalents
-        spacing_mean = jnp.nansum(jnp.where(jnp.isnan(valid_spacings), 0.0, valid_spacings)) / jnp.maximum(sign_changes, 1.0)
-        spacing_sq_dev = jnp.nansum(jnp.where(jnp.isnan(valid_spacings), 0.0, (valid_spacings - spacing_mean)**2)) / jnp.maximum(sign_changes, 1.0)
-        spacing_cv = jnp.sqrt(spacing_sq_dev) / jnp.maximum(spacing_mean, 1.0)  # coefficient of variation
+        # Spacings between consecutive real peaks.
+        # diff of sorted locs: entry i = peak_locs_sorted[i] - peak_locs_sorted[i-1]
+        # The last entry wraps to peak_locs_sorted[0]+n_tau-peak_locs_sorted[-1] (circular),
+        # but we only use the first (sign_changes - 1) entries, so the wrap-around
+        # and sentinel-to-sentinel diffs don't matter if we mask them.
+        locs_shifted = jnp.roll(peak_locs_sorted, 1)
+        raw_spacings = peak_locs_sorted - locs_shifted   # (n_tau,); first entry is garbage
         
-        # Soliton crystal: low spacing CV (uniform spacing), multi-peak, ordered spectrum
-        CRYSTAL_CV_THRESHOLD = 0.1   # <10% variation in inter-soliton spacing
+        # Valid entries: indices 1 .. sign_changes-1 (between real peaks)
+        # Build a validity mask: entry i is valid if i >= 1 and i < sign_changes
+        valid_idx = jnp.arange(n_tau, dtype=jnp.float32)
+        spacing_valid = (valid_idx >= 1.0) & (valid_idx < sign_changes)
+        
+        n_valid = jnp.maximum(sign_changes - 1.0, 1.0)
+        sp_mean = jnp.sum(jnp.where(spacing_valid, raw_spacings, 0.0)) / n_valid
+        sp_sq   = jnp.sum(jnp.where(spacing_valid, (raw_spacings - sp_mean)**2, 0.0)) / n_valid
+        spacing_cv = jnp.sqrt(sp_sq) / jnp.maximum(sp_mean, 1.0)
+        
+        CRYSTAL_CV_THRESHOLD = 0.1
         is_crystal = (contrast >= 8.0) & (norm_entropy <= 0.5) & (sign_changes > 1.5) & (spacing_cv < CRYSTAL_CV_THRESHOLD)
         is_multi   = (contrast >= 8.0) & (norm_entropy <= 0.5) & (sign_changes > 1.5) & (spacing_cv >= CRYSTAL_CV_THRESHOLD)
 
