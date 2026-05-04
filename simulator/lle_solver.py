@@ -279,6 +279,17 @@ def solve_lle_ssfm_jax(
     Returns:
         Dictionary containing requested histories.
     """
+
+    p_th_check = (kappa / 2.0)**2 / (gamma * t_r * kappa_c)
+    if not (0.5 * min(pin_range) < p_th_check < 2.0 * max(pin_range)):
+        import warnings
+        warnings.warn(
+            f"P_th = {p_th_check*1e3:.1f} mW is outside [0.5×, 2×] of your pump range. "
+            f"All trajectories may be in the same dynamical regime. "
+            f"Adjust config parameters or the pump sweep range.",
+            stacklevel=2,
+        )
+    
     thermal = _thermal_params(config_path)
     physical = _load_config(config_path)
     gamma = float(physical.get("gamma_LLE_per_J_per_s"))
