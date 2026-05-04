@@ -78,9 +78,16 @@ def make_state_labeler():
         spacing_cv = jnp.sqrt(sp_sq) / jnp.maximum(sp_mean, 1.0)
         
         CRYSTAL_CV_THRESHOLD = 0.1
-        is_crystal = (contrast >= 8.0) & (norm_entropy <= 0.5) & (sign_changes > 1.5) & (spacing_cv < CRYSTAL_CV_THRESHOLD)
-        is_multi   = (contrast >= 8.0) & (norm_entropy <= 0.5) & (sign_changes > 1.5) & (spacing_cv >= CRYSTAL_CV_THRESHOLD)
-
+        is_crystal = (
+            (contrast >= 8.0) & (norm_entropy <= 0.5)
+            & (sign_changes > 2.5)                       # ← require ≥ 3 peaks, not ≥ 2
+            & (spacing_cv < CRYSTAL_CV_THRESHOLD)
+        )
+        is_multi = (
+            (contrast >= 8.0) & (norm_entropy <= 0.5)
+            & (sign_changes > 1.5)
+            & ~is_crystal                                 # anything multi that isn't crystal
+        )
         
         # single soliton: high contrast, ordered spectrum, single peak
         is_single  = (contrast >= 8.0) & (norm_entropy <= 0.5) & (sign_changes <= 1.5)
