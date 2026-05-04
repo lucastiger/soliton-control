@@ -15,9 +15,9 @@ physical_parameters:
   eo_r33_m_per_v: 3.1e-11
   surface_state_density_per_m2: 1.0e12
   pump_wavelength_m: 1.55e-6
-  # gamma_LLE = gamma_NLSE * v_g * FSR
-  # gamma_NLSE = n2*omega0/(c*A_eff) = 1.8e-19*1.215e15/(3e8*1e-13) = 7.29 W^-1m^-1
-  # gamma_LLE = 7.29 * (3e8/2.2) * 2e11 = 1.989e20 J^-1s^-1
+  # γ_LLE = γ_NLSE * v_g * FSR = 7.29 * (3e8/2.2) * 2e11 ≈ 1.99e20 J⁻¹s⁻¹
+  # P_th = (κ/2)² / (γ_LLE * t_r * κ_c) = κ_i / (γ_NLSE * v_g) ≈ 122 mW
+  # For soliton generation, use pin in range 150-600 mW (1.2-5x P_th)
   gamma_LLE_per_J_per_s: 1.99e20
   # Equivalently: gamma_LLE = gamma_NLSE / FSR / n_eff * c
   eps_r_z: 28.0                     # LN c-axis (z) relative permittivity ε₃₃ at room temperature
