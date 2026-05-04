@@ -38,6 +38,7 @@ def make_state_labeler():
         # number of peaks: count points above 50% of max with positive->negative
         # zero-crossings of the gradient (proxy for peak count, JAX-traceable)
         grad = jnp.diff(p, append=p[:1])          # length n_tau
+        peak_mask = (grad > 0) & (jnp.roll(grad, -1) <= 0)
         sign_changes = jnp.sum(
             (grad > 0) & (jnp.roll(grad, -1) <= 0)
         ).astype(jnp.float32)
