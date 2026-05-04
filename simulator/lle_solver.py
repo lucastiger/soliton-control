@@ -379,6 +379,7 @@ def validate_solver(
     kappa: float,
     kappa_c: float,
     gamma: float,
+    t_r: float,
     traj_idx: int = 0,
     print_results: bool = True,
     config_path=None,
@@ -394,10 +395,14 @@ def validate_solver(
         p_trans = p_trans[traj_idx]        # (t_slow,)
         e_hist  = e_hist[traj_idx]         # (n_snapshots, n_tau)
 
-    p_th = max((kappa**3) / (8.0 * max(gamma, 1e-30) * max(kappa_c, 1e-30)), 1e-30)
-    arg = 8.0 * pin / p_th - 1.0
-    delta_omega_sol = (kappa / 2.0) * math.sqrt(max(arg, 0.0))
-    check_a = np.isfinite(delta_omega_sol) and (delta_omega_sol >= 0.0)
+    # MI/soliton threshold in energy-normalized LLE (|E|^2 ~ J):
+    # P_th = (kappa/2)^2 / (gamma_LLE * t_r * kappa_c)
+    p_th = max(
+        (kappa / 2.0) ** 2 / (max(gamma, 1e-30) * t_r * max(kappa_c, 1e-30)),
+        1e-30
+    )
+    arg = pin / p_th - 1.0          # >0 means above MI threshold
+    check_a = np.isfinite(p_th) and (p_th > 0) and (arg > 0)
 
     final_spec = np.abs(np.fft.fftshift(np.fft.fft(e_hist[-1]))) ** 2
     final_spec /= max(final_spec.max(), 1e-12)
