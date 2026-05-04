@@ -136,10 +136,12 @@ class TCCRNoise:
         # Equilibrium surface carrier number within mode footprint
         N_s_eq = n_s * A_eff                                                   # dimensionless
 
-        # EO frequency shift per carrier: dω/dN_s [rad/s / carrier]
-        # Field from one surface charge over mode area and LN thickness
-        E_per_carrier = e_charge / (eps0 * eps_r_eff * A_eff)                 # V/m per carrier
-        dw_dNs = -self.omega_0 * n0**2 * r33 * E_per_carrier / (2.0 * t_ln)   # rad/s per carrier
+        # EO frequency shift per carrier [rad/s per carrier]
+        # Derivation: delta_n = -n0^3 * r33 * E / 2  =>  delta_omega = omega_0 * delta_n / n0
+        #                     = -omega_0 * n0 ^ 2 * r33 * E / 2
+        # E_per_carrier is already in V/m; t_ln does NOT appear here.
+        E_per_carrier = e_charge / (eps0 * eps_r_eff * A_eff)   # V/m per carrier
+        dw_dNs = -self.omega_0 * n0**2 * r33 * E_per_carrier / 2.0   # rad/s per carrier  ← NO t_ln
 
         # One-sided TCCR PSD at f=0: S0 = (dω/dNs)² · N_s_eq · 2·τ_carrier
         self.s0_tccr    = dw_dNs**2 * N_s_eq * 2.0 * self.tau_carrier        # (rad/s)²/Hz ✓
