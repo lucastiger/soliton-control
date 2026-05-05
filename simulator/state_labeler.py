@@ -185,7 +185,6 @@ def label_soliton_state(E_tau, threshold_params) -> int:
 
 
 def label_trajectory(E_history, threshold_params=None) -> np.ndarray:
-    
     """Label all snapshots in a trajectory with the 7-class soliton scheme."""
     params = {**_DEFAULT_THRESHOLD_PARAMS, **(threshold_params or {})}
 
