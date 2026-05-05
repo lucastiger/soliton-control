@@ -152,7 +152,7 @@ def label_soliton_state(E_tau, threshold_params) -> int:
             return 3
         if n_peaks >= 3:
             spacings = np.diff(np.sort(peaks))
-            spacing_cv = float(spacings.std() / spacings.mean())
+            spacing_cv = float(spacings.std() / max(float(spacings.mean()), 1.0))
             if spacing_cv < params["crystal_cv"]:
                 return 5
             return 4
