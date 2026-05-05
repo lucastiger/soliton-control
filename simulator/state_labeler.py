@@ -108,21 +108,21 @@ def make_state_labeler():
 
     return state_labeler
 
+_DEFAULT_THRESHOLD_PARAMS: dict = {
+    "power_floor": 1e-6,
+    "contrast_cw": 2.0,
+    "contrast_high": 8.0,
+    "entropy_chaotic": 0.5,
+    "crystal_cv": 0.1,
+    "sech2_r2": 0.95,
+    "peak_prominence": 0.3,
+    "peak_width": 2.0,
+}
 
 def label_soliton_state(E_tau, threshold_params) -> int:
     """Label one intracavity-field snapshot using a 7-class soliton scheme."""
-    defaults = {
-        "power_floor": 1e-6,
-        "contrast_cw": 2.0,
-        "contrast_high": 8.0,
-        "entropy_chaotic": 0.5,
-        "crystal_cv": 0.1,
-        "sech2_r2": 0.95,
-        "peak_prominence": 0.3,
-        "peak_width": 2.0,
-    }
-    params = defaults.copy()
-    params.update(threshold_params or {})
+    
+    params = {**_DEFAULT_THRESHOLD_PARAMS, **(threshold_params or {})}
 
     p = np.abs(E_tau) ** 2
     p_mean = float(np.mean(p))
@@ -185,19 +185,9 @@ def label_soliton_state(E_tau, threshold_params) -> int:
 
 
 def label_trajectory(E_history, threshold_params=None) -> np.ndarray:
+    
     """Label all snapshots in a trajectory with the 7-class soliton scheme."""
-    defaults = {
-        "power_floor": 1e-6,
-        "contrast_cw": 2.0,
-        "contrast_high": 8.0,
-        "entropy_chaotic": 0.5,
-        "crystal_cv": 0.1,
-        "sech2_r2": 0.95,
-        "peak_prominence": 0.3,
-        "peak_width": 2.0,
-    }
-    params = defaults.copy()
-    params.update(threshold_params or {})
+    params = {**_DEFAULT_THRESHOLD_PARAMS, **(threshold_params or {})}
 
     n_snapshots = E_history.shape[0]
     labels = np.empty((n_snapshots,), dtype=np.int32)
