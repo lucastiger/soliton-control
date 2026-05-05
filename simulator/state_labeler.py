@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 import jax.numpy as jnp
+import numpy as np
+from scipy.optimize import curve_fit
+from scipy.signal import find_peaks
 
 
 def make_state_labeler():
@@ -104,3 +107,100 @@ def make_state_labeler():
         return label.astype(jnp.int32)
 
     return state_labeler
+
+
+def label_soliton_state(E_tau, threshold_params) -> int:
+    """Label one intracavity-field snapshot using a 7-class soliton scheme."""
+    defaults = {
+        "power_floor": 1e-6,
+        "contrast_cw": 2.0,
+        "contrast_high": 8.0,
+        "entropy_chaotic": 0.5,
+        "crystal_cv": 0.1,
+        "sech2_r2": 0.95,
+        "peak_prominence": 0.3,
+        "peak_width": 2.0,
+    }
+    params = defaults.copy()
+    params.update(threshold_params or {})
+
+    p = np.abs(E_tau) ** 2
+    p_mean = float(np.mean(p))
+    if p_mean < params["power_floor"]:
+        return 0
+
+    p_max = float(np.max(p))
+    contrast = p_max / p_mean
+    if contrast < params["contrast_cw"]:
+        return 1
+
+    n_tau = E_tau.shape[0]
+    spec = np.abs(np.fft.fft(E_tau)) ** 2
+    spec_norm = spec / max(float(np.sum(spec)), 1e-20)
+    entropy = -np.sum(spec_norm * np.log(spec_norm + 1e-20))
+    norm_entropy = float(entropy / np.log(n_tau))
+
+    peaks, _ = find_peaks(
+        p,
+        prominence=params["peak_prominence"] * p_max,
+        width=params["peak_width"],
+    )
+    n_peaks = int(peaks.size)
+
+    if contrast >= params["contrast_high"]:
+        if norm_entropy > params["entropy_chaotic"]:
+            return 3
+        if n_peaks >= 3:
+            spacings = np.diff(np.sort(peaks))
+            spacing_cv = float(spacings.std() / spacings.mean())
+            if spacing_cv < params["crystal_cv"]:
+                return 5
+            return 4
+        if n_peaks == 2:
+            return 4
+        if n_peaks <= 1:
+            x = np.arange(n_tau, dtype=float)
+
+            def sech2_model(x_vals, A, x0, w, B):
+                return A / np.cosh((x_vals - x0) / w) ** 2 + B
+
+            p0 = [p_max, float(np.argmax(p)), n_tau / 20.0, float(np.min(p))]
+            try:
+                popt, _ = curve_fit(sech2_model, x, p, p0=p0, maxfev=10000)
+            except Exception:
+                return 3
+
+            p_fit = sech2_model(x, *popt)
+            ss_res = float(np.sum((p - p_fit) ** 2))
+            ss_tot = float(np.sum((p - p_mean) ** 2))
+            r2 = 1.0 - ss_res / max(ss_tot, 1e-20)
+            if r2 >= params["sech2_r2"]:
+                return 6
+            return 3
+
+    if contrast < params["contrast_high"] and contrast >= params["contrast_cw"]:
+        return 2
+
+    return 0
+
+
+def label_trajectory(E_history, threshold_params=None) -> np.ndarray:
+    """Label all snapshots in a trajectory with the 7-class soliton scheme."""
+    defaults = {
+        "power_floor": 1e-6,
+        "contrast_cw": 2.0,
+        "contrast_high": 8.0,
+        "entropy_chaotic": 0.5,
+        "crystal_cv": 0.1,
+        "sech2_r2": 0.95,
+        "peak_prominence": 0.3,
+        "peak_width": 2.0,
+    }
+    params = defaults.copy()
+    params.update(threshold_params or {})
+
+    n_snapshots = E_history.shape[0]
+    labels = np.empty((n_snapshots,), dtype=np.int32)
+    for i in range(n_snapshots):
+        labels[i] = label_soliton_state(E_history[i], params)
+    return labels
