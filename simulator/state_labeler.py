@@ -190,7 +190,7 @@ def label_trajectory(E_history, threshold_params=None) -> np.ndarray:
     params = {**_DEFAULT_THRESHOLD_PARAMS, **(threshold_params or {})}
 
     n_snapshots = E_history.shape[0]
-    labels = np.empty((n_snapshots,), dtype=np.int32)
+    labels = np.zeros((n_snapshots,), dtype=np.int32)
     for i in range(n_snapshots):
         labels[i] = label_soliton_state(E_history[i], params)
     return labels
