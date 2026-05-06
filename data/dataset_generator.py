@@ -124,7 +124,7 @@ class DatasetGenerator:
         key_arr, noise_keys = self._make_keys(batch_global_idx=batch_global_idx, B=B)
 
         thermal = _thermal_params(self.config_path)
-        thermal["Gamma_th"] = gamma_th_arr
+        thermal["Gamma_th"] = gamma_th_scalar
         thermal["kappa_i"] = self.kappa_i
         thermal = {k: jnp.array(v, dtype=jnp.float32) for k, v in thermal.items()}
 
