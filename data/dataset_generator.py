@@ -142,8 +142,9 @@ class DatasetGenerator:
             "label_history": [],
             "E_snapshots": [],
         }
-        # Cold-start sentinel: all-zeros triggers CW+noise initialisation in solver
+        # Cold-start sentinels: all-zeros triggers CW+noise / zero thermal initialisation
         e_carry = jnp.zeros((B, self.n_tau), dtype=jnp.complex64)
+        delta_t_carry = jnp.zeros((B,), dtype=jnp.float32)
 
         total_segments = n_sweep_segments + 1
         for seg_idx in range(total_segments):
