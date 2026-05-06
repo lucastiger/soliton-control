@@ -211,11 +211,14 @@ def _single_trajectory_solver(
         jax.random.normal(subkey_r, (n_tau,)) + 1j * jax.random.normal(subkey_i, (n_tau,))
     ).astype(jnp.complex64)
 
-    e0 = jnp.where(
-        jnp.all(e0_override == 0.0),   # sentinel: all-zero means "cold start"
-        (e_cw + noise).astype(jnp.complex64),
-        e0_override.astype(jnp.complex64),
-    )
+    # Select warm-start vs cold-start without a scalar jnp.where on complex arrays.
+    # jnp.where with a scalar condition is unsafe for complex dtypes under jit/vmap:
+    # type promotion can silently drop the imaginary part.
+    # Instead, use a float mask broadcast elementwise over the n_tau dimension.
+    _is_cold = jnp.all(e0_override == 0.0).astype(jnp.float32)   # 1.0 = cold, 0.0 = warm
+    _cold = (e_cw + noise).astype(jnp.complex64)
+    _warm = e0_override.astype(jnp.complex64)
+    e0 = (_is_cold * _cold + (1.0 - _is_cold) * _warm).astype(jnp.complex64)
     
     delta_t0 = delta_t0_override.astype(jnp.float32)
     e_snapshots0 = jnp.zeros((n_snapshots, n_tau), dtype=jnp.complex64)
