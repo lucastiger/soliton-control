@@ -377,7 +377,9 @@ def solve_lle_ssfm_jax(
 
     noise_sequences = jax.vmap(_gen_noise)(noise_keys)   # (n_traj, t_slow)
     
-    e0_cold = jnp.zeros((delta_arr.shape[0], n_tau), dtype=jnp.complex64)
+    n_traj = delta_arr.shape[0]
+    e0_cold = jnp.zeros((n_traj, n_tau), dtype=jnp.complex64)
+    delta_t0_cold = jnp.zeros((n_traj,), dtype=jnp.float32)
     out = _PER_TRAJ(
         delta_arr,
         float(pin),
@@ -395,6 +397,7 @@ def solve_lle_ssfm_jax(
         _STATE_LABELER,
         noise_sequences,
         e0_cold,
+        delta_t0_cold,
     )
 
     return {k: np.asarray(v) for k, v in out.items()}
