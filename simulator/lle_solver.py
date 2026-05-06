@@ -217,7 +217,7 @@ def _single_trajectory_solver(
         e0_override.astype(jnp.complex64),
     )
     
-    delta_t0 = jnp.array(0.0, dtype=jnp.float32)
+    delta_t0 = delta_t0_override.astype(jnp.float32)
     e_snapshots0 = jnp.zeros((n_snapshots, n_tau), dtype=jnp.complex64)
     label_history0 = jnp.zeros((n_snapshots,), dtype=jnp.int32)
     snap_count0 = jnp.array(0, dtype=jnp.int32)
