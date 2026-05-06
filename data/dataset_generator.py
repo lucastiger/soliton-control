@@ -261,12 +261,16 @@ class DatasetGenerator:
             grouped_batches = []
             idx = resume_idx
             while idx < len(expanded):
-                sweep = expanded[idx]["sweep_rate"]
+                sweep   = expanded[idx]["sweep_rate"]
+                pin_val = expanded[idx]["pin"]
+                gth_val = expanded[idx]["Gamma_th"]
                 chunk = []
                 while (
                     idx < len(expanded)
                     and len(chunk) < self.batch_size
                     and expanded[idx]["sweep_rate"] == sweep
+                    and expanded[idx]["pin"]       == pin_val
+                    and expanded[idx]["Gamma_th"]  == gth_val
                 ):
                     chunk.append(expanded[idx])
                     idx += 1
