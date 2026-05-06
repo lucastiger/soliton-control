@@ -108,10 +108,17 @@ class DatasetGenerator:
             raise ValueError("All batch params must share the same sweep_rate")
 
         sweep_rate = sweep_rates.pop()
-        pin_arr = np.array([float(p["pin"]) for p in params], dtype=np.float32)
-        gamma_th_arr = jnp.array([float(p["Gamma_th"]) for p in params], dtype=jnp.float32)
-        noise_scale_arr = jnp.array([float(p["noise_scale"]) for p in params], dtype=jnp.float32)
+        pins = {float(p["pin"]) for p in params}
+        if len(pins) != 1:
+            raise ValueError("All batch params must share the same pin")
+        pin_scalar = pins.pop()
 
+        gamma_ths = {float(p["Gamma_th"]) for p in params}
+        if len(gamma_ths) != 1:
+            raise ValueError("All batch params must share the same Gamma_th")
+        gamma_th_scalar = gamma_ths.pop()
+
+        noise_scale_arr = jnp.array([float(p["noise_scale"]) for p in params], dtype=jnp.float32)
         n_sweep_segments = int(math.ceil(8.0 * self.kappa / (sweep_rate * self.SEGMENT_RT)))
 
         key_arr, noise_keys = self._make_keys(batch_global_idx=batch_global_idx, B=B)
