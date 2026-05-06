@@ -239,7 +239,7 @@ class DatasetGenerator:
         param_list = list(self.full_simulation_list)
         repeats = int(math.ceil(n_total / max(1, len(param_list))))
         expanded = (param_list * repeats)[:n_total]
-        expanded.sort(key=lambda x: x["sweep_rate"])
+        expanded.sort(key=lambda x: (x["sweep_rate"], x["pin"], x["Gamma_th"]))
 
         out_path = self.output_dir / "dataset.h5"
         with h5py.File(out_path, "a") as h5file:
