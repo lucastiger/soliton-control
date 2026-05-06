@@ -95,6 +95,10 @@ class DatasetGenerator:
         return key_arr, noise_keys
 
     def _forward_fill_labels(self, label_history: np.ndarray, t_total: int) -> np.ndarray:
+        # Each snapshot label is forward-filled for snapshot_interval round trips.
+        # At segment boundaries the last snapshot of a segment may cover fewer than
+        # snapshot_interval round trips, introducing a label lag of up to
+        # (snapshot_interval - 1) steps. Acceptable for training data.
         labels = np.repeat(label_history, self.snapshot_interval, axis=1)
         return labels[:, :t_total].astype(np.int32)
 
