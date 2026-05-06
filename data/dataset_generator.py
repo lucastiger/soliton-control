@@ -176,7 +176,10 @@ class DatasetGenerator:
                 thermal,
                 _STATE_LABELER,
                 noise_seqs,
+                e_carry,
             )
+            # Carry the final field snapshot forward as warm-start for the next segment
+            e_carry = jnp.array(out["E_snapshots"][:, -1, :], dtype=jnp.complex64)
 
             outputs["P_trans"].append(np.asarray(out["P_trans_history"], dtype=np.float32))
             outputs["U_int"].append(np.asarray(out["U_int_history"], dtype=np.float32))
