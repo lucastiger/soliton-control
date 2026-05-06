@@ -123,6 +123,7 @@ def _single_trajectory_solver(
     thermal: dict[str, float],
     state_labeler,
     noise_sequence: jnp.ndarray,   # shape (t_slow,), rad/s, AR(1) pre-generated
+    e0_override: jnp.ndarray | None = None,   # warm-start field, shape (n_tau,)
 ) -> dict[str, jnp.ndarray]:
     """Solve one detuning trajectory with SSFM + thermal Euler update."""
     omega = _build_omega_grid(n_tau, t_r)
