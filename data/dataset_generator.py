@@ -160,7 +160,7 @@ class DatasetGenerator:
 
             out = _PER_TRAJ(
                 delta_arr,
-                pin_arr,
+                float(pin_scalar),
                 int(t_seg),
                 tuple(self.beta),
                 float(self.gamma),
