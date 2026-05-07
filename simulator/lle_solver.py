@@ -265,7 +265,7 @@ def solve_lle_ssfm_jax(
     n_tau: int = 512,
     config_path: str | Path | None = None,
     l_eff: float = 1.0,
-    snapshot_interval: int = 100,
+    snapshot_interval: int = 10,
 ) -> dict[str, np.ndarray]:
     """Batch-capable SSFM solver for the generalized LLE using JAX.
 
