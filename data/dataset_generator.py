@@ -117,6 +117,17 @@ class DatasetGenerator:
             raise ValueError("All batch params must share the same pin")
         pin_scalar = pins.pop()
 
+        kappa_approx = self.kappa
+        step_size = sweep_rate * self.SEGMENT_RT
+        if step_size > 0.5 * kappa_approx:
+            import warnings
+            warnings.warn(
+                f"sweep_rate={sweep_rate:.2e} rad/s/RT gives step_size={step_size:.2e} rad/s "
+                f"= {step_size/kappa_approx:.1f} κ. Steps > 0.5κ will miss the soliton existence "
+                f"range. Trajectories will be all-CW or off. Reduce sweep_rate.",
+                stacklevel=2,
+            )
+
         gamma_ths = {float(p["Gamma_th"]) for p in params}
         if len(gamma_ths) != 1:
             raise ValueError("All batch params must share the same Gamma_th")
