@@ -40,7 +40,7 @@ class DatasetGenerator:
         output_dir: str | Path = "data/synthetic",
         batch_size: int = 64,
         n_tau: int = 512,
-        snapshot_interval: int = 100,
+        snapshot_interval: int = 10,
         seed: int = 42,
     ):
         self.param_grid = param_grid
