@@ -380,7 +380,10 @@ def generate_full_dataset(
     if param_grid is None:
         param_grid = {
             "pin": [0.7, 1.0, 1.5, 2.0, 3.0],
-            "sweep_rate": [1e4, 1e5, 5e5, 1e6, 5e6, 1e7],
+            # FIXED: rates in rad/s per round trip, matching 0.003–0.3 GHz/µs physical range.
+            # Maximum safe rate: step_size = sweep_rate × SEGMENT_RT < 0.5 κ.
+            # With κ ≈ 1.215e8 and SEGMENT_RT = 500: max ≈ 1.2e5.
+            "sweep_rate": [3e2, 1e3, 5e3, 1e4, 5e4, 1e5],
             "Gamma_th": [0.05, 0.1, 0.2],
             "noise_scale": [0.5, 1.0, 2.0],
         }
