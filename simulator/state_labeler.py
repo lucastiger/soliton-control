@@ -197,3 +197,19 @@ def label_trajectory(E_history, threshold_params=None) -> np.ndarray:
     for i in range(n_snapshots):
         labels[i] = label_soliton_state(E_history[i], params)
     return labels
+
+
+def assert_labelers_consistent(e_field: np.ndarray, atol: float = 0.0) -> None:
+    """Verify JAX and NumPy labelers agree on a test field.
+    
+    Run this during dataset generation to catch labeler drift early.
+    Raises AssertionError if the two labelers disagree.
+    """
+    jax_labeler = make_state_labeler()
+    jax_label = int(jax_labeler(jnp.array(e_field, dtype=jnp.complex64)))
+    np_label = int(label_soliton_state(e_field, threshold_params={"peak_prominence": 0.30}))
+    assert jax_label == np_label, (
+        f"Labeler inconsistency: JAX={jax_label}, NumPy={np_label} for field with "
+        f"max_power={float(np.max(np.abs(e_field)**2)):.3e}, "
+        f"contrast={float(np.max(np.abs(e_field)**2)/np.mean(np.abs(e_field)**2)):.1f}"
+    )
