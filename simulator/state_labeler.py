@@ -41,11 +41,15 @@ def make_state_labeler():
 
         # number of peaks: count points above 50% of max with positive->negative
         # zero-crossings of the gradient (proxy for peak count, JAX-traceable)
-        grad = jnp.diff(p, append=p[:1])          # length n_tau
-        peak_mask = (grad > 0) & (jnp.roll(grad, -1) <= 0)
-        sign_changes = jnp.sum(
-            (grad > 0) & (jnp.roll(grad, -1) <= 0)
-        ).astype(jnp.float32)
+        # Fixed: only count peaks whose amplitude exceeds 30% of the field maximum.
+        # Without this threshold, dispersive-wave tails and FFT ringing on the 512-point
+        # grid produce O(10–50) spurious peaks in single-soliton states, making
+        # sign_changes >> 1 and systematically mislabeling single solitons as multi-soliton.
+        PEAK_AMP_THRESHOLD = 0.30   # fraction of p_max; matches label_soliton_state prominence
+        grad = jnp.diff(p, append=p[:1])          # circular gradient, length n_tau
+        _is_local_max = (grad > 0) & (jnp.roll(grad, -1) <= 0)
+        peak_mask = _is_local_max & (p > PEAK_AMP_THRESHOLD * p_max)
+        sign_changes = jnp.sum(peak_mask).astype(jnp.float32)
 
         # --- decision tree (all jnp.where for JAX traceability) ---
         is_off     = total_power < 1e-6
