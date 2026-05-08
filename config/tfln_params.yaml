@@ -1,7 +1,7 @@
 physical_parameters:
   fsr_hz: 2.0e11                    # 200 GHz
-  intrinsic_q: 1.0e7                # was 2.0e6
-  coupling_q: 1.0e7
+  intrinsic_q: 1.0e9                # was 1.0e7
+  coupling_q: 1.0e9
   n2_m2_per_w: 1.8e-19
   effective_mode_area_m2: 5.0e-13   # 0.5 µm² — satisfies N_s_eq >> 1 with n_s=2e11
   d2_rad_per_s2: 1.2566370614e7     # 2π × 2 MHz
