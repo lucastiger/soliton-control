@@ -51,6 +51,17 @@ def make_state_labeler():
         peak_mask = _is_local_max & (p > PEAK_AMP_THRESHOLD * p_max)
         sign_changes = jnp.sum(peak_mask).astype(jnp.float32)
 
+        # Sharpness proxy: fraction of total power contained in the top-N_peak points.
+        # A true sech² soliton concentrates ~80% of power in ~N_tau/16 ≈ 32 points.
+        # A broad chaotic hump spreads power across many points → low sharpness.
+        # This replaces the scipy sech²-fit that cannot run inside jax.lax.scan.
+        N_peak_pts = n_tau // 16                            # 32 for n_tau=512
+        p_sorted = jnp.sort(p)[::-1]                        # descending
+        power_in_top = jnp.sum(p_sorted[:N_peak_pts])
+        sharpness = power_in_top / jnp.maximum(total_power, 1e-20)
+        IS_SHARP_THRESHOLD = 0.75                           # empirical; validate against NumPy labeler
+
+
         # --- decision tree (all jnp.where for JAX traceability) ---
         is_off     = total_power < 1e-6
         is_cw      = contrast < 2.0
@@ -97,7 +108,12 @@ def make_state_labeler():
         )
         
         # single soliton: high contrast, ordered spectrum, single peak
-        is_single  = (contrast >= 8.0) & (norm_entropy <= 0.5) & (sign_changes <= 1.5)
+        # Update is_single to require sharpness (avoids labeling broad chaotic humps as solitons)
+        is_single = (
+            (contrast >= 8.0) & (norm_entropy <= 0.5)
+            & (sign_changes <= 1.5)
+            & (sharpness >= IS_SHARP_THRESHOLD)
+        )
 
         label = jnp.where(is_off,     0,
                 jnp.where(is_cw,      1,
