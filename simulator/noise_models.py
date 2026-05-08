@@ -143,9 +143,9 @@ class TCCRNoise:
         E_per_carrier = e_charge / (eps0 * eps_r_eff * A_eff)   # V/m per carrier
         dw_dNs = -self.omega_0 * n0**2 * r33 * E_per_carrier / 2.0   # rad/s per carrier  ← NO t_ln
 
-        # One-sided TCCR PSD at f=0: S0 = (dω/dNs)² · N_s_eq · 2·τ_carrier
+        # Two-sided TCCR PSD at f=0: S0 = (dω/dNs)² · N_s_eq · 2·τ_carrier
         self.s0_tccr    = dw_dNs**2 * N_s_eq * 2.0 * self.tau_carrier        # (rad/s)²/Hz ✓
-        self.var_tccr   = self.s0_tccr / (4.0 * self.tau_carrier)             # stationary variance
+        self.var_tccr   = self.s0_tccr / (2.0 * self.tau_carrier)             # stationary variance
         self.sigma_tccr = math.sqrt(max(self.var_tccr, 0.0))
 
         # Sanity: sigma_tccr should be in range [1e4, 1e11] rad/s for TFLN
