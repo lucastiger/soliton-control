@@ -197,7 +197,7 @@ class DatasetGenerator:
                 delta_t_carry,
             )
             # Carry field and thermal state forward across segment boundary
-            e_carry = jnp.array(out["E_snapshots"][:, -1, :], dtype=jnp.complex64)
+            e_carry = jnp.array(out["e_final"], dtype=jnp.complex64)
             delta_t_carry = jnp.array(out["delta_t_final"], dtype=jnp.float32)
 
             outputs["P_trans"].append(np.asarray(out["P_trans_history"], dtype=np.float32))
