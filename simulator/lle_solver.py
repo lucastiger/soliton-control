@@ -235,7 +235,7 @@ def _single_trajectory_solver(
         xs=jnp.arange(t_slow),
         length=t_slow,
     )
-    _, delta_t_final, e_snapshots, label_history, _ = final_carry
+    e_final, delta_t_final, e_snapshots, label_history, _ = final_carry
 
     return {
         "E_snapshots": e_snapshots,
@@ -245,6 +245,7 @@ def _single_trajectory_solver(
         "DeltaT_history": hist["DeltaT"],
         "delta_omega_eff_history": hist["delta_omega_eff"],
         "delta_t_final": delta_t_final,
+        "e_final": e_final,           # ← exact field at step t_slow-1
     }
 
 
