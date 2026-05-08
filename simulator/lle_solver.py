@@ -206,7 +206,7 @@ def _single_trajectory_solver(
         }
         return (e_next, delta_t_next, e_snapshots, label_history, next_snap_count), out
         
-    e_cw = jnp.sqrt(kappa_c * pin / ((kappa / 2) ** 2 + delta_omega**2)) * jnp.ones(
+    e_cw = jnp.sqrt(kappa_c * pin / ((kappa / 2) ** 2 + delta_omega[0]**2)) * jnp.ones(
         n_tau, dtype=jnp.complex64
     )
 
