@@ -52,6 +52,7 @@ class DatasetGenerator:
         self.n_tau = int(n_tau)
         self.snapshot_interval = int(snapshot_interval)
         self.base_key = jax.random.PRNGKey(seed)
+        self.seed = seed
 
         self.config = _load_config(self.config_path)
         self.fsr_hz = float(self.config["fsr_hz"])
