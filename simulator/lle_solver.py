@@ -168,7 +168,11 @@ def _single_trajectory_solver(
         # This is independent of the coupling geometry and holds for CW, MI,
         # single-soliton, and multi-soliton states identically.
         u_int = jnp.sum(jnp.abs(e_next) ** 2) * (t_r / n_tau)   # J
-        p_trans = pin - kappa_i * u_int / t_r                       # W
+        
+        #clip to [0, pin]. Physical P_trans is non-negative.
+        # The energy-balance formula underestimates P_trans during transients when
+        # dU_int/dt > 0 (cavity filling). Clip to remove unphysical artifacts.
+        p_trans = jnp.clip(pin - kappa_i * u_int / t_r, 0.0, pin)            #W
 
         p_abs = kappa_i * u_int
 
