@@ -211,7 +211,11 @@ def _single_trajectory_solver(
     )
 
     key, subkey_r, subkey_i = jax.random.split(rng_key, 3)
-    noise = 1e-4 * (
+    # Scale noise to 0.1% of the CW amplitude at the starting detuning.
+    # The former absolute level 1e-4 is ~8× larger than |e_cw| at δω = +4κ
+    # (|e_cw| ≈ 1.24e-5), so U_int is noise-dominated at t=0, clipping
+    # P_trans to zero for the first ~566 round trips of every trajectory.
+    noise = 1e-3 * jnp.abs(e_cw[0]) * (
         jax.random.normal(subkey_r, (n_tau,)) + 1j * jax.random.normal(subkey_i, (n_tau,))
     ).astype(jnp.complex64)
 
