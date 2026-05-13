@@ -11,7 +11,7 @@ physical_parameters:
   # ω₀ = 2π·c/λ = 2π·299792458/1.55e-6 ≈ 1.215e15 rad/s
   # κ_i = ω₀/Q_i = 1.215e15 / 1e7 = 1.215e8 rad/s
   kappa_i_rad_per_s: 1.215e8
-  pyroelectric_coeff_c_per_m2_k: 9.6e-2
+  pyroelectric_coeff_c_per_m2_k: 9.6e-5
   eo_r33_m_per_v: 3.1e-11
   surface_state_density_per_m2: 2.0e11  # N_s_eq = n_s * A_eff = 0.1 (sub-Poisson regime);
                                           # chosen so sigma_tccr/kappa ≈ 0.11 (perturbative).
