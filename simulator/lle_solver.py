@@ -206,7 +206,13 @@ def _single_trajectory_solver(
         }
         return (e_next, delta_t_next, e_snapshots, label_history, next_snap_count), out
         
-    e_cw = jnp.sqrt(kappa_c * pin / ((kappa / 2) ** 2 + delta_omega[0]**2)) * jnp.ones(
+    # CW steady state: e_ss = sqrt(κ_c·P_in) / (κ/2 + i·δω)
+    # = sqrt(κ_c·P_in) · (κ/2 - i·δω) / ((κ/2)² + δω²)
+    # Starting with only the real part (old code) produces an 83° phase error
+    # at δω = +4κ, causing ~50 ns of spurious Rabi oscillations.
+    _amp = jnp.sqrt(jnp.maximum(kappa_c * pin, 0.0))
+    _d2  = (kappa / 2.0) ** 2 + delta_omega[0] ** 2
+    e_cw = (_amp * (kappa / 2.0) / _d2 + 1j * (-_amp * delta_omega[0] / _d2)) * jnp.ones(
         n_tau, dtype=jnp.complex64
     )
 
