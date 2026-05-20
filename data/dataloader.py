@@ -79,6 +79,7 @@ class SolitonDataset(Dataset):
                 [k for k in h5file.keys() if k.startswith("sim_")],
                 key=lambda k: int(k.split("_")[1]),
             )
+            self._traj_keys = traj_keys
             n_traj = len(traj_keys)
             split_indices = _get_split_indices(n_traj=n_traj, random_state=self.random_state)
             self._local_to_global = split_indices[self.split]
@@ -185,7 +186,7 @@ class SolitonDataset(Dataset):
         else:
             if self._h5file is None:
                 self._h5file = h5py.File(self._h5_path, "r")
-            key = f"sim_{self._local_to_global[local_traj_idx]}"
+            key = self._traj_keys[self._local_to_global[local_traj_idx]]
             grp = self._h5file[key]
             p_trans = grp["P_trans"]
             delta_omega_eff = grp["delta_omega_eff"]
