@@ -102,7 +102,7 @@ class SolitonDataset(Dataset):
                 labels = grp["labels"][:]
                 self._traj_lengths[local_idx] = T
     
-                p0 = float(grp["P_trans"][:20].mean())
+                p0 = float(grp["P_trans"][labels == 1].mean())
                 if p0 < 1e-12:
                     p0 = float(grp["P_trans"][:].mean())
                 if p0 < 1e-12:
