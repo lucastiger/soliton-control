@@ -135,10 +135,7 @@ class SolitonDataset(Dataset):
             ).astype(np.float32, copy=False)
 
             if self.preload:
-                total_bytes = 0
-                for key in split_keys:
-                    T = h5file[key]["P_trans"].shape[0]
-                    total_bytes += T * 5 * 4
+                total_bytes = int(self._traj_lengths.sum()) * 5 * 4
                 if total_bytes > self.max_ram_gb * 1e9:
                     raise RuntimeError(
                         f"Preload would require {total_bytes/1e9:.1f} GB, exceeding limit of {self.max_ram_gb} GB."
