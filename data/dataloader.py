@@ -102,13 +102,24 @@ class SolitonDataset(Dataset):
                 labels = grp["labels"][:]
                 self._traj_lengths[local_idx] = T
     
-                p0 = float(grp["P_trans"][labels == 1].mean())
-                if p0 < 1e-12:
-                    p0 = float(grp["P_trans"][:].mean())
-                if T < 500:
-                    p0 = float(grp["P_trans"][:].mean())
-                if p0 < 1e-12:
+                # Load only the first min(T, 500) round trips for P0 estimation.
+                # The trajectory always starts blue-detuned (delta = +3*kappa), so
+                # this window is guaranteed to be in the sub-threshold / CW regime.
+                # We skip the first 200 RT to avoid the cavity field ring-up transient
+                # (~1/kappa * FSR ≈ 160 RT at 200 GHz FSR, kappa ≈ 1.214e9 rad/s).
+                n_init = min(T, 500)
+                p_trans_init = np.asarray(grp["P_trans"][:n_init], dtype=np.float32)
+                labels_init = labels[:n_init]
+                cw_vals = p_trans_init[labels_init == 1]
+                if len(cw_vals) > 0:
+                    p0 = float(cw_vals.mean())
+                elif n_init >= 500:
+                    p0 = float(p_trans_init[200:].mean())  # skip ring-up, still in blue-detuned regime
+                else:
+                    p0 = float(p_trans_init.mean())
+                if not math.isfinite(p0) or p0 < 1e-12:
                     p0 = 1.0
+                    
                 self._P0[local_idx] = np.float32(p0)
 
                 pins[local_idx] = np.float32(float(grp.attrs["pin"]))
