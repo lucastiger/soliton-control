@@ -105,6 +105,8 @@ class SolitonDataset(Dataset):
                 p0 = float(grp["P_trans"][labels == 1].mean())
                 if p0 < 1e-12:
                     p0 = float(grp["P_trans"][:].mean())
+                if T < 500:
+                    p0 = float(grp["P_trans"][:].mean())
                 if p0 < 1e-12:
                     p0 = 1.0
                 self._P0[local_idx] = np.float32(p0)
