@@ -98,14 +98,13 @@ class SolitonDataset(Dataset):
 
             for local_idx, key in enumerate(split_keys):
                 grp = h5file[key]
-                p_trans = grp["P_trans"][:]
+                T = grp["P_trans"].shape[0]
                 labels = grp["labels"][:]
-                T = p_trans.shape[0]
                 self._traj_lengths[local_idx] = T
-
-                p0 = float(p_trans[:20].mean())
+    
+                p0 = float(grp["P_trans"][:20].mean())
                 if p0 < 1e-12:
-                    p0 = float(p_trans.mean())
+                    p0 = float(grp["P_trans"][:].mean())
                 if p0 < 1e-12:
                     p0 = 1.0
                 self._P0[local_idx] = np.float32(p0)
