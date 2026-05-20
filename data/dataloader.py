@@ -109,12 +109,16 @@ class SolitonDataset(Dataset):
                 # (~1/kappa * FSR ≈ 160 RT at 200 GHz FSR, kappa ≈ 1.214e9 rad/s).
                 n_init = min(T, 500)
                 p_trans_init = np.asarray(grp["P_trans"][:n_init], dtype=np.float32)
-                labels_init = labels[:n_init]
-                cw_vals = p_trans_init[labels_init == 1]
+                
+                # Skip the first 200 RT in all branches to avoid the cavity field
+                # ring-up transient (~160 RT at 200 GHz FSR, kappa ≈ 1.214e9 rad/s).
+                ringup = min(200, n_init)
+                labels_init = labels[ringup:n_init]
+                cw_vals = p_trans_init[ringup:][labels_init == 1]
                 if len(cw_vals) > 0:
                     p0 = float(cw_vals.mean())
-                elif n_init >= 500:
-                    p0 = float(p_trans_init[200:].mean())  # skip ring-up, still in blue-detuned regime
+                elif n_init > ringup:
+                    p0 = float(p_trans_init[ringup:].mean())
                 else:
                     p0 = float(p_trans_init.mean())
                 if not math.isfinite(p0) or p0 < 1e-12:
