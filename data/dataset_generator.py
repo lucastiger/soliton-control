@@ -271,7 +271,7 @@ class DatasetGenerator:
         repeats = int(math.ceil(n_total / max(1, len(param_list))))
         
         import random as _random
-        _rng = _random.Random(seed)
+        _rng = _random.Random(self.seed)
         _rng.shuffle(param_list)        # in-place shuffle before repeating
         
         expanded = (param_list * repeats)[:n_total]
