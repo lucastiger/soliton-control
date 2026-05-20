@@ -122,7 +122,7 @@ def make_state_labeler():
                 jnp.where(is_multi,   4,
                 jnp.where(is_crystal, 5,
                 jnp.where(is_single,  6,
-                                      6)))))))
+                                      3)))))))
 
         return label.astype(jnp.int32)
 
