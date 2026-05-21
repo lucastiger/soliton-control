@@ -270,6 +270,18 @@ class DatasetGenerator:
         param_list = list(self.full_simulation_list)
         repeats = int(math.ceil(n_total / max(1, len(param_list))))
         expanded = (param_list * repeats)[:n_total]
+        
+        # Keep deterministic ordering while grouping by sweep_rate to minimize
+        # JAX re-tracing for different sweep structures.
+        expanded = sorted(
+            expanded,
+            key=lambda x: (
+                x["sweep_rate"],
+                x["pin"],
+                x["Gamma_th"],
+                x["noise_scale"],
+            ),
+        )
 
         out_path = self.output_dir / "dataset.h5"
         with h5py.File(out_path, "a") as h5file:
