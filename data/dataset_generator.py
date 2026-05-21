@@ -269,11 +269,6 @@ class DatasetGenerator:
     def generate_full_dataset(self, n_total: int = 45_000) -> None:
         param_list = list(self.full_simulation_list)
         repeats = int(math.ceil(n_total / max(1, len(param_list))))
-        
-        import random as _random
-        _rng = _random.Random(self.seed)
-        _rng.shuffle(param_list)        # in-place shuffle before repeating
-        
         expanded = (param_list * repeats)[:n_total]
 
         out_path = self.output_dir / "dataset.h5"
