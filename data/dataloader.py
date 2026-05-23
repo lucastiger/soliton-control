@@ -12,6 +12,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from simulator.lle_solver import _load_config
+
 STATE_NAMES: dict[int, str] = {
     0: "off",
     1: "CW",
