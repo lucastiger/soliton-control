@@ -256,7 +256,8 @@ def get_dataloaders(
     W: int = 200,
     H: int = 50,
     stride: int = 10,
-    Q_i: float = 2e6,
+    config_path: str | Path | None = None,
+    Q_i: float = 1e7,
     FSR: float = 200e9,
     batch_size: int = 512,
     num_workers: int = 4,
@@ -265,19 +266,19 @@ def get_dataloaders(
     random_state: int = 42,
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     """Returns (train_loader, val_loader, test_loader)."""
+    kappa = 2.0 * float(_load_config(config_path)["kappa_i_rad_per_s"])
     common_kwargs: dict[str, Any] = {
         "h5_path": h5_path,
         "W": W,
         "H": H,
         "stride": stride,
+        "kappa": kappa,
         "Q_i": Q_i,
         "FSR": FSR,
         "preload": preload,
         "max_ram_gb": max_ram_gb,
         "random_state": random_state,
     }
-
-    kappa = 2.0 * float(_load_config(config_path)["kappa_i_rad_per_s"])
 
     train_ds = SolitonDataset(split="train", **common_kwargs)
     val_ds = SolitonDataset(split="val", **common_kwargs)
