@@ -47,9 +47,7 @@ class SolitonDataset(Dataset):
         W: int = 200,
         H: int = 50,
         stride: int = 10,
-        kappa: float = 2.43e8,
-        Q_i: float = 1e7,
-        FSR: float = 200e9,
+        config_path: str | Path | None = None,
         preload: bool = False,
         max_ram_gb: float = 16.0,
         random_state: int = 42,
@@ -59,12 +57,16 @@ class SolitonDataset(Dataset):
         self.W = W
         self.H = H
         self.stride = stride
-        self.kappa = float(kappa)
-        self.Q_i = float(Q_i)
-        self.FSR = float(FSR)
         self.preload = preload
         self.max_ram_gb = float(max_ram_gb)
         self.random_state = random_state
+
+        _cfg = _load_config(config_path)
+        kappa_i = float(_cfg["kappa_i_rad_per_s"])
+        self.kappa = 2.0 * kappa_i
+        omega0 = 2.0 * math.pi * 299_792_458.0 / float(_cfg["pump_wavelength_m"])
+        self.Q_i = float(_cfg.get("intrinsic_q", omega0 / kappa_i))
+        self.FSR = float(_cfg["fsr_hz"])
 
         if self.split not in {"train", "val", "test"}:
             raise ValueError("split must be one of {'train', 'val', 'test'}.")
@@ -257,8 +259,6 @@ def get_dataloaders(
     H: int = 50,
     stride: int = 10,
     config_path: str | Path | None = None,
-    Q_i: float = 1e7,
-    FSR: float = 200e9,
     batch_size: int = 512,
     num_workers: int = 4,
     preload: bool = False,
@@ -266,15 +266,12 @@ def get_dataloaders(
     random_state: int = 42,
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     """Returns (train_loader, val_loader, test_loader)."""
-    kappa = 2.0 * float(_load_config(config_path)["kappa_i_rad_per_s"])
     common_kwargs: dict[str, Any] = {
         "h5_path": h5_path,
         "W": W,
         "H": H,
         "stride": stride,
-        "kappa": kappa,
-        "Q_i": Q_i,
-        "FSR": FSR,
+        "config_path": config_path,
         "preload": preload,
         "max_ram_gb": max_ram_gb,
         "random_state": random_state,
