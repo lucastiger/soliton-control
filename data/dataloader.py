@@ -108,7 +108,7 @@ class SolitonDataset(Dataset):
                 # The trajectory always starts blue-detuned (delta = +3*kappa), so
                 # this window is guaranteed to be in the sub-threshold / CW regime.
                 # We skip the first 200 RT to avoid the cavity field ring-up transient
-                # (~1/kappa * FSR ≈ 160 RT at 200 GHz FSR, kappa ≈ 1.214e9 rad/s).
+                # (~1/kappa * FSR ≈ 160 RT at 200 GHz FSR, kappa ≈ 2.43e8 rad/s).
                 n_init = min(T, 500)
                 p_trans_init = np.asarray(grp["P_trans"][:n_init], dtype=np.float32)
                 
