@@ -113,7 +113,7 @@ class SolitonDataset(Dataset):
                 p_trans_init = np.asarray(grp["P_trans"][:n_init], dtype=np.float32)
                 
                 # Skip the first 200 RT in all branches to avoid the cavity field
-                # ring-up transient (~160 RT at 200 GHz FSR, kappa ≈ 1.214e9 rad/s).
+                # ring-up transient (~160 RT at 200 GHz FSR, kappa ≈ 2.43e8 rad/s).
                 ringup = min(200, n_init)
                 labels_init = labels[ringup:n_init]
                 cw_vals = p_trans_init[ringup:][labels_init == 1]
