@@ -374,8 +374,10 @@ if __name__ == "__main__":
     assert out_ctrl["act_logits"].shape == (8, config.n_states)
 
     out_ctrl["act_logits"].mean().backward()
-    assert delta_cmd.grad is not None
-    print("delta_cmd.grad.norm:", delta_cmd.grad.norm().item())
+    assert delta_cmd.grad is not None, "delta_cmd.grad is None: gradient not reaching action input"
+    grad_norm = delta_cmd.grad.norm().item()
+    assert grad_norm > 0.0, f"delta_cmd.grad norm is zero ({grad_norm}): action gradient path is broken"
+    print("delta_cmd.grad.norm:", grad_norm)
 
     assert all(not p.requires_grad for p in controller.observer.parameters())
 
