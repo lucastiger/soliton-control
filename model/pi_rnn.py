@@ -244,6 +244,12 @@ class PIRNNController(nn.Module):
         self.observer.train(not frozen)
         self._observer_frozen = frozen
 
+  def train(self, mode: bool = True) -> "PIRNNController":
+    super().train(mode)
+    if self._observer_frozen:
+        self.observer.eval()
+    return self
+
     def forward(
         self,
         x: torch.Tensor,
