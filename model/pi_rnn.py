@@ -127,8 +127,8 @@ class PIRNNObserver(nn.Module):
             self.config.gru_layers - 1,
             x.size(0),
             self.config.gru_hidden,
-            device=x.device,
-            dtype=x.dtype,
+            device=h0_layer0.device,
+            dtype=h0_layer0.dtype,
         )
         h0 = torch.cat([h0_layer0, h0_zeros], dim=0)
 
