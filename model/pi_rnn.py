@@ -28,6 +28,7 @@ STATE_INDICES: dict[str, int] = {
     "single_soliton": 6,
 }
 SINGLE_SOLITON_IDX: int = STATE_INDICES["single_soliton"]
+"""Canonical index for single-soliton state. Imported by mpc/ and data/ modules; do not remove."""
 
 
 @dataclass
