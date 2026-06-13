@@ -180,8 +180,8 @@ class PIRNNObserver(nn.Module):
         if verbose:
             print("submodule_name | param_count")
             print("-" * 32)
-            for name, module in self.observer.named_children():
-                count = sum(p.numel() for p in module.parameters())
+            for name, module in self.named_children():
+                count = sum(p.numel() for p in module.parameters() if p.requires_grad)
                 print(f"{name:<16} | {count}")
             print("-" * 32)
             print(f"{'TOTAL':<16} | {total}")
