@@ -264,6 +264,9 @@ class PIRNNController(nn.Module):
         assert target_state.ndim == 1 and target_state.dtype == torch.long, (
             f"target_state must be 1D torch.long, got ndim={target_state.ndim}, dtype={target_state.dtype}"
         )
+        assert target_state.ge(0).all() and target_state.lt(self.config.n_states).all(), (
+            f"target_state values must be in [0, {self.config.n_states}), got min={target_state.min()}, max={target_state.max()}"
+        )
         assert delta_cmd.size(0) == target_state.size(0) == x.size(0)
 
         if self._observer_frozen:
