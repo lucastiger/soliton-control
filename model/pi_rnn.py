@@ -315,7 +315,7 @@ class PIRNNController(nn.Module):
         return torch.softmax(self.forward(x, context, delta_cmd, target_state)["act_logits"], dim=-1)
 
     def count_parameters(self, verbose: bool = True) -> int:
-        observer_total = sum(p.numel() for p in self.observer.parameters() if p.requires_grad)
+        observer_total = sum(p.numel() for p in self.observer.parameters())
         controller_total = sum(
             p.numel() for n, p in self.named_parameters() if not n.startswith("observer.") and p.requires_grad
         )
