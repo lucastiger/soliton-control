@@ -328,7 +328,7 @@ class PIRNNController(nn.Module):
             print("submodule_name | param_count")
             print("-" * 32)
             for name, module in self.observer.named_children():
-                count = sum(p.numel() for p in module.parameters() if p.requires_grad)
+                count = sum(p.numel() for p in module.parameters())
                 print(f"{name:<16} | {count}")
             print(f"{'OBSERVER TOTAL':<16} | {observer_total}")
             print()
