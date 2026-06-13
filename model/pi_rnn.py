@@ -261,7 +261,9 @@ class PIRNNController(nn.Module):
             raise ValueError("x, context, delta_cmd, and target_state are all required")
 
         assert delta_cmd.ndim == 2 and delta_cmd.size(1) == 1
-        assert target_state.ndim == 1
+        assert target_state.ndim == 1 and target_state.dtype == torch.long, (
+            f"target_state must be 1D torch.long, got ndim={target_state.ndim}, dtype={target_state.dtype}"
+        )
         assert delta_cmd.size(0) == target_state.size(0) == x.size(0)
 
         if self._observer_frozen:
