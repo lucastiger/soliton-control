@@ -241,16 +241,18 @@ class PIRNNObserver(nn.Module):
         return torch.softmax(self.forward(x, context)["logits"], dim=-1)
 
     def count_parameters(self, verbose: bool = True) -> int:
-        total = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in self.parameters())
         if verbose:
-            print("submodule_name | param_count")
-            print("-" * 32)
+            print(f"{'submodule_name':<16} | {'total':>10} | {'trainable':>10}")
+            print("-" * 44)
             for name, module in self.named_children():
-                count = sum(p.numel() for p in module.parameters() if p.requires_grad)
-                print(f"{name:<16} | {count}")
-            print("-" * 32)
-            print(f"{'TOTAL':<16} | {total}")
-        return int(total)
+                module_total = sum(p.numel() for p in module.parameters())
+                module_trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
+                print(f"{name:<16} | {module_total:>10} | {module_trainable:>10}")
+            print("-" * 44)
+            print(f"{'TOTAL':<16} | {total:>10} | {trainable:>10}")
+        return int(trainable)
 
 
 class PIRNNController(nn.Module):
@@ -321,10 +323,10 @@ class PIRNNController(nn.Module):
         self._observer_frozen = frozen
 
     def train(self, mode: bool = True) -> "PIRNNController":
-      super().train(mode)
-      if self._observer_frozen:
-          self.observer.eval()
-      return self
+        super().train(mode)
+        if self._observer_frozen:
+            self.observer.eval()
+        return self
 
     def forward(
         self,
