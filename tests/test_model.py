@@ -19,7 +19,9 @@ from model.pi_rnn import SINGLE_SOLITON_IDX, ModelConfig, PIRNNObserver
 from model.train import (
     ClassMetricAccumulator,
     Trainer,
+    _read_snapshot_interval,
     assemble_observer_targets,
+    assert_matching_snapshot_interval,
     build_optimizer,
     build_scaler,
     build_scheduler,
@@ -218,7 +220,13 @@ def test_build_scaler_clamp_is_float_and_rescales():
 # 7. Phase-2 guard
 # --------------------------------------------------------------------------- #
 def test_phase2_controller_guard_raises():
-    cfg = SimpleNamespace(phase2_controller=SimpleNamespace(switching_h5_path=None))
+    # train_controller now reads cfg.data.h5_path for the snapshot-interval guard before the
+    # NotImplementedError gate; with no switching dataset the guard is inert (both intervals
+    # unreadable -> None) and the gate still fires.
+    cfg = SimpleNamespace(
+        data=SimpleNamespace(h5_path="/does/not/exist.h5"),
+        phase2_controller=SimpleNamespace(switching_h5_path=None),
+    )
     with pytest.raises(NotImplementedError):
         train_controller(cfg, DEVICE)
 
@@ -336,3 +344,79 @@ def test_frac_logvar_pinned_saturated_and_normal():
         out2 = normal(batch["x"], batch["context"])
     d2 = collapse_diagnostics(out2, logvar_max=mcfg.logvar_max)
     assert 0.0 <= d2["frac_logvar_pinned"] <= 1.0
+
+
+# --------------------------------------------------------------------------- #
+# 11. _read_snapshot_interval: single read path (present / missing file / no attr)
+# --------------------------------------------------------------------------- #
+def _write_snapshot_interval(path, value: int) -> None:
+    with h5py.File(path, "w") as f:
+        f.create_group("metadata").attrs["snapshot_interval"] = value
+
+
+def test_read_snapshot_interval_present(tmp_path):
+    path = tmp_path / "with_si.h5"
+    _write_snapshot_interval(path, 10)
+    si = _read_snapshot_interval(str(path))
+    assert si == 10
+    assert isinstance(si, int)
+
+
+def test_read_snapshot_interval_missing_file(tmp_path):
+    assert _read_snapshot_interval(str(tmp_path / "nope.h5")) is None
+
+
+def test_read_snapshot_interval_no_attr(tmp_path):
+    # File present but no metadata['snapshot_interval'] attr (older dataset) -> None, no raise.
+    path = tmp_path / "no_attr.h5"
+    with h5py.File(path, "w") as f:
+        f.create_group("sim_0")
+    assert _read_snapshot_interval(str(path)) is None
+
+
+# --------------------------------------------------------------------------- #
+# 12. assert_matching_snapshot_interval: matching ok; mismatch raises; None -> silent
+# --------------------------------------------------------------------------- #
+def test_assert_matching_snapshot_interval_equal(tmp_path):
+    a, b = tmp_path / "a.h5", tmp_path / "b.h5"
+    _write_snapshot_interval(a, 10)
+    _write_snapshot_interval(b, 10)
+    assert_matching_snapshot_interval(str(a), str(b))  # (10, 10) -> no raise
+
+
+def test_assert_matching_snapshot_interval_mismatch(tmp_path):
+    a, b = tmp_path / "a.h5", tmp_path / "b.h5"
+    _write_snapshot_interval(a, 10)
+    _write_snapshot_interval(b, 20)
+    with pytest.raises(ValueError) as excinfo:
+        assert_matching_snapshot_interval(str(a), str(b))
+    msg = str(excinfo.value)
+    assert "snapshot_interval" in msg
+    assert "10" in msg and "20" in msg  # both integer values are reported
+
+
+def test_assert_matching_snapshot_interval_one_none(tmp_path):
+    a = tmp_path / "a.h5"
+    _write_snapshot_interval(a, 10)
+    missing = str(tmp_path / "nope.h5")  # unreadable -> interval None
+    assert_matching_snapshot_interval(str(a), missing)  # (10, None) -> no raise
+    assert_matching_snapshot_interval(missing, str(a))  # (None, 10) -> no raise
+
+
+# --------------------------------------------------------------------------- #
+# 13. train_controller ordering: guard fires before checkpoint load / NotImplementedError
+# --------------------------------------------------------------------------- #
+def test_train_controller_guard_fires_before_checkpoint(tmp_path):
+    # Two datasets with different snapshot_interval and NO pretrained checkpoint configured.
+    # The guard is the first statement, so it must raise ValueError before _load_pretrained_observer
+    # (FileNotFoundError) or build_switching_loaders (NotImplementedError) can run.
+    obs, sw = tmp_path / "obs.h5", tmp_path / "sw.h5"
+    _write_snapshot_interval(obs, 10)
+    _write_snapshot_interval(sw, 20)
+    cfg = SimpleNamespace(
+        data=SimpleNamespace(h5_path=str(obs)),
+        phase2_controller=SimpleNamespace(switching_h5_path=str(sw)),
+    )
+    with pytest.raises(ValueError) as excinfo:
+        train_controller(cfg, DEVICE)
+    assert "snapshot_interval" in str(excinfo.value)
