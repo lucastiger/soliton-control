@@ -1,37 +1,79 @@
 physical_parameters:
-  fsr_hz: 2.0e+11                    # 200 GHz
-  intrinsic_q: 1.0e+7                
+  # ============================================================================
+  # SiN microring — measured device. All values in SI base units.
+  # Derived quantities computed inline; unmeasured/non-derivable values FLAGGED.
+  # ω₀ = 2πc/λ = 2π·2.99792458e8 / 1.55e-6 = 1.21526e15 rad/s  (used throughout)
+  # ============================================================================
+
+  # ---- Cavity / coupling (measured) ----
+  fsr_hz: 2.46e+10                  # 24.6 GHz
+  intrinsic_q: 4.0e+7
   coupling_q: 1.0e+7
-  n2_m2_per_w: 1.8e-19
-  effective_mode_area_m2: 5.0e-13   # 0.5 µm² — satisfies N_s_eq >> 1 with n_s=2e11
-  d2_rad_per_s2: 1.2566370614e+7     # 2π × 2 MHz
-  tau_th_s: 5.0e-6
-  dn_dT_per_k: 4.0e-5
-  Gamma_th: 0.1
-  # ω₀ = 2π·c/λ = 2π·299792458/1.55e-6 ≈ 1.215e15 rad/s
-  # κ_i = ω₀/Q_i = 1.215e15 / 1e7 = 1.215e8 rad/s
-  kappa_i_rad_per_s: 1.215e+8
-  pyroelectric_coeff_c_per_m2_k: 9.6e-5
-  eo_r33_m_per_v: 3.1e-11
-  surface_state_density_per_m2: 2.0e+11  # N_s_eq = n_s * A_eff = 0.1 (sub-Poisson regime);
-                                          # chosen so sigma_tccr/kappa ≈ 0.11 (perturbative).
-                                          # Calibrate against Yu lab measured TCCR noise floor.
+  # Loaded Q (derived): 1/Q_L = 1/Q_i + 1/Q_c = 1/4e7 + 1/1e7  ->  Q_L = 8.0e6
+  # κ_i = ω₀/Q_i = 1.21526e15 / 4.0e7
+  kappa_i_rad_per_s: 3.038e+7
+  # κ_c = ω₀/Q_c = 1.21526e15 / 1.0e7 = 1.215e8 rad/s
+  # κ_total = κ_i + κ_c = 1.519e8 rad/s  (device is OVER-COUPLED: κ_c ≈ 4·κ_i)
+  # FLAG: dataset_generator.py and dataloader.py hardcode κ_c = κ_i (κ_total = 2·κ_i).
+  #       That assumption is WRONG for this over-coupled device and changes P_th,
+  #       transmission contrast, and soliton existence. The key below is NOT read by
+  #       current code — a code patch is required to honor a separate κ_c.
+  kappa_c_rad_per_s: 1.215e+8       # FLAG: ignored by current generator/dataloader
+
+  # ---- Kerr nonlinearity (chi3) ----
+  n2_m2_per_w: 2.4e-19
+  # A_eff = 4.4µm × 0.8µm × Γ_confine.  Γ ∈ [0.90, 1.00] -> A_eff ∈ [3.168e-12, 3.52e-12].
+  # FLAG: confinement not pinned; representative Γ = 0.95 used below.
+  # Interpreted literally as the product (geometric core area × confinement).
+  effective_mode_area_m2: 3.344e-12   # = 4.4e-6 · 0.8e-6 · 0.95
+  # γ_NLSE = 2π·n2/(λ·A_eff) = 2π·2.4e-19 / (1.55e-6 · 3.344e-12) = 0.2909 W⁻¹m⁻¹
+  # v_g    = c/ng = 2.99792458e8 / 2.086 = 1.43716e8 m/s
+  # γ_LLE  = γ_NLSE · v_g · FSR = 0.2909 · 1.43716e8 · 2.46e10
+  gamma_LLE_per_J_per_s: 1.029e+18    # RECOMPUTE if A_eff (confinement) changes
+  # NB: γ_LLE ∝ 1/A_eff, so it spans [9.77e17, 1.085e18] across Γ ∈ [1.0, 0.90].
+
+  # ---- Dispersion ----
+  # D2 = 2π · 6 kHz = 2π · 6e3
+  d2_rad_per_s2: 3.76991e+4
+  # β₂ = D2/(2π·FSR)² = 3.76991e4 / (2π·2.46e10)² = 1.578e-18 s  (anomalous, D2>0)
+
+  # ---- Indices (measured) ----
   pump_wavelength_m: 1.55e-6
-  # γ_LLE = γ_NLSE * v_g * FSR = 1.459 * (3e8/2.2) * 2e11 = 3.98e19 J⁻¹s⁻¹
-  # P_th = κ_i / (γ_NLSE * v_g) ≈ 611 mW; use pin sweep 700 mW – 3 W (1.1–5x P_th)
-  gamma_LLE_per_J_per_s: 3.98e+19
-  # Equivalently: gamma_LLE = gamma_NLSE / FSR / n_eff * c
-  eps_r_z: 28.0                     # LN c-axis (z) relative permittivity ε₃₃ at room temperature
-  t_ln_m: 4.0e-7                    # LN film thickness, 400 nm
-  t_clad_top_m: 1.0e-6              # top cladding (SiO2 or air) thickness
-  t_clad_bot_m: 2.0e-6              # buried oxide thickness
-  eps_r_clad_top: 1.0               # air cladding (use 3.9 if SiO2-clad)
-  eps_r_clad_bot: 3.9               # SiO2 substrate
-  n0: 2.2                           # refractive index at pump wavelength
-  rho_kg_per_m3: 4640.0             # LN mass density
-  Cp_j_per_kg_k: 700.0              # LN specific heat capacity
-  T_k: 300.0                        # ambient temperature
-  kappa_th_w_per_m_k: 4.6           # LN thermal conductivity
-  mode_volume_m3: 1.0e-15           # effective optical mode volume
-  tau_carrier_s: 1.0e-7             # surface carrier relaxation time
-  alpha_tccr: 1.0e-3                # TCCR dimensionless coupling factor
+  n0: 1.87                          # = n_eff (phase index); used in resonance thermo-optic pull
+  # n_eff = 1.87 (phase), n_g = 2.086 (group). n_g used for v_g and cavity length.
+
+  # ---- Mode volume (derived) ----
+  # L_cav = c/(n_g·FSR) = 2.99792458e8 / (2.086 · 2.46e10) = 5.842e-3 m  (round-trip length)
+  # V = A_eff · L_cav = 3.344e-12 · 5.842e-3
+  mode_volume_m3: 1.954e-14         # scales with the A_eff (confinement) choice
+
+  # ---- Operating point ----
+  pin_w: 0.214                      # 214 mW
+  # FLAG: dataset_generator sweeps `pin` via param_grid and does NOT read this key;
+  #       it documents the experimental operating point only.
+  # P_th (derived, true κ_c) = (κ/2)²/(γ_LLE·t_r·κ_c)
+  #     = (7.595e7)² / (1.029e18 · 4.065e-11 · 1.215e8) = 1.135 W
+  # FLAG: Pin/P_th ≈ 0.19  -> 214 mW is SUB-THRESHOLD in this parameterization.
+  #       Trajectories will be CW-dominated. Verify the experimental soliton-access
+  #       power, or revisit A_eff/Q assumptions, before generating a dataset.
+
+  # ---- Thermo-optic / thermal (SiN material constants; NOT measured here) ----
+  dn_dT_per_k: 2.45e-5              # SiN material value (not in measurements)
+  rho_kg_per_m3: 3.17e+3           # Si3N4 material value
+  Cp_j_per_kg_k: 700.0             # Si3N4 material value
+  kappa_th_w_per_m_k: 30.0         # Si3N4 bulk; unused in current dynamics
+  T_k: 300.0                       # assumed ambient
+  tau_th_s: 5.0e-6                 # FLAG: not derivable from given measurements; placeholder
+  Gamma_th: 0.1                    # FLAG: not derivable from given measurements; placeholder
+
+  # ---- chi2 channels: ZERO for SiN (centrosymmetric: no Pockels, no pyroelectric) ----
+  eo_r33_m_per_v: 0.0
+  pyroelectric_coeff_c_per_m2_k: 0.0
+
+  # ---- Waveguide/stack geometry (measured; METADATA ONLY) ----
+  # Not used by the SiN noise model (pyro-EO screening is disabled, r33 = 0).
+  # t_SiN_m: 8.0e-7
+  # t_clad_top_m: 2.7e-6
+  # t_clad_bot_m: 4.0e-6
+  # eps_r_clad_top: 3.9            # SiO2 (wavelength-dependent; awaiting n(λ) .csv)
+  # eps_r_clad_bot: 3.9            # SiO2
