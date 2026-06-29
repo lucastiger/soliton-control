@@ -1,6 +1,6 @@
-# tfln-soliton-control
+# soliton-control
 
-`tfln-soliton-control` is a scientific computing project scaffold for simulating and controlling soliton dynamics in thin-film lithium niobate (TFLN) microresonators. The repository is organized around four major workflows:
+`soliton-control` is a scientific computing project scaffold for simulating and controlling soliton dynamics in thin-film lithium niobate (TFLN) and silicon nitride microresonators. The repository is organized around four major workflows:
 
 - **Simulation** of Lugiato–Lefever equation (LLE) dynamics with thermal effects and realistic noise models.
 - **Data generation** for large-scale supervised/physics-informed learning.
@@ -13,7 +13,7 @@
 
    ```bash
    git clone <your-repo-url>
-   cd tfln-soliton-control
+   cd soliton-control
    ```
 
 2. Create and activate a Python environment (recommended):
