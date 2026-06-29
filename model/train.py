@@ -126,6 +126,28 @@ def set_seed(seed: int) -> None:
     print(f"[train] seed = {seed}")
 
 
+def _read_snapshot_interval(h5_path: str | Path | None) -> int | None:
+    """Single source of truth for reading ``metadata['snapshot_interval']`` from a dataset h5.
+
+    Returns ``int(h5["metadata"].attrs["snapshot_interval"])`` when the file exists and the
+    attr is present, else ``None``. A missing/``None`` path, a missing attr, or an unreadable
+    file all map to ``None`` — this never raises on a not-found or corrupt dataset. Opened
+    read-only.
+    """
+    if h5_path is None:
+        return None
+    path = Path(h5_path)
+    if not path.exists():
+        return None
+    try:
+        with h5py.File(path, "r") as h5:
+            if "metadata" in h5 and "snapshot_interval" in h5["metadata"].attrs:
+                return int(h5["metadata"].attrs["snapshot_interval"])
+    except OSError:
+        return None
+    return None
+
+
 def resolve_horizon_dt(
     explicit: float | None,
     h5_path: str | Path,
@@ -139,12 +161,12 @@ def resolve_horizon_dt(
 
       a. EXPLICIT OVERRIDE — ``explicit`` is a non-null number -> used verbatim;
          provenance ``"explicit_config"``.
-      b. DERIVED — read ``snapshot_interval`` from ``h5["metadata"].attrs`` and combine with
-         ``t_r = 1/fsr_hz`` -> ``snapshot_interval / fsr_hz``; provenance
-         ``"derived(snapshot_interval=<n>, t_r=<t_r>)"``.
+      b. DERIVED — read ``snapshot_interval`` (via ``_read_snapshot_interval``, the single
+         read path) and combine with ``t_r = 1/fsr_hz`` -> ``snapshot_interval / fsr_hz``;
+         provenance ``"derived(snapshot_interval=<n>, t_r=<t_r>)"``.
       c. FALLBACK — h5 missing, unreadable, or has no ``metadata['snapshot_interval']`` attr
-         (older datasets / unit tests) -> ``RuntimeWarning`` naming the missing source and
-         ``10 / fsr_hz``; provenance ``"fallback(snapshot_interval=10)"``. NOT the old 1e-7.
+         (older datasets / unit tests) -> ``RuntimeWarning`` and ``10 / fsr_hz``; provenance
+         ``"fallback(snapshot_interval=10)"``. NOT the old 1e-7.
 
     ``fsr_hz`` is coerced to float (tfln_params.yaml stores it as an unsigned-exponent string).
     """
@@ -153,38 +175,44 @@ def resolve_horizon_dt(
 
     fsr_hz = float(fsr_hz)
     t_r = 1.0 / fsr_hz
-    path = Path(h5_path)
-
-    if not path.exists():
-        warnings.warn(
-            f"resolve_horizon_dt: dataset h5 not found at {path!s}; cannot read "
-            "metadata['snapshot_interval']. Falling back to snapshot_interval=10.",
-            RuntimeWarning, stacklevel=2,
-        )
-        return float(10 / fsr_hz), "fallback(snapshot_interval=10)"
-
-    snapshot_interval: int | None = None
-    try:
-        with h5py.File(path, "r") as h5:
-            if "metadata" in h5 and "snapshot_interval" in h5["metadata"].attrs:
-                snapshot_interval = int(h5["metadata"].attrs["snapshot_interval"])
-    except OSError as exc:
-        warnings.warn(
-            f"resolve_horizon_dt: could not open {path!s} ({exc}); falling back to "
-            "snapshot_interval=10.", RuntimeWarning, stacklevel=2,
-        )
-        return float(10 / fsr_hz), "fallback(snapshot_interval=10)"
+    snapshot_interval = _read_snapshot_interval(h5_path)
 
     if snapshot_interval is None:
         warnings.warn(
-            f"resolve_horizon_dt: {path!s} has no metadata['snapshot_interval'] attr "
-            "(older dataset); falling back to snapshot_interval=10.",
-            RuntimeWarning, stacklevel=2,
+            f"resolve_horizon_dt: could not read metadata['snapshot_interval'] from "
+            f"{Path(h5_path)!s} (missing file, missing attr, or unreadable); falling back to "
+            "snapshot_interval=10.", RuntimeWarning, stacklevel=2,
         )
         return float(10 / fsr_hz), "fallback(snapshot_interval=10)"
 
     horizon_dt = snapshot_interval / fsr_hz
     return float(horizon_dt), f"derived(snapshot_interval={snapshot_interval}, t_r={t_r:.3e})"
+
+
+def assert_matching_snapshot_interval(
+    observer_h5: str | Path | None,
+    switching_h5: str | Path | None,
+) -> None:
+    """Guard against mixing two snapshot-interval time bases in Phase-2 controller training.
+
+    In ``train_controller`` the predicted detuning is ``observer_baseline.detach() + correction``:
+    the baseline is forecast at the OBSERVER dataset's snapshot spacing while the correction is
+    supervised against the SWITCHING dataset's spacing. If the two datasets were generated with
+    different ``snapshot_interval`` values, that sum sits on incoherent time bases.
+
+    Reads both intervals via ``_read_snapshot_interval``. Raises ``ValueError`` only when BOTH
+    are known and unequal; if either is ``None`` (dataset absent or older/no-attr) the check
+    cannot be made yet and this returns silently.
+    """
+    obs_si = _read_snapshot_interval(observer_h5)
+    sw_si = _read_snapshot_interval(switching_h5)
+    if obs_si is not None and sw_si is not None and obs_si != sw_si:
+        raise ValueError(
+            f"snapshot_interval mismatch: observer dataset = {obs_si}, switching dataset = "
+            f"{sw_si}. The observer-baseline forecast and the switching-correction supervision "
+            "would sit on different time bases (observer_baseline.detach() + correction in "
+            "train_controller). Regenerate both datasets with the same snapshot_interval."
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -825,7 +853,16 @@ def train_controller(cfg: SimpleNamespace, device: torch.device) -> dict[str, An
 
     Raises ``NotImplementedError`` when no switching dataset is configured.
     """
+    observer_h5 = cfg.data.h5_path
     sw_path = getattr(cfg.phase2_controller, "switching_h5_path", None)
+    # GUARD (first statement, before any checkpoint load / loader build): the frozen observer's
+    # baseline is forecast at the observer dataset's snapshot spacing, while the correction is
+    # supervised at the switching dataset's spacing — summing them across different
+    # snapshot_interval values would silently mix time bases. Inert today (no switching dataset
+    # -> intervals unreadable -> None), arms automatically once a real one is wired in. Must
+    # precede build_switching_loaders' NotImplementedError and _load_pretrained_observer.
+    assert_matching_snapshot_interval(observer_h5, sw_path)
+
     if sw_path is None:
         raise NotImplementedError(_switching_contract_message())
 
