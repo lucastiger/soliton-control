@@ -765,8 +765,8 @@ def train_observer(
 
     optimizer = build_optimizer(model, cfg)
     scheduler = build_scheduler(optimizer, cfg)
-    # Phase-2 needs a controller-oriented scaler (reference_key=class_ctrl, balanced=detune_ctrl);
-    # the observer scaler config does not apply here. Disabled until that config exists.
+    # Controller scaler is deferred (Phase-2); the required controller-scaler contract lives
+    # in the train_controller docstring (kept in one place so comment and docstring don't drift).
     scaler = None
 
     trainer = Trainer(
@@ -864,6 +864,23 @@ def train_controller(cfg: SimpleNamespace, device: torch.device) -> dict[str, An
           ascent if the switching dataset contains MULTIPLE ``delta_cmd`` magnitudes per
           starting state (undershoot / success / overshoot). A point-labeled set
           ("only the action that worked") trains fine but fails silently at ascent.
+
+    **LossScaler (Phase-2, deferred):**
+      ``scaler`` is intentionally ``None`` until both a switching dataset and a
+      controller-oriented scaler config exist; the observer scaler does not transfer.
+      Required controller-scaler contract when enabled:
+
+        reference_key = ``"class_ctrl"``  — classification is the primary / MPC-ascent
+                                            term (FN-1); held fixed as the reference.
+        balanced      = ``"detune_ctrl"`` — the supervised forecast term, balanced
+                                            against the reference.
+        NEVER balanced: ``"effort_ctrl"`` and any ``thermal_*`` term — these regularizers
+                        keep their config weights.
+
+      Concrete lambda values and the ``balanced_map`` / ``clamp`` MUST be tuned against
+      real switching-dataset loss magnitudes; they cannot be set a priori. The unfrozen
+      joint fine-tune (loss emits the observer + controller union) needs a separate
+      reference-key decision and is unresolved here.
 
     Raises ``NotImplementedError`` when no switching dataset is configured.
     """
