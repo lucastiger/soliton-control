@@ -765,7 +765,9 @@ def train_observer(
 
     optimizer = build_optimizer(model, cfg)
     scheduler = build_scheduler(optimizer, cfg)
-    scaler = build_scaler(cfg, loss_cfg)  # shares loss_cfg with loss_fn (mutated in place)
+    # Phase-2 needs a controller-oriented scaler (reference_key=class_ctrl, balanced=detune_ctrl);
+    # the observer scaler config does not apply here. Disabled until that config exists.
+    scaler = None
 
     trainer = Trainer(
         model, optimizer, scheduler, loss_fn, train_loader, val_loader, cfg, device,
