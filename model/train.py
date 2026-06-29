@@ -621,6 +621,11 @@ class Trainer:
 # --------------------------------------------------------------------------- #
 def build_model_config(cfg: SimpleNamespace) -> ModelConfig:
     m = cfg.model
+ 
+    _unknown = set(vars(m)) - {f.name for f in fields(ModelConfig)}
+    if _unknown:
+        raise ValueError(f"unknown model config keys (silently ignored otherwise): {sorted(_unknown)}")
+     
     return ModelConfig(
         W=int(cfg.data.W),
         H=int(cfg.data.H),
