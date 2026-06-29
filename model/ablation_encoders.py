@@ -59,6 +59,7 @@ class PIRNNObserverTransformer(PIRNNObserver):
         super().__init__(config)
         # Remove the GRU encoder; it is replaced by the Transformer stack below.
         del self.gru_encoder
+        del self.h0_projector   # unused: physics prior enters via phys_token_proj, not h0
 
         d_model = config.gru_hidden
         if d_model % n_head != 0:
