@@ -622,7 +622,10 @@ class Trainer:
 def build_model_config(cfg: SimpleNamespace) -> ModelConfig:
     m = cfg.model
  
-    _unknown = set(vars(m)) - {f.name for f in fields(ModelConfig)}
+    # AFTER (catches BOTH typos AND valid-but-unread fields like context_proj_dim)
+    _ALLOWED_MODEL_KEYS = {"gru_hidden","gru_layers","dropout","decoder_hidden",
+                           "delta_cmd_max","logvar_min","logvar_max"}   # exactly what build_model_config maps
+    _unknown = set(vars(m)) - _ALLOWED_MODEL_KEYS
     if _unknown:
         raise ValueError(f"unknown model config keys (silently ignored otherwise): {sorted(_unknown)}")
      
