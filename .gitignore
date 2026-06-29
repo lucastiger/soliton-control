@@ -1,0 +1,12 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Test / tooling caches
+.pytest_cache/
+
+# Training run artifacts (written by model/train.py: metrics.jsonl, checkpoints, snapshots)
+runs/
+
+# Generated datasets (large; produced by data/dataset_generator.py)
+data/synthetic/
