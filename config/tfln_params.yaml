@@ -1,25 +1,25 @@
 physical_parameters:
-  fsr_hz: 2.0e11                    # 200 GHz
-  intrinsic_q: 1.0e7                
-  coupling_q: 1.0e7
+  fsr_hz: 2.0e+11                    # 200 GHz
+  intrinsic_q: 1.0e+7                
+  coupling_q: 1.0e+7
   n2_m2_per_w: 1.8e-19
   effective_mode_area_m2: 5.0e-13   # 0.5 µm² — satisfies N_s_eq >> 1 with n_s=2e11
-  d2_rad_per_s2: 1.2566370614e7     # 2π × 2 MHz
+  d2_rad_per_s2: 1.2566370614e+7     # 2π × 2 MHz
   tau_th_s: 5.0e-6
   dn_dT_per_k: 4.0e-5
   Gamma_th: 0.1
   # ω₀ = 2π·c/λ = 2π·299792458/1.55e-6 ≈ 1.215e15 rad/s
   # κ_i = ω₀/Q_i = 1.215e15 / 1e7 = 1.215e8 rad/s
-  kappa_i_rad_per_s: 1.215e8
+  kappa_i_rad_per_s: 1.215e+8
   pyroelectric_coeff_c_per_m2_k: 9.6e-5
   eo_r33_m_per_v: 3.1e-11
-  surface_state_density_per_m2: 2.0e11  # N_s_eq = n_s * A_eff = 0.1 (sub-Poisson regime);
+  surface_state_density_per_m2: 2.0e+11  # N_s_eq = n_s * A_eff = 0.1 (sub-Poisson regime);
                                           # chosen so sigma_tccr/kappa ≈ 0.11 (perturbative).
                                           # Calibrate against Yu lab measured TCCR noise floor.
   pump_wavelength_m: 1.55e-6
   # γ_LLE = γ_NLSE * v_g * FSR = 1.459 * (3e8/2.2) * 2e11 = 3.98e19 J⁻¹s⁻¹
   # P_th = κ_i / (γ_NLSE * v_g) ≈ 611 mW; use pin sweep 700 mW – 3 W (1.1–5x P_th)
-  gamma_LLE_per_J_per_s: 3.98e19
+  gamma_LLE_per_J_per_s: 3.98e+19
   # Equivalently: gamma_LLE = gamma_NLSE / FSR / n_eff * c
   eps_r_z: 28.0                     # LN c-axis (z) relative permittivity ε₃₃ at room temperature
   t_ln_m: 4.0e-7                    # LN film thickness, 400 nm
