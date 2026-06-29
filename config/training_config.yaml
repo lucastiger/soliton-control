@@ -1,0 +1,76 @@
+# Training configuration for the TFLN soliton-control PI-RNN.
+#
+# Phase 1 (observer) is fully runnable from this file. Phase 2 (controller) is
+# gated on a switching dataset that does not yet exist; see `phase2_controller`
+# and model/train.py::train_controller.
+#
+# Physics constants for the thermal loss term (Gamma_th, tau_th, horizon_dt) are
+# injected at runtime from `data.config_path` (config/tfln_params.yaml) — they are
+# intentionally NOT duplicated under `loss`.
+
+experiment:
+  name: tfln_observer_v1
+  seed: 0
+  out_dir: runs                       # runs/<name>/{metrics.jsonl,best_model.pt,ckpt_epoch*.pt,config.snapshot.yaml}
+
+data:
+  h5_path: data/synthetic/dataset.h5
+  config_path: config/tfln_params.yaml
+  W: 200
+  H: 50
+  stride: 10
+  batch_size: 512
+  num_workers: 4
+  preload: false
+  max_ram_gb: 16.0
+  random_state: 42
+
+model:                                # -> ModelConfig (verbatim field names)
+  gru_hidden: 256
+  gru_layers: 3
+  dropout: 0.1
+  decoder_hidden: 128
+  delta_cmd_max: 1.0                  # placeholder until the REAL actuator limit is known
+  logvar_min: -10.0
+  logvar_max: 5.0
+
+loss:                                 # -> LossConfig (observer-relevant fields)
+  lambda_class_obs: 1.0
+  lambda_detune_obs: 1.0
+  lambda_pred_obs: 1.0
+  lambda_thermal_obs: 0.05
+  beta_nll: 0.5
+  nll_logvar_floor: -10.0
+  thermal_norm: empirical
+  horizon_dt: null                    # null => derive from dataset snapshot_interval * t_r; set a float only to override
+  # Gamma_th and tau_th are sourced from tfln_params.yaml at runtime — do NOT hardcode
+
+optim:
+  lr: 3.0e-4
+  weight_decay: 0.0                   # Adam-equivalent default; AdamW with wd=0
+  epochs: 50
+  warmup_epochs: 5                    # linear warmup, then cosine decay to ~0
+  grad_clip: 1.0                      # max_norm; REQUIRED
+
+train:
+  early_stop_metric: val_total_loss   # monitored for early stop (mode: min)
+  early_stop_patience: 10
+  checkpoint_metric: val_accuracy     # best_model.pt selected by this (mode: max)
+  checkpoint_every: 5
+  amp: false                          # default off; GRU+200-step BPTT is fp16-fragile
+  device: auto                        # cuda if available else cpu
+
+scaler:                               # LossScaler (optional)
+  enabled: true
+  reference_key: class_obs
+  balanced_map:                       # ONLY primary forecast terms — never regularizers
+    detune_obs: lambda_detune_obs
+    pred_obs: lambda_pred_obs
+  period: 5
+  clamp: [1.0e-3, 1.0e+3]              # NB: exponent sign required or PyYAML parses it as a string
+
+phase2_controller:                    # see train_controller — gated; do not fabricate data
+  enabled: false
+  pretrained_observer: runs/tfln_observer_v1/best_model.pt
+  freeze_observer: true
+  switching_h5_path: null             # MUST be provided to enable Phase 2
