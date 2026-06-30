@@ -244,7 +244,9 @@ def _single_trajectory_solver(
         # dU_int/dt > 0 (cavity filling). Clip to remove unphysical artifacts.
         p_trans = jnp.clip(pin - kappa_i * u_int / t_r, 0.0, pin)            #W
 
-        p_abs = kappa_i * u_int
+        # u_int is mean(|E|²)·t_r (J·s); absorbed *power* (W) needs the /t_r,
+        # matching the energy-balance form used for p_trans above.
+        p_abs = kappa_i * u_int / t_r
 
         d_delta_t = (
             -delta_t / thermal["tau_th"]
