@@ -63,7 +63,9 @@ def make_state_labeler():
 
 
         # --- decision tree (all jnp.where for JAX traceability) ---
-        is_off     = total_power < 1e-6
+        # Physical fields are in Joules (mean|E|² ~ 1e-11–1e-9). Use mean (matches
+        # the NumPy labeler) and a Joule-scale floor well below any CW state.
+        is_off     = p_mean < 1e-13
         is_cw      = contrast < 2.0
         is_mi      = (contrast >= 2.0) & (contrast < 8.0)
         is_chaotic = (contrast >= 8.0) & (norm_entropy > 0.5)
@@ -129,7 +131,7 @@ def make_state_labeler():
     return state_labeler
 
 _DEFAULT_THRESHOLD_PARAMS: dict = {
-    "power_floor": 1e-6,
+    "power_floor": 1e-13,
     "contrast_cw": 2.0,
     "contrast_high": 8.0,
     "entropy_chaotic": 0.5,
