@@ -299,10 +299,11 @@ def validate_noise_models() -> None:
         )
 
     tccr_samples = np.asarray(total.tccr.sample(jax.random.PRNGKey(3), 200_000), dtype=np.float64)
-    r1 = np.corrcoef(tccr_samples[:-1], tccr_samples[1:])[0, 1]
-    tau_est = -total.t_r / np.log(r1)
-    tau_target = float(cfg.get("tau_carrier_s", 1.0e-7))
-    assert abs(tau_est - tau_target) / tau_target < 0.5
+    if float(np.std(tccr_samples)) > 0.0:   # only when TCCR is active (chi2 platforms); SiN -> skip
+        r1 = np.corrcoef(tccr_samples[:-1], tccr_samples[1:])[0, 1]
+        tau_est = -total.t_r / np.log(r1)
+        tau_target = float(cfg.get("tau_carrier_s", 1.0e-7))
+        assert abs(tau_est - tau_target) / tau_target < 0.5
 
 
 if __name__ == "__main__":
