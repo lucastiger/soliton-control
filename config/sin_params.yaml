@@ -14,11 +14,9 @@ physical_parameters:
   kappa_i_rad_per_s: 3.038e+7
   # κ_c = ω₀/Q_c = 1.21526e15 / 1.0e7 = 1.215e8 rad/s
   # κ_total = κ_i + κ_c = 1.519e8 rad/s  (device is OVER-COUPLED: κ_c ≈ 4·κ_i)
-  # FLAG: dataset_generator.py and dataloader.py hardcode κ_c = κ_i (κ_total = 2·κ_i).
-  #       That assumption is WRONG for this over-coupled device and changes P_th,
-  #       transmission contrast, and soliton existence. The key below is NOT read by
-  #       current code — a code patch is required to honor a separate κ_c.
-  kappa_c_rad_per_s: 1.215e+8       # FLAG: ignored by current generator/dataloader
+  # Authoritative coupling rate. intrinsic_q/coupling_q are kept as cross-check
+  # sources; resolve_cavity_rates() prefers these explicit kappa_*_rad_per_s keys.
+  kappa_c_rad_per_s: 1.215e+8
 
   # ---- Kerr nonlinearity (chi3) ----
   n2_m2_per_w: 2.4e-19
