@@ -49,11 +49,10 @@ physical_parameters:
   pin_w: 0.214                      # 214 mW
   # FLAG: dataset_generator sweeps `pin` via param_grid and does NOT read this key;
   #       it documents the experimental operating point only.
-  # P_th (derived, true κ_c) = (κ/2)²/(γ_LLE·t_r·κ_c)
-  #     = (7.595e7)² / (1.029e18 · 4.065e-11 · 1.215e8) = 1.135 W
-  # FLAG: Pin/P_th ≈ 0.19  -> 214 mW is SUB-THRESHOLD in this parameterization.
-  #       Trajectories will be CW-dominated. Verify the experimental soliton-access
-  #       power, or revisit A_eff/Q assumptions, before generating a dataset.
+  # P_th (δω→0 MI onset) = κ³/(8·γ_LLE·κ_c)
+  #     = (1.519e8)³ / (8 · 1.029e18 · 1.215e8) ≈ 3.5e-3 W ≈ 3.5 mW
+  # Pin/P_th ≈ 61  -> 214 mW is well ABOVE MI onset (expect MI/soliton states).
+  #       Exact prefactor is detuning-dependent; see energy-based check (Prompt D).
 
   # ---- Thermo-optic / thermal (SiN material constants; NOT measured here) ----
   dn_dT_per_k: 2.45e-5              # SiN material value (not in measurements)
