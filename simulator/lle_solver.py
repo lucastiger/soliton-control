@@ -248,6 +248,22 @@ def _single_trajectory_solver(
         # matching the energy-balance form used for p_trans above.
         p_abs = kappa_i * u_int / t_r
 
+        # --- Single-pole thermal model (units of every factor) -----------------
+        #   dΔT/dt = -ΔT/τ_th + Γ_th·P_abs/(ρ·Cp·V)
+        #   [K/s]  = [K]/[s]  + [·]·[W] / ([kg/m³]·[J/(kg·K)]·[m³])
+        #          = [K/s]    +        [J/s] / [J/K]   = [K/s]            ✓
+        # Γ_th is DIMENSIONLESS. It is NOT a bare absorbed-power fraction: that is
+        # already carried by κ_i (P_abs = κ_i·⟨|E|²⟩). Γ_th is the lumped
+        # absorbed-power → temperature-rise coupling
+        #     Γ_th = η_abs · (V_mode / V_thermal),
+        # i.e. the material-absorption fraction of κ_i loss (η_abs, vs scattering)
+        # times the correction for using the OPTICAL mode volume V here while the
+        # heat actually fills the larger thermal-diffusion volume V_thermal =
+        # L_cav·π·α·τ_th. Equivalently R_th = τ_th·Γ_th/(ρ·Cp·V) = η_abs/(π·k_th·L_cav)
+        # (τ_th cancels; the steady state is set by the spreading resistance only).
+        # See config/sin_params.yaml for the SiN numbers: Γ_th = 4.72e-3, R_th ≈
+        # 0.545 K/W, giving a steady thermal_shift of O(0.1–few)×κ. A solve-time
+        # pre-flight assertion (solve_lle_ssfm_jax) flags a mis-set Γ_th loudly.
         d_delta_t = (
             -delta_t / thermal["tau_th"]
             + thermal["Gamma_th"] * p_abs / (thermal["rho"] * thermal["Cp"] * thermal["V"])
@@ -431,6 +447,56 @@ def solve_lle_ssfm_jax(
             f"Increase pin or adjust Q_i / A_eff in config.",
             stacklevel=2,
         )
+
+    # --- Pre-flight: steady-state thermo-optic shift sanity check ---
+    # A mis-set Γ_th silently destabilises the SSFM loop: the deterministic
+    # thermal_shift = (ω0/n0)·dn_dT·ΔT enters the linear operator every round
+    # trip, so a shift of tens of κ drives the thermal feedback past a
+    # bistability edge and blows the field up to NaN. We catch it here from the
+    # ANALYTIC steady state (no clipping of the actual run-time shift):
+    #   ⟨|E|²⟩_cw = κ_c·P_in / ((κ/2)² + Δω²)          (J, CW intracavity energy)
+    #   P_abs     = κ_i·⟨|E|²⟩_cw                       (W)
+    #   ΔT_ss     = τ_th·Γ_th·P_abs / (ρ·Cp·V)          (K)
+    #   shift_ss  = (ω0/n0)·dn_dT·ΔT_ss                 (rad/s)
+    # The assertion is evaluated at the WORST CASE Δω=0 (on resonance, where
+    # ⟨|E|²⟩ — and hence P_abs and the shift — is maximal). That makes the
+    # tripwire a property of (Γ_th, P_in, κ, thermal params) ALONE, independent
+    # of the requested detuning/scan, so a grossly mis-set Γ_th fails loudly even
+    # for a far-detuned CW run. We also report the shift at the actual operating
+    # detuning(s) for context.
+    _r_th = thermal["tau_th"] * thermal["Gamma_th"] / (
+        thermal["rho"] * thermal["Cp"] * thermal["V"]
+    )                                                                       # K/W
+    _omega0_pf = 2.0 * math.pi * 299_792_458.0 / thermal["pump_wavelength_m"]
+    _to_coeff = (_omega0_pf / thermal["n0"]) * thermal["dn_dT"]             # rad/s/K
+
+    def _steady_shift(_dw):                       # rad/s, at detuning _dw (rad/s)
+        _e2 = kappa_c * float(pin) / ((kappa / 2.0) ** 2 + _dw ** 2)        # J
+        return _to_coeff * _r_th * (thermal["kappa_i"] * _e2)              # rad/s
+
+    _worst_shift = float(_steady_shift(0.0))                                # Δω=0
+    _dw_op = np.atleast_1d(np.asarray(delta_omega, dtype=float))
+    _op_shift = float(np.max(np.abs(_steady_shift(_dw_op))))                # operating pt
+    _shift_max_over_kappa = float(physical.get("thermal_shift_max_over_kappa", 15.0))
+    # Euler thermal-step stability: ΔT_{n+1} = (1 - t_r/τ_th)·ΔT_n + drive.
+    # |1 - t_r/τ_th| < 1 ⟺ stable; t_r/τ_th ≪ 1 here so it is far from the limit.
+    _euler_eig = 1.0 - t_r / thermal["tau_th"]
+    print(
+        f"[thermal pre-flight] t_r/tau_th = {t_r / thermal['tau_th']:.3e}, "
+        f"Euler eigenvalue = {_euler_eig:.9f} (stable if |.|<1), "
+        f"R_th = {_r_th:.3e} K/W, worst-case (Δω=0) thermal_shift = "
+        f"{_worst_shift / kappa:.2f}×κ, operating-point thermal_shift = "
+        f"{_op_shift / kappa:.2f}×κ (limit {_shift_max_over_kappa:.1f}×κ)"
+    )
+    assert _worst_shift < _shift_max_over_kappa * kappa, (
+        f"Worst-case steady thermal_shift {_worst_shift:.3e} rad/s = "
+        f"{_worst_shift / kappa:.1f}×κ exceeds {_shift_max_over_kappa:.1f}×κ. "
+        f"Gamma_th={thermal['Gamma_th']:.3e} is likely mis-set (it is a lumped "
+        f"η_abs·V_mode/V_thermal coupling — see the Γ_th derivation in "
+        f"config/sin_params.yaml), or P_in is too high for this thermal model. "
+        f"Reduce Gamma_th, or raise thermal_shift_max_over_kappa if this "
+        f"thermal-triangle regime is intended."
+    )
 
     # convert every leaf to a scalar JAX array so vmap can trace through it
     thermal = {k: jnp.array(v, dtype=jnp.float32) for k, v in thermal.items()}
