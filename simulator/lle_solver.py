@@ -18,7 +18,7 @@ import yaml
 
 from simulator.state_labeler import make_state_labeler
 
-_DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "tfln_params.yaml"
+_DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "sin_params.yaml"
 
 
 def gamma_nlse_to_lle(gamma_nlse_per_w_per_m: float, fsr_hz: float, n_eff: float = 2.2) -> float:
