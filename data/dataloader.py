@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from simulator.lle_solver import _load_config
+from simulator.lle_solver import _load_config, resolve_cavity_rates
 
 STATE_NAMES: dict[int, str] = {
     0: "off",
@@ -62,8 +62,7 @@ class SolitonDataset(Dataset):
         self.random_state = random_state
 
         _cfg = _load_config(config_path)
-        kappa_i = float(_cfg["kappa_i_rad_per_s"])
-        self.kappa = 2.0 * kappa_i
+        kappa_i, kappa_c, self.kappa = resolve_cavity_rates(config_path)
         omega0 = 2.0 * math.pi * 299_792_458.0 / float(_cfg["pump_wavelength_m"])
         self.Q_i = float(_cfg.get("intrinsic_q", omega0 / kappa_i))
         self.FSR = float(_cfg["fsr_hz"])
@@ -110,12 +109,14 @@ class SolitonDataset(Dataset):
                 # The trajectory always starts blue-detuned (delta = +3*kappa), so
                 # this window is guaranteed to be in the sub-threshold / CW regime.
                 # We skip the first 200 RT to avoid the cavity field ring-up transient
-                # (~1/kappa * FSR ≈ 160 RT at 200 GHz FSR, kappa ≈ 2.43e8 rad/s).
+                # (~1/kappa * FSR round trips; with the config-derived κ = κ_i + κ_c,
+                # e.g. κ ≈ 1.52e8 rad/s for the over-coupled SiN config).
                 n_init = min(T, 500)
                 p_trans_init = np.asarray(grp["P_trans"][:n_init], dtype=np.float32)
                 
                 # Skip the first 200 RT in all branches to avoid the cavity field
-                # ring-up transient (~160 RT at 200 GHz FSR, kappa ≈ 2.43e8 rad/s).
+                # ring-up transient (~1/kappa * FSR round trips; with the config-derived
+                # κ = κ_i + κ_c, e.g. κ ≈ 1.52e8 rad/s for the over-coupled SiN config).
                 ringup = min(200, n_init)
                 labels_init = labels[ringup:n_init]
                 cw_vals = p_trans_init[ringup:][labels_init == 1]

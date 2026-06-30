@@ -71,6 +71,76 @@ def _load_config(config_path: str | Path | None = None) -> dict[str, Any]:
     return cfg.get("physical_parameters", {})
 
 
+def resolve_cavity_rates(config_path=None):
+    """Resolve (kappa_i, kappa_c, kappa_total) in rad/s from config — single source of truth.
+
+    kappa_i: prefer explicit `kappa_i_rad_per_s`; else omega0 / intrinsic_q.
+    kappa_c: prefer explicit `kappa_c_rad_per_s`; else omega0 / coupling_q;
+             else fall back to kappa_i (critical coupling) and warn.
+    kappa_total = kappa_i + kappa_c.
+    omega0 = 2*pi*c / pump_wavelength_m.
+    Mirror the existing kappa_i/Q_i consistency check (lle_solver.py ~l.320-337):
+    if an explicit kappa_c_rad_per_s is present AND coupling_q is present, warn when they
+    disagree by >15%. Same for kappa_i vs intrinsic_q. Returns floats.
+    """
+    import warnings as _warnings
+
+    physical = _load_config(config_path)
+    _lam = float(physical.get("pump_wavelength_m", 1.55e-6))
+    omega0 = 2.0 * math.pi * 299_792_458.0 / _lam
+
+    # --- kappa_i: prefer explicit kappa_i_rad_per_s, else omega0 / intrinsic_q ---
+    _q_i = float(physical.get("intrinsic_q", 0) or 0)
+    if physical.get("kappa_i_rad_per_s") is not None:
+        kappa_i = float(physical["kappa_i_rad_per_s"])
+        if _q_i > 0:
+            _kappa_i_from_q = omega0 / _q_i
+            _rel_diff = abs(_kappa_i_from_q - kappa_i) / max(kappa_i, 1e-30)
+            if _rel_diff > 0.15:
+                _warnings.warn(
+                    f"κ_i from Q_i ({_kappa_i_from_q:.3e} rad/s) differs from "
+                    f"kappa_i_rad_per_s ({kappa_i:.3e} rad/s) by {_rel_diff:.1%}. "
+                    f"Reconcile config: either remove intrinsic_q or update kappa_i_rad_per_s "
+                    f"to {_kappa_i_from_q:.3e}.",
+                    stacklevel=2,
+                )
+    elif _q_i > 0:
+        kappa_i = omega0 / _q_i
+    else:
+        raise ValueError(
+            "Cannot resolve kappa_i: config has neither kappa_i_rad_per_s nor intrinsic_q."
+        )
+
+    # --- kappa_c: prefer explicit kappa_c_rad_per_s, else omega0 / coupling_q,
+    #     else fall back to kappa_i (critical coupling) and warn ---
+    _q_c = float(physical.get("coupling_q", 0) or 0)
+    if physical.get("kappa_c_rad_per_s") is not None:
+        kappa_c = float(physical["kappa_c_rad_per_s"])
+        if _q_c > 0:
+            _kappa_c_from_q = omega0 / _q_c
+            _rel_diff_c = abs(_kappa_c_from_q - kappa_c) / max(kappa_c, 1e-30)
+            if _rel_diff_c > 0.15:
+                _warnings.warn(
+                    f"κ_c from Q_c ({_kappa_c_from_q:.3e} rad/s) differs from "
+                    f"kappa_c_rad_per_s ({kappa_c:.3e} rad/s) by {_rel_diff_c:.1%}. "
+                    f"Reconcile config: either remove coupling_q or update kappa_c_rad_per_s "
+                    f"to {_kappa_c_from_q:.3e}.",
+                    stacklevel=2,
+                )
+    elif _q_c > 0:
+        kappa_c = omega0 / _q_c
+    else:
+        kappa_c = kappa_i
+        _warnings.warn(
+            f"No kappa_c_rad_per_s or coupling_q in config; assuming critical coupling "
+            f"κ_c = κ_i = {kappa_i:.3e} rad/s.",
+            stacklevel=2,
+        )
+
+    kappa_total = kappa_i + kappa_c
+    return float(kappa_i), float(kappa_c), float(kappa_total)
+
+
 def _thermal_params(config_path: str | Path | None = None) -> dict[str, float]:
     """Collect thermal/material parameters with reasonable defaults."""
     p = _load_config(config_path)
