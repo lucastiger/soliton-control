@@ -23,6 +23,7 @@ from simulator.lle_solver import (
     _thermal_params,
     d2_to_beta2_lle,
     gamma_nlse_to_lle,
+    resolve_cavity_rates,
 )
 from simulator.noise_models import TotalNoise, _load_config as nm_load_cfg
 
@@ -57,9 +58,7 @@ class DatasetGenerator:
         self.config = _load_config(self.config_path)
         self.fsr_hz = float(self.config["fsr_hz"])
         self.t_r = 1.0 / self.fsr_hz
-        self.kappa_i = float(self.config["kappa_i_rad_per_s"])
-        self.kappa_c = self.kappa_i
-        self.kappa = self.kappa_i + self.kappa_c
+        self.kappa_i, self.kappa_c, self.kappa = resolve_cavity_rates(self.config_path)
 
         if "gamma_LLE_per_J_per_s" in self.config:
             self.gamma = float(self.config["gamma_LLE_per_J_per_s"])
