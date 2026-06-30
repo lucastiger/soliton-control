@@ -7,6 +7,7 @@ https://github.com/lucastiger/soliton-control/edit/main/simulator/lle_solver.pys
 
 from __future__ import annotations
 
+import functools
 import math
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,7 @@ import jax.numpy as jnp
 import numpy as np
 import yaml
 
-from simulator.state_labeler import make_state_labeler
+from simulator.state_labeler import make_state_labeler, make_threshold_params
 
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "sin_params.yaml"
 
@@ -349,7 +350,32 @@ def _single_trajectory_solver(
     }
 
 
+# Fallback labeler (conservative literal floor); the solver builds a
+# physically-scaled labeler per config via _physical_state_labeler() below.
 _STATE_LABELER = make_state_labeler()
+
+
+@functools.lru_cache(maxsize=None)
+def _physical_state_labeler(
+    kappa: float,
+    kappa_c: float,
+    pin: float,
+    delta_omega_max: float,
+    off_fraction: float = 1e-3,
+):
+    """Build (and cache) a state labeler whose OFF floor = f·U_cw,min from config.
+
+    Cached on the physical params so repeated solver calls with the same config
+    reuse one labeler object — JAX treats it as a static arg, so a stable object
+    identity avoids needless recompilation. A genuinely different config produces
+    a new labeler (and a correct recompile, since the OFF floor changed).
+    """
+    params = make_threshold_params(
+        kappa, kappa_c, pin, delta_omega_max, off_fraction=off_fraction
+    )
+    return make_state_labeler(params)
+
+
 _PER_TRAJ = jax.jit(
     jax.vmap(
         _single_trajectory_solver,
@@ -565,6 +591,15 @@ def solve_lle_ssfm_jax(
     n_traj = delta_arr.shape[0]
     e0_cold = jnp.zeros((n_traj, n_tau), dtype=jnp.complex64)
     delta_t0_cold = jnp.zeros((n_traj,), dtype=jnp.float32)
+
+    # Physically-scaled OFF floor: f·U_cw,min with U_cw,min at the largest |δω|
+    # in the sweep. Built from the concrete config so OFF tracks the energy scale
+    # rather than a magic constant. Cached on the params so identity is stable.
+    delta_omega_max = float(np.max(np.abs(np.asarray(delta_arr))))
+    state_labeler = _physical_state_labeler(
+        float(kappa), float(kappa_c), float(pin), delta_omega_max
+    )
+
     out = _PER_TRAJ(
         delta_arr,
         float(pin),
@@ -579,7 +614,7 @@ def solve_lle_ssfm_jax(
         int(snapshot_interval),
         key_arr,
         thermal,
-        _STATE_LABELER,
+        state_labeler,
         noise_sequences,
         e0_cold,
         delta_t0_cold,

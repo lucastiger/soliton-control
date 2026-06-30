@@ -7,12 +7,86 @@ from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
 
 
-def make_state_labeler():
+# ---------------------------------------------------------------------------
+# Physically-scaled OFF threshold
+# ---------------------------------------------------------------------------
+# Intracavity fields are stored as physical energies: |E|² is in Joules, with
+# mean|E|² ~ 1e-11 … 1e-9 J across a detuning sweep and an empty-cavity numerical
+# floor ~1e-16 J. A field is "OFF" when essentially no coherent CW power has
+# built up. Rather than a magic constant, we tie the floor to the smallest CW
+# energy the cavity can support over the sweep:
+#
+#     U_cw(δω) = κ_c · pin / ((κ/2)² + δω²)          [Joules]
+#
+# U_cw is monotonically decreasing in |δω|, so its minimum over the sweep is at
+# the largest |δω|:
+#
+#     U_cw,min = κ_c · pin / ((κ/2)² + δω_max²)
+#
+# OFF is then declared when mean(|E|²) < f · U_cw,min, i.e. the field sits a
+# factor f below even the dimmest CW state. f ≈ 1e-3 … 1e-2 leaves a wide margin
+# above the ~1e-16 J empty-cavity floor while staying far below any real CW field.
+
+def physical_off_floor(
+    kappa: float,
+    kappa_c: float,
+    pin: float,
+    delta_omega_max: float,
+    off_fraction: float = 1e-3,
+) -> float:
+    """Smallest CW intracavity energy over the sweep, scaled by ``off_fraction``.
+
+    Parameters are read from the simulation config (all in SI / rad·s⁻¹):
+      kappa            total cavity loss rate κ
+      kappa_c          coupling rate κ_c
+      pin              pump power (W)
+      delta_omega_max  largest |δω| in the detuning sweep (rad/s)
+      off_fraction     f ∈ (0, 1); fraction of U_cw,min below which a field is OFF
+
+    Returns the OFF power floor in Joules.
+    """
+    k = float(kappa)
+    u_cw_min = float(kappa_c) * float(pin) / ((k / 2.0) ** 2 + float(delta_omega_max) ** 2)
+    return float(off_fraction) * u_cw_min
+
+
+def make_threshold_params(
+    kappa: float,
+    kappa_c: float,
+    pin: float,
+    delta_omega_max: float,
+    *,
+    off_fraction: float = 1e-3,
+    overrides: dict | None = None,
+) -> dict:
+    """Build the shared threshold dict from physical config — single source of truth.
+
+    The OFF floor is derived from (κ, κ_c, pin, δω_max) via ``physical_off_floor``;
+    all other (geometric / spectral) thresholds come from ``_DEFAULT_THRESHOLD_PARAMS``.
+    The SAME dict feeds both the JAX labeler (``make_state_labeler``) and the NumPy
+    labeler (``label_soliton_state``), so the two stay byte-for-byte consistent.
+    """
+    params = dict(_DEFAULT_THRESHOLD_PARAMS)
+    params["power_floor"] = physical_off_floor(
+        kappa, kappa_c, pin, delta_omega_max, off_fraction
+    )
+    if overrides:
+        params.update(overrides)
+    return params
+
+
+def make_state_labeler(threshold_params: dict | None = None):
     """Return a JAX-traceable 7-class state labeler for use inside jax.lax.scan.
+
+    The labeler bakes every threshold into Python-float constants at build time,
+    so the returned ``state_labeler`` contains no Python branching on traced
+    values and is fully ``jax.lax.scan``-traceable. Pass the dict produced by
+    ``make_threshold_params`` (or any subset of ``_DEFAULT_THRESHOLD_PARAMS``) so
+    the JAX path uses the identical reductions and thresholds as the NumPy path.
 
     Classes
     -------
-    0  Off / below threshold    — total power near zero
+    0  Off / below threshold    — mean|E|² below the physical CW floor
     1  CW                       — flat field, low contrast
     2  Modulation instability   — periodic structure, moderate contrast
     3  Chaotic                  — high contrast, high spectral entropy
@@ -20,6 +94,16 @@ def make_state_labeler():
     5  Soliton Crystal          - high contrast, low entropy, evenly spaced peaks (highly ordered)
     6  Single soliton           — high contrast, low entropy, sech² comb
     """
+
+    # --- bake all thresholds into float constants (no traced Python branching) ---
+    _params = {**_DEFAULT_THRESHOLD_PARAMS, **(threshold_params or {})}
+    POWER_FLOOR        = float(_params["power_floor"])
+    CONTRAST_CW        = float(_params["contrast_cw"])
+    CONTRAST_HIGH      = float(_params["contrast_high"])
+    ENTROPY_CHAOTIC    = float(_params["entropy_chaotic"])
+    CRYSTAL_CV         = float(_params["crystal_cv"])
+    PEAK_AMP_THRESHOLD = float(_params["peak_prominence"])  # fraction of p_max
+    IS_SHARP_THRESHOLD = float(_params["sharpness_min"])
 
     def state_labeler(e_t: jnp.ndarray) -> jnp.int32:
         n_tau = e_t.shape[0]
@@ -41,11 +125,11 @@ def make_state_labeler():
 
         # number of peaks: count points above 50% of max with positive->negative
         # zero-crossings of the gradient (proxy for peak count, JAX-traceable)
-        # Fixed: only count peaks whose amplitude exceeds 30% of the field maximum.
+        # Only count peaks whose amplitude exceeds PEAK_AMP_THRESHOLD·p_max (sourced
+        # from params["peak_prominence"], identical to the NumPy labeler's prominence).
         # Without this threshold, dispersive-wave tails and FFT ringing on the 512-point
         # grid produce O(10–50) spurious peaks in single-soliton states, making
         # sign_changes >> 1 and systematically mislabeling single solitons as multi-soliton.
-        PEAK_AMP_THRESHOLD = 0.30   # fraction of p_max; matches label_soliton_state prominence
         grad = jnp.diff(p, append=p[:1])          # circular gradient, length n_tau
         _is_local_max = (grad > 0) & (jnp.roll(grad, -1) <= 0)
         peak_mask = _is_local_max & (p > PEAK_AMP_THRESHOLD * p_max)
@@ -59,16 +143,16 @@ def make_state_labeler():
         p_sorted = jnp.sort(p)[::-1]                        # descending
         power_in_top = jnp.sum(p_sorted[:N_peak_pts])
         sharpness = power_in_top / jnp.maximum(total_power, 1e-20)
-        IS_SHARP_THRESHOLD = 0.75                           # empirical; validate against NumPy labeler
 
 
         # --- decision tree (all jnp.where for JAX traceability) ---
-        # Physical fields are in Joules (mean|E|² ~ 1e-11–1e-9). Use mean (matches
-        # the NumPy labeler) and a Joule-scale floor well below any CW state.
-        is_off     = p_mean < 1e-13
-        is_cw      = contrast < 2.0
-        is_mi      = (contrast >= 2.0) & (contrast < 8.0)
-        is_chaotic = (contrast >= 8.0) & (norm_entropy > 0.5)
+        # Physical fields are in Joules (mean|E|² ~ 1e-11–1e-9). Use mean(|E|²)
+        # (matches the NumPy labeler) compared against the physically-scaled OFF
+        # floor (POWER_FLOOR = f·U_cw,min, baked from config at build time).
+        is_off     = p_mean < POWER_FLOOR
+        is_cw      = contrast < CONTRAST_CW
+        is_mi      = (contrast >= CONTRAST_CW) & (contrast < CONTRAST_HIGH)
+        is_chaotic = (contrast >= CONTRAST_HIGH) & (norm_entropy > ENTROPY_CHAOTIC)
 
 
         # ---- crystal detection: peak spacing coefficient of variation ----
@@ -97,22 +181,21 @@ def make_state_labeler():
         sp_sq   = jnp.sum(jnp.where(spacing_valid, (raw_spacings - sp_mean)**2, 0.0)) / n_valid
         spacing_cv = jnp.sqrt(sp_sq) / jnp.maximum(sp_mean, 1.0)
         
-        CRYSTAL_CV_THRESHOLD = 0.1
         is_crystal = (
-            (contrast >= 8.0) & (norm_entropy <= 0.5)
+            (contrast >= CONTRAST_HIGH) & (norm_entropy <= ENTROPY_CHAOTIC)
             & (sign_changes > 2.5)                       # ← require ≥ 3 peaks, not ≥ 2
-            & (spacing_cv < CRYSTAL_CV_THRESHOLD)
+            & (spacing_cv < CRYSTAL_CV)
         )
         is_multi = (
-            (contrast >= 8.0) & (norm_entropy <= 0.5)
+            (contrast >= CONTRAST_HIGH) & (norm_entropy <= ENTROPY_CHAOTIC)
             & (sign_changes > 1.5)
             & ~is_crystal                                 # anything multi that isn't crystal
         )
-        
+
         # single soliton: high contrast, ordered spectrum, single peak
         # Update is_single to require sharpness (avoids labeling broad chaotic humps as solitons)
         is_single = (
-            (contrast >= 8.0) & (norm_entropy <= 0.5)
+            (contrast >= CONTRAST_HIGH) & (norm_entropy <= ENTROPY_CHAOTIC)
             & (sign_changes <= 1.5)
             & (sharpness >= IS_SHARP_THRESHOLD)
         )
@@ -131,12 +214,16 @@ def make_state_labeler():
     return state_labeler
 
 _DEFAULT_THRESHOLD_PARAMS: dict = {
+    # power_floor is a conservative fallback only. The canonical OFF floor is
+    # derived from physical config via make_threshold_params() / physical_off_floor();
+    # callers generating real (Joule-scale) data should ALWAYS pass that floor in.
     "power_floor": 1e-13,
     "contrast_cw": 2.0,
     "contrast_high": 8.0,
     "entropy_chaotic": 0.5,
     "crystal_cv": 0.1,
-    "sech2_r2": 0.95,
+    "sech2_r2": 0.95,        # NumPy single-soliton sech² goodness-of-fit (class 6)
+    "sharpness_min": 0.75,   # JAX single-soliton top-N power fraction (class 6)
     "peak_prominence": 0.3,
     "peak_width": 2.0,
 }
@@ -217,15 +304,22 @@ def label_trajectory(E_history, threshold_params=None) -> np.ndarray:
     return labels
 
 
-def assert_labelers_consistent(e_field: np.ndarray, atol: float = 0.0) -> None:
+def assert_labelers_consistent(
+    e_field: np.ndarray,
+    atol: float = 0.0,
+    threshold_params: dict | None = None,
+) -> None:
     """Verify JAX and NumPy labelers agree on a test field.
-    
-    Run this during dataset generation to catch labeler drift early.
+
+    Both labelers are driven by the *same* threshold dict so any disagreement is
+    a genuine reduction/mechanism drift rather than a config mismatch. Run this
+    during dataset generation to catch labeler drift early.
     Raises AssertionError if the two labelers disagree.
     """
-    jax_labeler = make_state_labeler()
+    params = {**_DEFAULT_THRESHOLD_PARAMS, **(threshold_params or {})}
+    jax_labeler = make_state_labeler(params)
     jax_label = int(jax_labeler(jnp.array(e_field, dtype=jnp.complex64)))
-    np_label = int(label_soliton_state(e_field, threshold_params={"peak_prominence": 0.30}))
+    np_label = int(label_soliton_state(e_field, threshold_params=params))
     assert jax_label == np_label, (
         f"Labeler inconsistency: JAX={jax_label}, NumPy={np_label} for field with "
         f"max_power={float(np.max(np.abs(e_field)**2)):.3e}, "
