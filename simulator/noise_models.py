@@ -14,7 +14,7 @@ import yaml
 from scipy.signal import welch
 
 
-_DEF_CFG_PATH = Path(__file__).resolve().parents[1] / "config" / "tfln_params.yaml"
+_DEF_CFG_PATH = Path(__file__).resolve().parents[1] / "config" / "sin_params.yaml"
 
 
 def _load_config(config_path: str | Path | None = None) -> dict[str, Any]:
