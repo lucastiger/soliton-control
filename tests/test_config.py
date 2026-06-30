@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "tfln_params.yaml"
+CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "sin_params.yaml"
 
 
 @pytest.fixture(scope="module")
