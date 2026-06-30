@@ -209,8 +209,9 @@ def _single_trajectory_solver(
         e_t, delta_t, e_snapshots, label_history, snap_count = carry
         e_t = e_t.astype(jnp.complex64)
 
-        # Deterministic thermal detuning shift
-        thermal_shift = (omega0 / thermal["n0"]) * thermal["dn_dT"] * delta_t
+        # Deterministic thermal detuning shift. δω = ω_res − ω_pump, so heating
+        # (dn/dT>0 → n↑ → ω_res↓) LOWERS δω: the shift enters with a minus sign.
+        thermal_shift = -(omega0 / thermal["n0"]) * thermal["dn_dT"] * delta_t
         # Stochastic TCCR/TRN/PyroEO detuning noise at this round trip
         freq_noise = noise_sequence[step_idx]
         delta_omega_eff = delta_omega[step_idx] + thermal_shift + freq_noise   # <-- CHANGED
