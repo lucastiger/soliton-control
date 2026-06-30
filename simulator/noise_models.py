@@ -289,7 +289,7 @@ def validate_noise_models() -> None:
     trn_std = float(jnp.std(total.trn.sample(jax.random.PRNGKey(1), 100_000)))
     tccr_std = float(jnp.std(total.tccr.sample(jax.random.PRNGKey(2), 100_000)))
     
-    if tccr_std <= trn_std:
+    if 0.0 < tccr_std <= trn_std:   # SiN has no TCCR (tccr_std == 0); not a warning condition
         import warnings
         warnings.warn(
             f"TRN ({trn_std:.3e}) >= TCCR ({tccr_std:.3e}) for current config. "
