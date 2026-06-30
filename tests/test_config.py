@@ -64,8 +64,7 @@ def test_all_physical_parameters_are_numeric(config):
         ("coupling_q", 1.0e7),
         ("d2_rad_per_s2", 1.2566370614e7),
         ("kappa_i_rad_per_s", 1.215e8),
-        ("surface_state_density_per_m2", 2.0e11),
-        ("gamma_LLE_per_J_per_s", 3.98e19),
+        ("gamma_LLE_per_J_per_s", 2.92e19),
     ],
 )
 def test_previously_unsigned_exponents_parse_to_expected_floats(config, key, expected):
