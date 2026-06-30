@@ -508,9 +508,31 @@ def solve_lle_ssfm_jax(
     # convert every leaf to a scalar JAX array so vmap can trace through it
     thermal = {k: jnp.array(v, dtype=jnp.float32) for k, v in thermal.items()}
 
-    delta_omega_input = delta_omega
-    delta_omega = jnp.array(delta_omega_input, dtype=jnp.float32)
-    delta_arr = jnp.atleast_1d(delta_omega)
+    # delta_omega is a per-trajectory, per-round-trip sweep of shape (n_traj, t_slow)
+    # (it is vmapped over axis 0 and indexed as delta_omega[step] inside the solver).
+    # Accept convenience inputs and normalize to 2-D:
+    #   scalar         -> (1, t_slow) constant detuning
+    #   1-D (t_slow,)  -> (1, t_slow) single-trajectory sweep
+    #   2-D            -> used as-is, must be (n_traj, t_slow)
+    delta_omega_arr = jnp.asarray(delta_omega, dtype=jnp.float32)
+    if delta_omega_arr.ndim == 0:
+        delta_arr = jnp.broadcast_to(delta_omega_arr, (1, int(t_slow)))
+    elif delta_omega_arr.ndim == 1:
+        if delta_omega_arr.shape[0] != int(t_slow):
+            raise ValueError(
+                f"1-D delta_omega must have length t_slow={t_slow}, "
+                f"got {delta_omega_arr.shape[0]}."
+            )
+        delta_arr = delta_omega_arr[None, :]
+    elif delta_omega_arr.ndim == 2:
+        if delta_omega_arr.shape[1] != int(t_slow):
+            raise ValueError(
+                f"2-D delta_omega must be (n_traj, t_slow={t_slow}), "
+                f"got {tuple(delta_omega_arr.shape)}."
+            )
+        delta_arr = delta_omega_arr
+    else:
+        raise ValueError(f"delta_omega must be 0/1/2-D, got ndim={delta_omega_arr.ndim}.")
     beta_arr = tuple(float(b) for b in beta)
 
     # Guard: catch accidental use of fiber-optics β₂ units (s²/m).
