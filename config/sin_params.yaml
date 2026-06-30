@@ -62,7 +62,40 @@ physical_parameters:
   kappa_th_w_per_m_k: 30.0         # Si3N4 bulk; unused in current dynamics
   T_k: 300.0                       # assumed ambient
   tau_th_s: 5.0e-6                 # FLAG: not derivable from given measurements; placeholder
-  Gamma_th: 0.1                    # FLAG: not derivable from given measurements; placeholder
+                                   #       Sets the THERMAL DYNAMICS timescale only; the
+                                   #       steady-state shift below is tau_th-independent.
+  # ---- Thermo-optic coupling Gamma_th (lumped, dimensionless) ----------------
+  # Single-pole thermal model:  dΔT/dt = -ΔT/τ_th + Γ_th·P_abs/(ρ·Cp·V)
+  #   steady state:  ΔT_ss = R_th·P_abs,   R_th = τ_th·Γ_th/(ρ·Cp·V)   [K/W]
+  # P_abs = κ_i·⟨|E|²⟩ is the intrinsically-dissipated power (W); V is the OPTICAL
+  # mode volume (mode_volume_m3 above). Two physical factors were collapsed into
+  # the old placeholder 0.1, which over-predicted ΔT by ~30× (shift ~80×κ):
+  #   Γ_th = η_abs · (V_mode / V_thermal)
+  #     • η_abs  — fraction of κ_i loss that is MATERIAL ABSORPTION (becomes heat),
+  #                vs scattering/radiation that leaves the mode. Representative 0.3.
+  #                FLAG: not measured; Γ_th ∝ η_abs, rescale linearly if pinned.
+  #     • V_mode/V_thermal — the heat is stored in the thermal-diffusion volume
+  #                V_thermal ≈ L_cav·π·L_th², L_th = √(α·τ_th), α = k_th/(ρ·Cp),
+  #                which is ~63× the optical mode volume. Using V=V_mode in the ODE
+  #                under-counts the heat capacity by exactly this ratio, so we
+  #                divide it back out here.
+  # Numbers (SiN device above): α = 30/(3.17e3·700) = 1.352e-5 m²/s,
+  #   L_th = √(1.352e-5·5e-6) = 8.22e-6 m, V_thermal = 5.842e-3·π·(8.22e-6)²
+  #        = 1.241e-12 m³, V_mode/V_thermal = 1.954e-14/1.241e-12 = 1.575e-2,
+  #   Γ_th = 0.3·1.575e-2 = 4.72e-3.
+  # Cross-check (τ_th cancels): R_th = τ_th·Γ_th/(ρ·Cp·V) = η_abs/(π·k_th·L_cav)
+  #   = 0.3/(π·30·5.842e-3) = 0.545 K/W (line-source spreading resistance).
+  #   ⟹ at the soliton operating point (Δω≈2–3κ, P_abs≈4–8 mW) the steady
+  #   thermal_shift = (ω0/n0)·dn_dT·ΔT_ss ≈ 0.2–0.5×κ (was 10–80×κ). Sane.
+  Gamma_th: 4.72e-3
+  # Pre-flight tripwire: solve_lle_ssfm_jax asserts the analytic WORST-CASE
+  # steady |thermal_shift| (evaluated at resonance Δω=0, where ⟨|E|²⟩ peaks)
+  # stays below this multiple of κ, so a mis-set Γ_th fails loudly instead of
+  # NaN-ing the SSFM field — independent of the requested detuning. The corrected
+  # Γ_th peaks at ~7.8×κ at Δω=0 (soliton detunings Δω≈2–3κ sit at ~0.2–0.5×κ);
+  # the old Γ_th=0.1 peaked at ~165×κ. Default 15.0 passes the former with ~2×
+  # margin and trips the latter hard. Raise it if running deliberately higher P_in.
+  thermal_shift_max_over_kappa: 15.0
 
   # ---- chi2 channels: ZERO for SiN (centrosymmetric: no Pockels, no pyroelectric) ----
   eo_r33_m_per_v: 0.0
