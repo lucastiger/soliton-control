@@ -582,10 +582,10 @@ def validate_solver(
         p_trans = p_trans[traj_idx]        # (t_slow,)
         e_hist  = e_hist[traj_idx]         # (n_snapshots, n_tau)
 
-    # MI/soliton threshold in energy-normalized LLE (|E|^2 ~ J):
-    # P_th = (kappa/2)^2 / (gamma_LLE * t_r * kappa_c)
+    # MI/soliton threshold in energy-normalized LLE (|E|^2 ~ J), δω→0:
+    # P_th = κ^3 / (8·gamma_LLE·kappa_c)
     p_th = max(
-        (kappa / 2.0) ** 2 / (max(gamma, 1e-30) * t_r * max(kappa_c, 1e-30)),
+        (kappa / 2.0) ** 2 * kappa / (2.0 * max(gamma, 1e-30) * max(kappa_c, 1e-30)),
         1e-30
     )
     arg = pin / p_th - 1.0          # >0 means above MI threshold
