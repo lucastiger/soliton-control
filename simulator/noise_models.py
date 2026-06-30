@@ -148,8 +148,9 @@ class TCCRNoise:
         self.var_tccr   = self.s0_tccr / (2.0 * self.tau_carrier)             # stationary variance
         self.sigma_tccr = math.sqrt(max(self.var_tccr, 0.0))
 
-        # Sanity: sigma_tccr should be in range [1e4, 1e11] rad/s for TFLN
-        if not (1e4 < self.sigma_tccr < 1e11):
+        # Sanity: for chi2 platforms (e.g. TFLN) sigma_tccr ~ [1e4, 1e11] rad/s.
+        # sigma_tccr == 0 is the expected SiN case (r33 = 0): skip the warning.
+        if self.sigma_tccr > 0.0 and not (1e4 < self.sigma_tccr < 1e11):
             import warnings
             warnings.warn(
                 f"TCCRNoise.sigma_tccr = {self.sigma_tccr:.2e} rad/s is outside the "
