@@ -2,7 +2,7 @@
 
 This module implements a GPU-accelerated split-step Fourier method (SSFM)
 solver for the generalized Lugiato–Lefever Equation (LLE), including a
-single-pole thermal model for thermo-optic detuning drift.
+https://github.com/lucastiger/soliton-control/edit/main/simulator/lle_solver.pysingle-pole thermal model for thermo-optic detuning drift.
 """
 
 from __future__ import annotations
@@ -374,10 +374,12 @@ def solve_lle_ssfm_jax(
 ) -> dict[str, np.ndarray]:
     """Batch-capable SSFM solver for the generalized LLE using JAX.
 
-    Detuning convention: delta_omega = omega_pump - omega_res.
-      Positive delta_omega = blue-detuned pump (pump above resonance).
-      Solitons exist for delta_omega > 0, specifically kappa/2 < delta_omega < ~5*kappa.
-      The detuning sweep should go from positive to negative values (blue to red scan).
+    Detuning convention: delta_omega = omega_res - omega_pump  (cavity minus pump);
+      this matches the implemented dynamical term  -1j * delta_omega * E.
+      Positive delta_omega = red-detuned pump (pump below resonance) = soliton side.
+      Solitons exist for kappa/2 < delta_omega < ~5*kappa.
+      For adiabatic soliton access, sweep delta_omega from negative to positive
+      (blue-to-red pump scan).
 
     Args:
         pin: Pump power in watts.
