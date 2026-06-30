@@ -165,15 +165,16 @@ def _build_omega_grid(n_tau: int, t_r: float) -> jnp.ndarray:
 def build_dispersion(omega: jnp.ndarray, beta_list: tuple[float, ...]) -> jnp.ndarray:
     """Build dispersion polynomial.
 
-    beta_list[0] is beta_2 (s^2/m), beta_list[1] is beta_3 (s^3/m), etc.
+    beta_list[0] is beta_2 (s), beta_list[1] is beta_3 (s^2), etc.
+    (LLE convention beta_k = D_k / D_1^k; NOT fiber GVD s^2/m.)
     The k=0 and k=1 terms are zero by definition in the co-moving frame and must not be included.
     """
     assert len(beta_list) >= 1, "Must provide at least beta_2"
     disp = jnp.zeros_like(omega)
     for i, b in enumerate(beta_list):
         k = i + 2
-        sign = (-1) ** k   # +1 for even, -1 for odd
-        disp = disp + sign * float(b) / math.factorial(k) * omega ** k
+        # All orders enter with +beta_k/k!: D_int = ½D₂μ² + ⅙D₃μ³ + …
+        disp = disp + float(b) / math.factorial(k) * omega ** k
     return disp
 
 
