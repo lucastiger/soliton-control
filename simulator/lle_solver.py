@@ -311,7 +311,7 @@ def solve_lle_ssfm_jax(
     physical = _load_config(config_path)
     gamma = float(physical.get("gamma_LLE_per_J_per_s"))
     assert 1e15 < gamma < 1e25, (
-        f"gamma_LLE = {gamma:.3e} J⁻¹s⁻¹ outside expected range for TFLN at 200 GHz FSR. "
+        f"gamma_LLE = {gamma:.3e} J⁻¹s⁻¹ outside expected range at 200 GHz FSR. "
         f"Use gamma_nlse_to_lle() to compute from γ_NLSE."
     )
     thermal["Gamma_th"] = float(physical.get("Gamma_th", thermal["Gamma_th"]))
