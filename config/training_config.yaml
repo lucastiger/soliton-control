@@ -15,7 +15,7 @@ experiment:
 
 data:
   h5_path: data/synthetic/dataset.h5
-  config_path: config/tfln_params.yaml
+  config_path: config/sin_params.yaml
   W: 200
   H: 50
   stride: 10
