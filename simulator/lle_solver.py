@@ -383,7 +383,9 @@ def solve_lle_ssfm_jax(
 
     Args:
         pin: Pump power in watts.
-        delta_omega: Laser detuning(s) in rad/s; scalar or 1D array.
+        delta_omega: Detuning sweep (omega_res - omega_pump) in rad/s, shape
+            (n_traj, t_slow). A scalar or 1-D (t_slow,) input is broadcast to a
+            single trajectory. delta_omega[traj, step] is the detuning per round trip.
         t_slow: Number of round trips.
         beta: Dispersion coefficient list [beta2, beta3, beta4].
         kappa: Total cavity loss rate (rad/s).
