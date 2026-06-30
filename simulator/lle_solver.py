@@ -434,11 +434,12 @@ def solve_lle_ssfm_jax(
     t_r = 1.0 / thermal["fsr_hz"]
 
     # --- Pre-flight: verify pin is in a physically meaningful regime ---
-    # P_th = (kappa/2)^2 / (gamma_LLE * t_r * kappa_c): the MI onset threshold.
+    # MI onset (δω→0): γ·U_cw = κ/2 with U_cw = κ_c·pin/(κ/2)^2  ⇒
+    #   P_th = κ^3 / (8·γ_LLE·κ_c)   [W].  (No stray 1/t_r: |E|²∈J already.)    
     # The simulation only produces interesting states (MI, multi-soliton, single-soliton)
     # for pin > P_th. Warn if pin is more than 10x below threshold so the caller
     # knows their dataset will be all-CW.
-    _p_th = (kappa / 2.0) ** 2 / (gamma * t_r * kappa_c)
+    _p_th = (kappa / 2.0) ** 2 * kappa / (2.0 * gamma * kappa_c)
     if pin < 0.1 * _p_th:
         import warnings as _w
         _w.warn(
