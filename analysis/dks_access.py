@@ -614,7 +614,11 @@ def plot_optical_spectrum(path: Path, e_field, cav, delta_omega, *,
     ax.set_xlabel("wavelength (nm)")
     ax.set_ylabel(r"normalized power  $10\log_{10}(|\tilde E|^2)$  (dB)")
     ax.set_xlim(1150, 2300)
-    ax.set_ylim(-70, 3)
+    # Show the full dynamic range down to the numerical floor (the spectrum is
+    # clamped at 1e-12 -> -120 dB): with a -70 dB floor the comb wings drop off
+    # the bottom axis near 1400 / 1700 nm and vanish. -125 dB keeps the roll-off
+    # and the noise-floor plateau visible across the whole 1150-2300 nm window.
+    ax.set_ylim(-125, 5)
     ax.set_title(
         f"Single-DKS optical spectrum @ delta_omega = "
         f"{delta_omega / cav.kappa:.1f} kappa, pin = {PIN_W} W "
