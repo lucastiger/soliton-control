@@ -46,7 +46,7 @@ Note on the band location: at pin = 0.214 W the pump is ~61x the MI threshold, a
 
 D2 is small, so the DKS comb spans several hundred cavity modes. At the mandated n_tau = 512 the resolved (central) comb is a clean, smooth, symmetric sech^2 envelope with the pump line ~30 dB above the sidebands; the far wings (>~30 dB down) are truncated by the +/-256-mode window. A cross-check at n_tau = 2048 (`spectrum_resolution_check`) shows the identical central envelope with wings rolling off to < -55 dB; the sech^2 envelope correlation is > 0.99 at both resolutions.
 
-The JAX scan-time labeler under-calls these broad-comb solitons as 'chaotic' (class 3) due to a strict spectral-entropy threshold; the NumPy labeler's actual sech^2 goodness-of-fit correctly returns class 6. Classification here uses the NumPy labeler.
+Both labelers return class 6 for these states. The JAX scan-time labeler (which produces label_history for the training dataset) keys class 6 on a single temporal peak plus a smooth monotonic sech^2 spectral envelope; an earlier 'fraction of power in the top ~32 points' heuristic mislabeled a DKS on a bright CW background as chaotic (class 3) and was replaced. Classification in this study uses the NumPy sech^2-fit labeler.
 
 ## Artifacts
 

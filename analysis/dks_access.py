@@ -52,13 +52,16 @@ resolutions.
 
 Labeler note
 ------------
-The proper single-soliton class (6) is the one defined by an actual sech^2
-goodness-of-fit: ``simulator.state_labeler.label_soliton_state`` (the NumPy
-labeler) returns 6 for these states.  The JAX scan-time labeler under-calls them
-as "chaotic" (class 3) because its spectral-entropy threshold (0.5) is too strict
-for a broad DKS comb whose power is spread over many modes; that is a labeler
-calibration matter, not a property of the state.  Classification here uses the
-NumPy labeler.
+Both labelers return class 6 for these states.  The NumPy labeler
+(``simulator.state_labeler.label_soliton_state``) uses an actual temporal sech^2
+goodness-of-fit; the JAX scan-time labeler (which produces ``label_history`` for
+the training dataset) keys class 6 on a single temporal peak plus a smooth
+(monotonic) sech^2 spectral envelope.  An earlier JAX heuristic — "fraction of
+power in the top ~32 points" — mislabeled a single DKS as chaotic (class 3)
+because the soliton sits on a bright CW background that carries most of the
+energy; that gate was replaced by the envelope test (see
+``make_state_labeler``), so JAX and NumPy now agree (class 6) at both n_tau = 512
+and 2048.  Classification here uses the NumPy labeler.
 """
 
 from __future__ import annotations
@@ -750,10 +753,12 @@ def write_report(path: Path, cav, validated, fb, control, repro, emap,
         f"cross-check at n_tau = 2048 (`spectrum_resolution_check`) shows the "
         f"identical central envelope with wings rolling off to < -55 dB; the sech^2 "
         f"envelope correlation is > 0.99 at both resolutions.\n\n"
-        f"The JAX scan-time labeler under-calls these broad-comb solitons as "
-        f"'chaotic' (class 3) due to a strict spectral-entropy threshold; the "
-        f"NumPy labeler's actual sech^2 goodness-of-fit correctly returns class 6. "
-        f"Classification here uses the NumPy labeler.\n\n"
+        f"Both labelers return class 6 for these states. The JAX scan-time labeler "
+        f"(which produces label_history for the training dataset) keys class 6 on a "
+        f"single temporal peak plus a smooth monotonic sech^2 spectral envelope; an "
+        f"earlier 'fraction of power in the top ~32 points' heuristic mislabeled a "
+        f"DKS on a bright CW background as chaotic (class 3) and was replaced. "
+        f"Classification in this study uses the NumPy sech^2-fit labeler.\n\n"
     )
     lines.append("## Artifacts\n\n")
     lines.append(

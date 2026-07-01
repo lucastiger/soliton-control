@@ -103,12 +103,12 @@ def make_state_labeler(threshold_params: dict | None = None):
     ENTROPY_CHAOTIC    = float(_params["entropy_chaotic"])
     CRYSTAL_CV         = float(_params["crystal_cv"])
     PEAK_AMP_THRESHOLD = float(_params["peak_prominence"])  # fraction of p_max
-    IS_SHARP_THRESHOLD = float(_params["sharpness_min"])
+    SECH2_ENV_MONO_MIN = float(_params["sech2_env_mono_min"])  # single-DKS envelope test
+    SECH2_ENV_TOL      = float(_params["sech2_env_tol"])       # per-step log tolerance
 
     def state_labeler(e_t: jnp.ndarray) -> jnp.int32:
         n_tau = e_t.shape[0]
         p = jnp.abs(e_t) ** 2
-        total_power = jnp.sum(p)
 
         # --- spectral features ---
         spec = jnp.abs(jnp.fft.fft(e_t)) ** 2
@@ -135,14 +135,31 @@ def make_state_labeler(threshold_params: dict | None = None):
         peak_mask = _is_local_max & (p > PEAK_AMP_THRESHOLD * p_max)
         sign_changes = jnp.sum(peak_mask).astype(jnp.float32)
 
-        # Sharpness proxy: fraction of total power contained in the top-N_peak points.
-        # A true sech² soliton concentrates ~80% of power in ~N_tau/16 ≈ 32 points.
-        # A broad chaotic hump spreads power across many points → low sharpness.
-        # This replaces the scipy sech²-fit that cannot run inside jax.lax.scan.
-        N_peak_pts = n_tau // 16                            # 32 for n_tau=512
-        p_sorted = jnp.sort(p)[::-1]                        # descending
-        power_in_top = jnp.sum(p_sorted[:N_peak_pts])
-        sharpness = power_in_top / jnp.maximum(total_power, 1e-20)
+        # Smooth-sech²-envelope test (single-DKS vs chaos), JAX-traceable analogue
+        # of the NumPy path's temporal sech² goodness-of-fit.
+        #
+        # A single dissipative Kerr soliton is a strong pump (DC) line plus a comb of
+        # sidebands whose power envelope is sech² — i.e. it decreases MONOTONICALLY
+        # outward from the pump on BOTH sides. Chaos/MI spectra are jagged and
+        # non-monotonic. We measure the fraction of outward mode-steps whose (log)
+        # power does not increase (within SECH2_ENV_TOL). This REPLACES the old
+        # top-N-points "sharpness" proxy, which silently mislabels a genuine single
+        # DKS as chaotic: the soliton sits on a bright CW background that carries most
+        # of the total energy, so the fraction of power in the top ~32 points is only
+        # ~0.2 (< the 0.75 sharpness gate), and the state fell through to class 3.
+        # The envelope monotonicity is ~1.0 for a single DKS at any resolution
+        # (the comb may be broad, but it is smooth), and ~0.5–0.75 for MI/chaos.
+        spec_shift = jnp.fft.fftshift(spec)
+        log_env = jnp.log10(
+            jnp.maximum(spec_shift / jnp.maximum(jnp.max(spec_shift), 1e-30), 1e-12)
+        )
+        c_idx = n_tau // 2                                   # DC / pump line index
+        right_steps = log_env[c_idx + 1:] - log_env[c_idx:-1]   # outward, i > center
+        left_steps = log_env[:c_idx] - log_env[1:c_idx + 1]     # outward, i < center
+        mono_frac = 0.5 * (
+            jnp.mean((right_steps <= SECH2_ENV_TOL).astype(jnp.float32))
+            + jnp.mean((left_steps <= SECH2_ENV_TOL).astype(jnp.float32))
+        )
 
 
         # --- decision tree (all jnp.where for JAX traceability) ---
@@ -192,12 +209,15 @@ def make_state_labeler(threshold_params: dict | None = None):
             & ~is_crystal                                 # anything multi that isn't crystal
         )
 
-        # single soliton: high contrast, ordered spectrum, single peak
-        # Update is_single to require sharpness (avoids labeling broad chaotic humps as solitons)
+        # single soliton: high contrast, ordered spectrum, ONE temporal peak, and a
+        # smooth (monotonic) sech² spectral envelope. Keying on single-peak + smooth
+        # envelope (the features the NumPy sech²-fit path uses) makes this robust to
+        # a soliton sitting on a bright CW background, while chaos (jagged, low
+        # mono_frac) and multi/MI (multiple peaks) are still excluded.
         is_single = (
             (contrast >= CONTRAST_HIGH) & (norm_entropy <= ENTROPY_CHAOTIC)
             & (sign_changes <= 1.5)
-            & (sharpness >= IS_SHARP_THRESHOLD)
+            & (mono_frac >= SECH2_ENV_MONO_MIN)
         )
 
         label = jnp.where(is_off,     0,
@@ -223,7 +243,13 @@ _DEFAULT_THRESHOLD_PARAMS: dict = {
     "entropy_chaotic": 0.5,
     "crystal_cv": 0.1,
     "sech2_r2": 0.95,        # NumPy single-soliton sech² goodness-of-fit (class 6)
-    "sharpness_min": 0.75,   # JAX single-soliton top-N power fraction (class 6)
+    # JAX single-soliton test: fraction of outward spectral-envelope steps that are
+    # monotonically non-increasing (within sech2_env_tol, in log10 units). A single
+    # DKS comb is ~1.0; MI/chaos are ~0.5-0.75. Replaces the old "sharpness_min"
+    # top-N-power-fraction proxy, which mislabeled a DKS on a bright CW background.
+    "sech2_env_mono_min": 0.9,
+    "sech2_env_tol": 0.05,
+    "sharpness_min": 0.75,   # DEPRECATED: no longer used by the JAX labeler
     "peak_prominence": 0.3,
     "peak_width": 2.0,
 }
