@@ -77,7 +77,6 @@ from pathlib import Path
 
 import jax
 import numpy as np
-from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
 
 from simulator.lle_solver import (
@@ -86,7 +85,11 @@ from simulator.lle_solver import (
     resolve_cavity_rates,
     solve_lle_ssfm_jax,
 )
-from simulator.state_labeler import label_soliton_state, make_threshold_params
+from simulator.state_labeler import (
+    label_soliton_state,
+    make_threshold_params,
+    sech2_envelope_correlation,
+)
 
 C_LIGHT = 299_792_458.0
 
@@ -186,43 +189,6 @@ def count_temporal_peaks(e_field: np.ndarray, rel_height: float = 0.5) -> int:
     peaks, _ = find_peaks(doubled, height=rel_height * p.max())
     # each real peak is counted twice in the doubled array
     return len(peaks) // 2
-
-
-def sech2_envelope_correlation(e_field: np.ndarray) -> tuple[float, float, float]:
-    """sech^2 correlation of the *comb envelope* (dB), excluding the pump line.
-
-    A DKS spectrum is a strong pump (DC) line plus a sech^2 comb of sidebands
-    (|FT of sech|^2 = sech^2).  The physically-meaningful "sech^2 spectral
-    correlation" is therefore a correlation of the sideband envelope with a
-    width-fitted sech^2, done in log (dB) space where the comb is many decades.
-    The pump line itself is excluded (it is not part of the sech^2 envelope).
-
-    Returns (pearson_corr, r2, fitted_mode_width).  On fit failure returns NaNs.
-    """
-    n = e_field.shape[0]
-    spec = np.abs(np.fft.fftshift(np.fft.fft(e_field))) ** 2
-    spec_n = spec / max(spec.max(), 1e-300)
-    mu = np.arange(n) - n // 2
-    y = np.log10(np.maximum(spec_n, 1e-12))
-
-    mask = np.ones(n, dtype=bool)
-    mask[n // 2] = False  # drop the pump (DC) line
-
-    def model(m, log_a, mode_w, log_floor):
-        return np.log10(10.0 ** log_a / np.cosh(m / mode_w) ** 2 + 10.0 ** log_floor)
-
-    try:
-        popt, _ = curve_fit(
-            model, mu[mask], y[mask], p0=[0.0, 60.0, -4.0], maxfev=40000
-        )
-        fit = model(mu, *popt)
-        corr = float(np.corrcoef(y[mask], fit[mask])[0, 1])
-        ss_res = float(np.sum((y[mask] - fit[mask]) ** 2))
-        ss_tot = float(np.sum((y[mask] - y[mask].mean()) ** 2))
-        r2 = 1.0 - ss_res / max(ss_tot, 1e-30)
-        return corr, r2, abs(float(popt[1]))
-    except Exception:
-        return float("nan"), float("nan"), float("nan")
 
 
 def numpy_label(e_field: np.ndarray, cav: CavityParams, delta_omega: float,

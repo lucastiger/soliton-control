@@ -28,13 +28,16 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from analysis.dks_access import load_cavity_params, sech2_envelope_correlation
+from simulator.lle_solver import resolve_cavity_rates
 from simulator.state_labeler import (
     assert_labelers_consistent,
     label_soliton_state,
     make_state_labeler,
     make_threshold_params,
+    sech2_envelope_correlation,
 )
+
+CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "sin_params.yaml"
 
 DATA = Path(__file__).resolve().parent / "data"
 PIN = 0.214
@@ -56,10 +59,11 @@ EXPECTED = {
 
 @pytest.fixture(scope="module")
 def params():
-    cav = load_cavity_params()
     # single source of truth: same physical OFF floor the solver uses at this point
-    # (dw_max = 11*kappa covers the high existence edge fixture)
-    return make_threshold_params(cav.kappa, cav.kappa_c, PIN, 11.0 * cav.kappa)
+    # (dw_max = 11*kappa covers the high existence edge fixture). Cavity rates come
+    # from the simulator layer only -- this labeler test does not import analysis/.
+    _kappa_i, kappa_c, kappa = resolve_cavity_rates(CONFIG_PATH)
+    return make_threshold_params(kappa, kappa_c, PIN, 11.0 * kappa)
 
 
 def _load(name):
