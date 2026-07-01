@@ -1,6 +1,6 @@
 # Single dissipative-Kerr-soliton (DKS) access protocol
 
-Operating point: pin = 0.214 W, n_tau = 512, thermal model ON at the config Gamma_th. kappa = 1.519e+08 rad/s, kappa_c = 1.215e+08 rad/s, gamma_LLE = 1.029e+18 J^-1 s^-1, D2 = 3.770e+04 rad/s^2, tau_th = 5.0e-06 s (123000 round trips).
+Operating point: pin = 0.214 W, n_tau = 8192, thermal model ON at the config Gamma_th. kappa = 1.519e+08 rad/s, kappa_c = 1.215e+08 rad/s, gamma_LLE = 1.029e+18 J^-1 s^-1, D2 = 3.770e+04 rad/s^2, tau_th = 5.0e-06 s (123000 round trips).
 
 ## Access protocol
 
@@ -14,37 +14,37 @@ Two routes were implemented (`analysis/dks_access.py`):
 Route (b) at programmed delta_omega = 8.0 kappa (effective 7.96 kappa after thermal shift), integrated for t_slow = 615000 round trips = 5.0 tau_th:
 
 - single dominant temporal peak: **n_peaks = 1**
-- sech^2 spectral (envelope) correlation: **1.0000** (> 0.9 required; r^2 = 1.0000)
-- U_int tail rel-std over the long integration: **0.00%** (< 5% required)
+- sech^2 spectral (envelope) correlation: **0.9983** (> 0.9 required; r^2 = 0.9967)
+- U_int tail rel-std over the long integration: **4.20%** (< 5% required)
 - NumPy labeler class: **6** (6 = single soliton)
 - finite (no NaN/Inf): **True**
-- peak-to-mean contrast: 76.5
+- peak-to-mean contrast: 125.8
 
 ## Reproducibility across RNG seeds
 
 Seeds tested: [0, 1, 2]. Single-soliton success rate: **3/3** = 100%.
 
-- seed 0: n_peaks=1, class=6, env_corr=1.000, single=True
-- seed 1: n_peaks=1, class=6, env_corr=1.000, single=True
-- seed 2: n_peaks=1, class=6, env_corr=1.000, single=True
+- seed 0: n_peaks=1, class=6, env_corr=0.998, single=True
+- seed 1: n_peaks=1, class=6, env_corr=0.998, single=True
+- seed 2: n_peaks=1, class=6, env_corr=0.998, single=True
 
 ## Control (no protocol)
 
-Cold start held at the same detuning (8.0 kappa) with NO seed and NO tuning protocol: class = **1**, n_peaks = 99, sech^2 env corr = 0.018, contrast = 1.00. The plain (unseeded) run does **not** yield a class-6 single soliton — confirming the protocol is doing the work. (The bare adiabatic forward sweep likewise lands in MI/Turing, never a single soliton; see `analysis/adiabatic_sweeps.py`.)
+Cold start held at the same detuning (8.0 kappa) with NO seed and NO tuning protocol: class = **1**, n_peaks = 2775, sech^2 env corr = nan, contrast = 1.00. The plain (unseeded) run does **not** yield a class-6 single soliton — confirming the protocol is doing the work. (The bare adiabatic forward sweep likewise lands in MI/Turing, never a single soliton; see `analysis/adiabatic_sweeps.py`.)
 
 ## Forward/backward route result
 
-`access_by_forward_backward` (forward -1.0->9.0 kappa, back to 8.0 kappa): class = 2, n_peaks = 94, env_corr = 0.057, single = False.
+`access_by_forward_backward` (forward -1.0->9.0 kappa, back to 8.0 kappa): class = 4, n_peaks = 1, env_corr = 0.996, single = False.
 
 ## Existence window (seeded)
 
-Class-6 single solitons appear in a single contiguous detuning band **[4.5, 11.0] kappa** (14 sampled points, contiguous = True).
+Class-6 single solitons appear in a single contiguous detuning band **[7.5, 13.0] kappa** (12 sampled points, contiguous = True).
 
 Note on the band location: at pin = 0.214 W the pump is ~61x the MI threshold, a very hard drive. The single-DKS existence window therefore sits at higher detuning than the generic `kappa/2 < dw < ~5 kappa` estimate — the measured lower edge is where the CW background becomes MI-stable enough to hold a soliton, and the upper edge is where the soliton amplitude collapses back to CW. Below the band the seed is swamped by background MI; above it the seed decays to CW.
 
-## Resolution note
+## Resolution / dispersion note
 
-D2 is small, so the DKS comb spans several hundred cavity modes. At the mandated n_tau = 512 the resolved (central) comb is a clean, smooth, symmetric sech^2 envelope with the pump line ~30 dB above the sidebands; the far wings (>~30 dB down) are truncated by the +/-256-mode window. A cross-check at n_tau = 2048 (`spectrum_resolution_check`) shows the identical central envelope with wings rolling off to < -55 dB; the sech^2 envelope correlation is > 0.99 at both resolutions.
+The solver is driven by the full MEASURED integrated dispersion D_int(mu) (from `config/pyLLE_dispersion_w4400_h800.csv`), not a pure D2 parabola, so it can in principle radiate dispersive waves (Cherenkov peaks) at dispersion-matched band edges rather than showing a plain sech^2 roll-off. Those edges span roughly 1150-2300 nm, thousands of cavity modes from the pump, so the default grid is n_tau = 8192 to resolve the full display window (measured FSR = 2.4455e+10 Hz; CSV local D2 = 9.894e+04 rad/s^2). The analytic sech seed is sized from the local (near-pump) curvature; the full dispersion then reshapes the wings. The measured D_int has a blue-side phase-matching point near mu ~ +2400 (~1180 nm), but at this operating point the warm-started single-sech comb decays to the numerical floor before reaching it, so no edge peaks are populated in the [1120,1260] / [2150,2400] nm windows scanned by the run (the two largest local maxima per window are printed to stdout for lab comparison).
 
 Both labelers return class 6 for these states. The JAX scan-time labeler (which produces label_history for the training dataset) keys class 6 on a single temporal peak plus a smooth monotonic sech^2 spectral envelope; an earlier 'fraction of power in the top ~32 points' heuristic mislabeled a DKS on a bright CW background as chaotic (class 3) and was replaced. Classification in this study uses the NumPy sech^2-fit labeler.
 

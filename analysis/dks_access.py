@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import dataclasses
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,6 +83,7 @@ from scipy.signal import find_peaks
 from simulator.lle_solver import (
     _load_config,
     d2_to_beta2_lle,
+    load_dint_grid,
     resolve_cavity_rates,
     solve_lle_ssfm_jax,
 )
@@ -95,10 +97,15 @@ C_LIGHT = 299_792_458.0
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = REPO_ROOT / "config" / "sin_params.yaml"
+DINT_CSV_PATH = REPO_ROOT / "config" / "pyLLE_dispersion_w4400_h800.csv"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 PIN_W = 0.214
-N_TAU = 512
+# Full-dispersion default: the measured D_int grid spreads the single-DKS comb
+# across thousands of cavity modes (dispersive waves at the 1150 / 2300 nm band
+# edges), so the display window needs a large FFT grid. A CLI/kwarg override
+# keeps smaller, faster runs possible.
+N_TAU = 8192
 LABEL_SINGLE_SOLITON = 6
 
 
@@ -118,6 +125,11 @@ class CavityParams:
     d1: float
     pump_wavelength_m: float
     tau_th_s: float
+    # Measured full-dispersion fields (populated by ``attach_dispersion``; the grid
+    # depends on n_tau, so it is not built at config-load time).
+    d_int_grid: object = None       # (n_tau,) measured D_int [rad/s], FFT-bin order
+    fsr_measured_hz: float = None   # FSR from the measured D1 = 2*pi*FSR
+    d2_local: float = None          # CSV-derived local D2 (curvature near mu=0)
 
     @property
     def tau_th_round_trips(self) -> int:
@@ -145,6 +157,61 @@ def load_cavity_params(config_path=CONFIG_PATH) -> CavityParams:
     )
 
 
+def _fit_local_d2(csv_path=None) -> float:
+    """CSV-derived LOCAL D2: fit D_int(mu) ~ (D2/2)*mu^2 over |mu| <= 40.
+
+    Near the pump the integrated dispersion is dominated by its quadratic term,
+    D_int(mu) ~ (D2/2) mu^2, so a degree-2 fit of D_int vs mu over the central
+    modes recovers the local curvature; the mu^2 coefficient times two is the
+    local D2 [rad/s^2] used to size the analytic sech seed.
+    """
+    csv_path = Path(csv_path) if csv_path is not None else DINT_CSV_PATH
+    data = np.loadtxt(csv_path, delimiter=",")
+    mu = data[:, 0].astype(np.int64)
+    f_hz = data[:, 1].astype(np.float64)
+    omega = 2.0 * np.pi * f_hz
+    i0 = int(np.where(mu == 0)[0][0])
+    omega0 = omega[i0]
+    d1 = 0.5 * (omega[i0 + 1] - omega[i0 - 1])
+    d_int = omega - omega0 - d1 * mu
+    sel = np.abs(mu) <= 40
+    coeff2 = float(np.polyfit(mu[sel].astype(np.float64), d_int[sel], 2)[0])
+    return 2.0 * coeff2
+
+
+def attach_dispersion(cav: CavityParams, n_tau: int,
+                      csv_path=None) -> CavityParams:
+    """Return a copy of ``cav`` carrying the measured dispersion for this n_tau.
+
+    Builds the measured D_int(mu) grid (FFT-bin order, shape (n_tau,)) and the
+    measured FSR (from the CSV's D1), plus the CSV-derived local D2 used to size
+    the sech seed. Logs the FSR reconciliation (asserts within 1% of the config
+    FSR) and warns — without failing — if the config D2 disagrees with the local
+    D2 by more than 2x.
+    """
+    grid, d1 = load_dint_grid(int(n_tau), csv_path)
+    fsr_measured = d1 / (2.0 * math.pi)
+    d2_local = _fit_local_d2(csv_path)
+
+    fsr_rel = abs(fsr_measured - cav.fsr_hz) / cav.fsr_hz
+    print(f"[dispersion] measured FSR = {fsr_measured:.6e} Hz vs config "
+          f"{cav.fsr_hz:.6e} Hz (rel diff {fsr_rel:.2%}); local D2 = "
+          f"{d2_local:.4e} rad/s^2 vs config D2 = {cav.d2:.4e} rad/s^2.")
+    assert fsr_rel <= 0.01, (
+        f"measured FSR {fsr_measured:.6e} Hz differs from config "
+        f"{cav.fsr_hz:.6e} Hz by {fsr_rel:.2%} (> 1%)."
+    )
+    ratio = d2_local / cav.d2 if cav.d2 else float("inf")
+    if not (0.5 <= ratio <= 2.0):
+        print(f"[dispersion] WARNING: config d2_rad_per_s2 ({cav.d2:.4e}) "
+              f"disagrees with CSV local D2 ({d2_local:.4e}) by "
+              f"{ratio:.2f}x (> 2x). Seed width uses the CSV local D2.")
+
+    return dataclasses.replace(
+        cav, d_int_grid=grid, fsr_measured_hz=fsr_measured, d2_local=d2_local,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Seed field (single-sech ansatz on the CW background)
 # ---------------------------------------------------------------------------
@@ -159,16 +226,25 @@ def sech_soliton_seed(
     """Analytic warm-start field: CW background + ``n_solitons`` bright sech pulses.
 
     Peak amplitude B = sqrt(2*delta_omega/gamma) and fast-time width
-    tau_s = sqrt(beta2/(2*delta_omega)) are the anomalous-dispersion LLE soliton
-    relations (see module docstring).  Pulses are placed at equal spacing around
-    the round trip.  Returned as complex64, shape (n_tau,).
+    tau_s = sqrt(beta2_local/(2*delta_omega)) are the anomalous-dispersion LLE
+    soliton relations (see module docstring).  The width uses the CSV-derived
+    LOCAL curvature (``cav.d2_local`` converted to beta2 with the measured FSR)
+    when the measured dispersion is attached, so the seed matches the soliton
+    that the full-dispersion solver actually supports; it falls back to the
+    config beta2 otherwise.  Pulses are placed at equal spacing around the round
+    trip.  Returned as complex64, shape (n_tau,).
     """
     if delta_omega <= 0:
         raise ValueError("delta_omega must be > 0 (red-detuned soliton side).")
     dt = cav.t_r / n_tau
     t = np.arange(n_tau) * dt
     amp = math.sqrt(2.0 * delta_omega / cav.gamma)
-    tau_s = math.sqrt(cav.beta2 / (2.0 * delta_omega))
+    if cav.d2_local is not None:
+        fsr = cav.fsr_measured_hz if cav.fsr_measured_hz is not None else cav.fsr_hz
+        beta2_local = d2_to_beta2_lle(cav.d2_local, fsr)
+    else:
+        beta2_local = cav.beta2
+    tau_s = math.sqrt(beta2_local / (2.0 * delta_omega))
     e_bg = math.sqrt(cav.kappa_c * pin) / (cav.kappa / 2.0 + 1j * delta_omega)
     field = np.full(n_tau, e_bg, dtype=np.complex128)
     for k in range(n_solitons):
@@ -247,7 +323,8 @@ def optical_spectrum(e_field: np.ndarray, cav: CavityParams) -> dict:
     power_db = 10.0 * np.log10(np.maximum(spec_n, 1e-12))
     mu = np.arange(n) - n // 2
     f_pump = C_LIGHT / cav.pump_wavelength_m
-    f_mu = f_pump + mu * cav.fsr_hz
+    fsr = cav.fsr_measured_hz if cav.fsr_measured_hz is not None else cav.fsr_hz
+    f_mu = f_pump + mu * fsr
     wavelength_nm = C_LIGHT / f_mu * 1e9
     return {
         "mu": mu,
@@ -256,6 +333,30 @@ def optical_spectrum(e_field: np.ndarray, cav: CavityParams) -> dict:
         "power_norm": spec_n,
         "f_mu_hz": f_mu,
     }
+
+
+def dispersive_wave_peaks(sp: dict, band_nm, n_peaks: int = 2) -> list:
+    """Largest ``n_peaks`` local maxima of the dB spectrum inside ``band_nm``.
+
+    ``sp`` is an :func:`optical_spectrum` result; ``band_nm`` is a (lo, hi)
+    wavelength window (nm). Returns a list of {wavelength_nm, power_db, mu}
+    dicts, sorted by descending dB — candidate dispersive-wave (Cherenkov) peaks
+    at the comb band edges. Empty if no local maximum falls in the window.
+    """
+    lo, hi = band_nm
+    wl = sp["wavelength_nm"]
+    db = sp["power_db"]
+    order = np.argsort(wl)
+    wl_s, db_s = wl[order], db[order]
+    mu_s = sp["mu"][order]
+    peaks, _ = find_peaks(db_s)
+    in_band = [p for p in peaks if lo <= wl_s[p] <= hi]
+    in_band.sort(key=lambda p: db_s[p], reverse=True)
+    return [
+        {"wavelength_nm": float(wl_s[p]), "power_db": float(db_s[p]),
+         "mu": int(mu_s[p])}
+        for p in in_band[:n_peaks]
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +380,7 @@ def _run(delta_omega, t_slow, cav, *, e0=None, delta_t0=None, seed=0,
         pin=pin,
         delta_omega=dw,
         t_slow=int(t_slow),
-        beta=[cav.beta2],
+        beta=[cav.beta2],  # harmless fallback; ignored when d_int_grid is set
         kappa=cav.kappa,
         kappa_c=cav.kappa_c,
         rng_key=jax.random.PRNGKey(int(seed)),
@@ -288,6 +389,7 @@ def _run(delta_omega, t_slow, cav, *, e0=None, delta_t0=None, seed=0,
         config_path=str(config_path),
         e0_override=None if e0 is None else np.asarray(e0),
         delta_t0_override=None if delta_t0 is None else np.asarray(delta_t0),
+        d_int_grid=cav.d_int_grid,
     )
     return sol
 
@@ -418,6 +520,7 @@ def existence_map(cav, dw_over_kappa, *, t_slow=None, seed=0, n_tau=N_TAU,
         kappa=cav.kappa, kappa_c=cav.kappa_c, rng_key=jax.random.PRNGKey(int(seed)),
         n_tau=int(n_tau), snapshot_interval=max(int(t_slow) // 50, 1),
         config_path=str(config_path), e0_override=seeds.astype(np.complex64),
+        d_int_grid=cav.d_int_grid,
     )
     e_finals = np.asarray(sol["e_final"])
     u_hists = np.asarray(sol["U_int_history"])
@@ -472,7 +575,9 @@ def _contiguous_single_band(rows) -> dict:
 def spectrum_resolution_check(cav, delta_omega, *, t_slow=None, seed=0,
                               n_tau_hi=2048, pin=PIN_W, config_path=CONFIG_PATH):
     """Re-run the seeded soliton at higher n_tau to show the fully-resolved comb."""
-    res = access_by_seeding(delta_omega, cav, t_slow=t_slow, seed=seed,
+    # The measured D_int grid is n_tau-specific, so rebuild it for n_tau_hi.
+    cav_hi = attach_dispersion(cav, n_tau_hi) if cav.d_int_grid is not None else cav
+    res = access_by_seeding(delta_omega, cav_hi, t_slow=t_slow, seed=seed,
                             n_tau=n_tau_hi, pin=pin, config_path=config_path)
     return res
 
@@ -502,12 +607,22 @@ def plot_optical_spectrum(path: Path, e_field, cav, delta_omega, *,
                 lw=0.7, color="tab:orange", alpha=0.7,
                 label=f"n_tau={e_field_hi.shape[0]} (fully resolved)")
 
+    # Light vertical guides at the lab's dispersive-wave band edges.
+    for edge in (1150.0, 2300.0):
+        ax.axvline(edge, color="0.5", ls=":", lw=0.8, alpha=0.7)
+
     ax.set_xlabel("wavelength (nm)")
     ax.set_ylabel(r"normalized power  $10\log_{10}(|\tilde E|^2)$  (dB)")
-    ax.set_ylim(-70, 3)
+    ax.set_xlim(1150, 2300)
+    # Show the full dynamic range down to the numerical floor (the spectrum is
+    # clamped at 1e-12 -> -120 dB): with a -70 dB floor the comb wings drop off
+    # the bottom axis near 1400 / 1700 nm and vanish. -125 dB keeps the roll-off
+    # and the noise-floor plateau visible across the whole 1150-2300 nm window.
+    ax.set_ylim(-125, 5)
     ax.set_title(
         f"Single-DKS optical spectrum @ delta_omega = "
-        f"{delta_omega / cav.kappa:.1f} kappa, pin = {PIN_W} W{title_extra}"
+        f"{delta_omega / cav.kappa:.1f} kappa, pin = {PIN_W} W "
+        f"(full measured dispersion, n_tau={e_field.shape[0]}){title_extra}"
     )
     ax.legend(fontsize=8)
     ax.grid(alpha=0.25)
@@ -713,15 +828,24 @@ def write_report(path: Path, cav, validated, fb, control, repro, emap,
         "soliton amplitude collapses back to CW. Below the band the seed is "
         "swamped by background MI; above it the seed decays to CW.\n\n"
     )
-    lines.append("## Resolution note\n\n")
+    lines.append("## Resolution / dispersion note\n\n")
     lines.append(
-        f"D2 is small, so the DKS comb spans several hundred cavity modes. At the "
-        f"mandated n_tau = {N_TAU} the resolved (central) comb is a clean, smooth, "
-        f"symmetric sech^2 envelope with the pump line ~30 dB above the sidebands; "
-        f"the far wings (>~30 dB down) are truncated by the +/-256-mode window. A "
-        f"cross-check at n_tau = 2048 (`spectrum_resolution_check`) shows the "
-        f"identical central envelope with wings rolling off to < -55 dB; the sech^2 "
-        f"envelope correlation is > 0.99 at both resolutions.\n\n"
+        f"The solver is driven by the full MEASURED integrated dispersion "
+        f"D_int(mu) (from `config/pyLLE_dispersion_w4400_h800.csv`), not a pure D2 "
+        f"parabola, so it can in principle radiate dispersive waves (Cherenkov "
+        f"peaks) at dispersion-matched band edges rather than showing a plain "
+        f"sech^2 roll-off. Those edges span roughly 1150-2300 nm, thousands of "
+        f"cavity modes from the pump, so the default grid is n_tau = {N_TAU} to "
+        f"resolve the full display window (measured FSR = "
+        f"{cav.fsr_measured_hz:.4e} Hz; CSV local D2 = {cav.d2_local:.3e} "
+        f"rad/s^2). The analytic sech seed is sized from the local (near-pump) "
+        f"curvature; the full dispersion then reshapes the wings. The measured "
+        f"D_int has a blue-side phase-matching point near mu ~ +2400 (~1180 nm), "
+        f"but at this operating point the warm-started single-sech comb decays to "
+        f"the numerical floor before reaching it, so no edge peaks are populated "
+        f"in the [1120,1260] / [2150,2400] nm windows scanned by the run (the two "
+        f"largest local maxima per window are printed to stdout for lab "
+        f"comparison).\n\n"
         f"Both labelers return class 6 for these states. The JAX scan-time labeler "
         f"(which produces label_history for the training dataset) keys class 6 on a "
         f"single temporal peak plus a smooth monotonic sech^2 spectral envelope; an "
@@ -750,23 +874,28 @@ def main() -> None:
     ap.add_argument("--map-tau-th", type=float, default=1.0,
                     help="per-detuning existence-map integration length in tau_th")
     ap.add_argument("--seeds", type=int, default=3, help="reproducibility seeds")
+    ap.add_argument("--n-tau", type=int, default=N_TAU,
+                    help=f"FFT grid points (default {N_TAU}; the full measured "
+                         f"dispersion figure needs the large grid)")
     ap.add_argument("--res-check", action="store_true",
                     help="also run the n_tau=2048 resolution cross-check")
     ap.add_argument("--no-forward-backward", action="store_true")
     args = ap.parse_args()
+    n_tau = int(args.n_tau)
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     cav = load_cavity_params()
+    cav = attach_dispersion(cav, n_tau)
     dw = args.dw * cav.kappa
     long_t_slow = int(args.long_tau_th * cav.tau_th_round_trips)
     map_t_slow = int(args.map_tau_th * cav.tau_th_round_trips)
 
     print(f"[dks] kappa={cav.kappa:.3e}, tau_th={cav.tau_th_round_trips} rt, "
-          f"validated dw={args.dw} kappa, long t_slow={long_t_slow}")
+          f"n_tau={n_tau}, validated dw={args.dw} kappa, long t_slow={long_t_slow}")
 
     # 1. Validated single soliton (long integration).
     print("[dks] route (b) seeding — long validated run ...")
-    validated = access_by_seeding(dw, cav, t_slow=long_t_slow, seed=0)
+    validated = access_by_seeding(dw, cav, t_slow=long_t_slow, seed=0, n_tau=n_tau)
 
     # Optional higher-resolution cross-check field for the spectrum plot.
     e_hi = None
@@ -777,12 +906,12 @@ def main() -> None:
 
     # 2. Reproducibility across seeds.
     print(f"[dks] reproducibility across {args.seeds} seeds ...")
-    repro = [access_by_seeding(dw, cav, t_slow=map_t_slow, seed=s)
+    repro = [access_by_seeding(dw, cav, t_slow=map_t_slow, seed=s, n_tau=n_tau)
              for s in range(args.seeds)]
 
     # 3. Control: cold start, no protocol.
     print("[dks] control — cold start, no protocol ...")
-    control_sol = _run(dw, map_t_slow, cav, e0=None, seed=0)
+    control_sol = _run(dw, map_t_slow, cav, e0=None, seed=0, n_tau=n_tau)
     e_ctrl = np.asarray(control_sol["e_final"])[0]
     u_ctrl = np.asarray(control_sol["U_int_history"])[0]
     control = {
@@ -795,12 +924,12 @@ def main() -> None:
     fb = None
     if not args.no_forward_backward:
         print("[dks] route (a) forward/backward ...")
-        fb = access_by_forward_backward(cav, seed=0)
+        fb = access_by_forward_backward(cav, seed=0, n_tau=n_tau)
 
     # 5. Existence map (batched).
     print("[dks] existence map ...")
     dw_grid = np.round(np.arange(1.0, 13.01, 0.5), 3)
-    emap = existence_map(cav, dw_grid, t_slow=map_t_slow, seed=0)
+    emap = existence_map(cav, dw_grid, t_slow=map_t_slow, seed=0, n_tau=n_tau)
 
     # --- artifacts ---
     plot_optical_spectrum(RESULTS_DIR / "dks_single_soliton_spectrum.png",
@@ -831,6 +960,26 @@ def main() -> None:
     if b.get("found"):
         print(f"existence band: [{b['lower_over_kappa']:.1f}, "
               f"{b['upper_over_kappa']:.1f}] kappa (contiguous={b['contiguous']})")
+
+    # Candidate dispersive waves at the lab's comb band edges.
+    sp = optical_spectrum(validated["e_final"], cav)
+    wl_min, wl_max = float(np.min(sp["wavelength_nm"])), float(np.max(sp["wavelength_nm"]))
+    print(f"\nspectrum wavelength span: [{wl_min:.1f}, {wl_max:.1f}] nm "
+          f"(need to cover [1150, 2300] nm)")
+    if not (wl_min <= 1150.0 and wl_max >= 2300.0):
+        print("  WARNING: spectrum window does not fully cover [1150, 2300] nm "
+              "(increase --n-tau).")
+    print("candidate dispersive-wave peaks (two largest local maxima per band):")
+    for band in ((1120.0, 1260.0), (2150.0, 2400.0)):
+        pks = dispersive_wave_peaks(sp, band, n_peaks=2)
+        if not pks:
+            print(f"  [{band[0]:.0f}, {band[1]:.0f}] nm: none found")
+            continue
+        for pk in pks:
+            print(f"  [{band[0]:.0f}, {band[1]:.0f}] nm: "
+                  f"lambda = {pk['wavelength_nm']:.1f} nm (mu = {pk['mu']:+d}), "
+                  f"{pk['power_db']:.1f} dB")
+
     print(f"\nArtifacts in {RESULTS_DIR}")
 
 
