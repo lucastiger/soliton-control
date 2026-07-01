@@ -10,7 +10,7 @@ from __future__ import annotations
 import functools
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -179,6 +179,99 @@ def build_dispersion(omega: jnp.ndarray, beta_list: tuple[float, ...]) -> jnp.nd
     return disp
 
 
+_DEFAULT_DINT_CSV = (
+    Path(__file__).resolve().parents[1] / "config" / "pyLLE_dispersion_w4400_h800.csv"
+)
+
+# Module-level cache keyed on (n_tau, resolved_csv_path) so repeated calls do not
+# re-read/re-interpolate the (multi-thousand-row) dispersion CSV.
+_DINT_GRID_CACHE: dict[tuple[int, str], "DintGrid"] = {}
+
+
+class DintGrid(NamedTuple):
+    """Measured integrated-dispersion grid returned by :func:`load_dint_grid`.
+
+    Attributes:
+        grid: D_int(mu) [rad/s], shape (n_tau,), in FFT-bin order (NOT fftshifted),
+            jnp float32 — ready to drop into the linear operator as ``disp``.
+        d1:  Measured D1 = 2π·FSR [rad/s] from the central difference of ω at mu=0,
+            so callers can reconcile the FSR / round-trip time.
+
+    A ``NamedTuple`` so it is importable, picklable, and supports both attribute
+    access (``res.grid``) and tuple unpacking (``grid, d1 = res``).
+    """
+
+    grid: jnp.ndarray
+    d1: float
+
+
+def load_dint_grid(n_tau, csv_path=None, config_path=None) -> "DintGrid":
+    """Return D_int(mu) [rad/s], shape (n_tau,), in FFT-bin order (NOT fftshifted),
+    ready to drop into the linear operator as ``disp``.
+
+    - Default csv_path = config/pyLLE_dispersion_w4400_h800.csv.
+    - Load (mu, f_hz). Compute omega = 2*pi*f. Locate mu==0 -> omega0.
+    - D1 = central difference of omega at mu==0 (rad/s). Returned too (as the
+      ``d1`` attribute of the DintGrid result) so callers can reconcile FSR.
+    - D_int(mu) = omega - omega0 - D1*mu.
+    - Build the integer FFT mode grid: k = np.round(np.fft.fftfreq(n_tau,
+      d=t_r/n_tau) / fsr).astype(int), where fsr = D1/(2*pi) and t_r = 1/fsr.
+      (This yields the same bin ordering as _build_omega_grid, so disp aligns
+      with the existing FFT convention.)
+    - D_int_grid = np.interp(k, mu_csv, D_int_csv). Assert the mu=0 bin is 0.
+    - D_int_grid is returned as a jnp float32 array (complex-compatible for the
+      -1j*disp linear-operator term).
+
+    Args:
+        n_tau: Number of fast-time / FFT grid points.
+        csv_path: Optional path to the (mu, f_hz) CSV. Defaults to the pyLLE grid.
+        config_path: Accepted for API symmetry with the rest of the solver; the
+            dispersion source is the CSV, so this argument is currently unused.
+
+    Returns:
+        DintGrid(grid, d1) — see :class:`DintGrid`.
+    """
+    del config_path  # reserved for API symmetry; dispersion comes from the CSV
+    csv_path = Path(csv_path) if csv_path is not None else _DEFAULT_DINT_CSV
+
+    cache_key = (int(n_tau), str(csv_path.resolve()))
+    cached = _DINT_GRID_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    # Columns: mode number mu (int), resonance frequency f [Hz]; no header.
+    data = np.loadtxt(csv_path, delimiter=",")
+    mu_csv = data[:, 0].astype(np.int64)
+    f_hz = data[:, 1].astype(np.float64)
+
+    # Work in float64: omega ~ 1.2e15 rad/s while D_int ~ 1e8–1e14 rad/s, so
+    # D_int = omega - omega0 - D1*mu is a catastrophic-cancellation subtraction
+    # that must not be done in float32.
+    omega = 2.0 * np.pi * f_hz
+    i0 = int(np.where(mu_csv == 0)[0][0])
+    omega0 = omega[i0]
+
+    # Central difference of omega at mu==0 (relies on mu=±1 flanking mu=0 in the
+    # contiguous integer mode list).
+    d1 = 0.5 * (omega[i0 + 1] - omega[i0 - 1])          # rad/s
+    d_int_csv = omega - omega0 - d1 * mu_csv            # rad/s
+
+    fsr = d1 / (2.0 * np.pi)                            # Hz
+    t_r = 1.0 / fsr                                     # s
+    # Same bin ordering as _build_omega_grid: fftfreq/fsr gives the integer mode
+    # index per FFT bin ([0,1,..,n/2-1,-n/2,..,-1]).
+    k = np.round(np.fft.fftfreq(int(n_tau), d=t_r / int(n_tau)) / fsr).astype(int)
+
+    d_int_grid = np.interp(k, mu_csv, d_int_csv)
+    assert d_int_grid[0] == 0.0, (
+        f"mu=0 FFT bin (k={k[0]}) must have D_int == 0, got {d_int_grid[0]!r}."
+    )
+
+    result = DintGrid(grid=jnp.asarray(d_int_grid, dtype=jnp.float32), d1=float(d1))
+    _DINT_GRID_CACHE[cache_key] = result
+    return result
+
+
 def _single_trajectory_solver(
     delta_omega: float,
     pin: float,
@@ -197,10 +290,16 @@ def _single_trajectory_solver(
     noise_sequence: jnp.ndarray,   # shape (t_slow,), rad/s, AR(1) pre-generated
     e0_override: jnp.ndarray,     # warm-start field; pass jnp.zeros((n_tau,), complex64) for cold start
     delta_t0_override: jnp.ndarray,  # warm-start thermal state (scalar); pass jnp.zeros(()) for cold start
+    d_int_grid: jnp.ndarray | None,  # per-mode measured D_int(mu) (FFT-bin order); None = Taylor path
 ) -> dict[str, jnp.ndarray]:
     """Solve one detuning trajectory with SSFM + thermal Euler update."""
     omega = _build_omega_grid(n_tau, t_r)
-    disp = build_dispersion(omega, beta)
+    # Per-mode measured dispersion when supplied, else the Taylor beta polynomial.
+    # Cast to omega's real dtype and rely on the (n_tau,) shape guaranteed upstream.
+    if d_int_grid is not None:
+        disp = jnp.asarray(d_int_grid).astype(omega.dtype)
+    else:
+        disp = build_dispersion(omega, beta)
     pump_amp = (jnp.sqrt(jnp.maximum(kappa_c * pin, 0.0)) * t_r).astype(jnp.complex64)
     kappa_i = jnp.maximum(thermal["kappa_i"], 0.0)
     omega0 = 2.0 * jnp.pi * 299_792_458.0 / thermal["pump_wavelength_m"]
@@ -384,7 +483,7 @@ def _physical_state_labeler(
 _PER_TRAJ = jax.jit(
     jax.vmap(
         _single_trajectory_solver,
-        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0, 0, 0),
+        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0, 0, 0, None),
     ),
     static_argnums=(2, 3, 7, 10, 13),
 )
@@ -404,6 +503,7 @@ def solve_lle_ssfm_jax(
     snapshot_interval: int = 10,
     e0_override: np.ndarray | jnp.ndarray | None = None,
     delta_t0_override: np.ndarray | jnp.ndarray | float | None = None,
+    d_int_grid: np.ndarray | jnp.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """Batch-capable SSFM solver for the generalized LLE using JAX.
 
@@ -437,6 +537,12 @@ def solve_lle_ssfm_jax(
         delta_t0_override: Optional warm-start thermal state DeltaT (K). ``None``
             (default) = start cold (DeltaT=0). Scalar broadcasts to all
             trajectories; shape (n_traj,) is per-trajectory.
+        d_int_grid: Optional per-mode integrated dispersion D_int(mu) [rad/s] in
+            FFT-bin order, shape (n_tau,). ``None`` (default) = build dispersion
+            from the Taylor ``beta`` list (historical behavior). When given it is
+            used verbatim as the linear-operator dispersion (broadcast across all
+            trajectories) and the Taylor path is bypassed; use
+            :func:`load_dint_grid` to build it from a measured dispersion CSV.
 
     Returns:
         Dictionary containing requested histories.
@@ -579,7 +685,9 @@ def solve_lle_ssfm_jax(
 
     # Guard: catch accidental use of fiber-optics β₂ units (s²/m).
     # LLE β₂ = D₂/D₁² ≈ 1e-18–1e-16 s for typical microresonators.
-    if len(beta_arr) >= 1 and beta_arr[0] != 0.0:
+    # Only applies to the Taylor beta path; when a measured d_int_grid drives the
+    # dispersion, beta is unused so this range check is skipped.
+    if d_int_grid is None and len(beta_arr) >= 1 and beta_arr[0] != 0.0:
         b2_mag = abs(beta_arr[0])
         if not (1e-20 < b2_mag < 1e-12):
             raise ValueError(
@@ -652,6 +760,19 @@ def solve_lle_ssfm_jax(
         float(kappa), float(kappa_c), float(pin), delta_omega_max
     )
 
+    # Optional measured per-mode dispersion: cast to the solver dtype and pin the
+    # shape to (n_tau,). Passed with a None (broadcast) vmap axis so it is shared
+    # across all trajectories rather than mapped per trajectory.
+    if d_int_grid is None:
+        d_int_grid_arr = None
+    else:
+        d_int_grid_arr = jnp.asarray(d_int_grid, dtype=jnp.float32)
+        if d_int_grid_arr.shape != (int(n_tau),):
+            raise ValueError(
+                f"d_int_grid must have shape (n_tau={n_tau},), "
+                f"got {tuple(d_int_grid_arr.shape)}."
+            )
+
     out = _PER_TRAJ(
         delta_arr,
         float(pin),
@@ -670,6 +791,7 @@ def solve_lle_ssfm_jax(
         noise_sequences,
         e0_init,
         delta_t0_init,
+        d_int_grid_arr,
     )
 
     return {k: np.asarray(v) for k, v in out.items()}
