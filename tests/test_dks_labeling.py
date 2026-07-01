@@ -41,11 +41,16 @@ PIN = 0.214
 
 # field fixture -> expected 7-class label
 EXPECTED = {
-    "dks_512": 6,
-    "dks_2048": 6,
+    "dks_512": 6,        # validated single DKS at 8*kappa
+    "dks_512_lo": 6,     # single DKS at the LOW existence edge (4.5*kappa)
+    "dks_512_hi": 6,     # single DKS at the HIGH existence edge (11*kappa)
+    "dks_2048": 6,       # same soliton, fully-resolved comb
     "cw_512": 1,
     "mi_512": 2,
     "chaos_512": 3,
+    # CW field carrying a single-sample numerical spike ("99.98% DC" edge case):
+    # high peak-to-mean but a FLAT sideband spectrum -> physically CW, must be 1.
+    "cwspike_512": 1,
 }
 
 
@@ -53,7 +58,8 @@ EXPECTED = {
 def params():
     cav = load_cavity_params()
     # single source of truth: same physical OFF floor the solver uses at this point
-    return make_threshold_params(cav.kappa, cav.kappa_c, PIN, 8.0 * cav.kappa)
+    # (dw_max = 11*kappa covers the high existence edge fixture)
+    return make_threshold_params(cav.kappa, cav.kappa_c, PIN, 11.0 * cav.kappa)
 
 
 def _load(name):
@@ -80,22 +86,33 @@ def test_labelers_consistent_atol0(name, params):
     assert_labelers_consistent(_load(name), atol=0.0, threshold_params=params)
 
 
-def test_single_dks_is_class_6_both_resolutions(params):
+def test_single_dks_is_class_6_all_resolutions_and_edges(params):
     """The headline regression: a real single DKS is class 6 in BOTH labelers at
-    n_tau=512 and n_tau=2048 (previously the JAX labeler called it chaotic=3)."""
-    for name in ("dks_512", "dks_2048"):
+    n_tau=512 and n_tau=2048 (previously the JAX labeler called it chaotic=3), and
+    at BOTH existence-band edges (4.5*kappa widest / 11*kappa narrowest comb), not
+    just the 8*kappa center."""
+    for name in ("dks_512", "dks_512_lo", "dks_512_hi", "dks_2048"):
         e = _load(name)
-        assert int(make_state_labeler(params)(jnp.array(e, dtype=jnp.complex64))) == 6
-        assert label_soliton_state(e, threshold_params=params) == 6
+        assert int(make_state_labeler(params)(jnp.array(e, dtype=jnp.complex64))) == 6, name
+        assert label_soliton_state(e, threshold_params=params) == 6, name
+
+
+def test_cw_plus_numerical_spike_is_cw_not_soliton(params):
+    """CW-dominated field with a single-sample spike must be CW (1), never a soliton:
+    its sideband spectrum is FLAT (no comb), so the comb-structure gate rejects it in
+    both labelers."""
+    e = _load("cwspike_512")
+    assert int(make_state_labeler(params)(jnp.array(e, dtype=jnp.complex64))) == 1
+    assert label_soliton_state(e, threshold_params=params) == 1
 
 
 def test_envelope_correlation_is_discriminative():
     """sech^2 envelope correlation must score the soliton HIGH and MI/chaos LOW,
     so class 6 is not reachable merely by having a broad spectrum."""
     corr = {n: sech2_envelope_correlation(_load(n))[0] for n in EXPECTED}
-    # soliton: high at both resolutions
-    assert corr["dks_512"] > 0.9, corr
-    assert corr["dks_2048"] > 0.9, corr
+    # soliton: high at both resolutions AND at both existence-band edges
+    for name in ("dks_512", "dks_512_lo", "dks_512_hi", "dks_2048"):
+        assert corr[name] > 0.9, (name, corr)
     # MI and chaos: low (finite and well below the soliton bar)
     assert np.isfinite(corr["mi_512"]) and corr["mi_512"] < 0.5, corr
     assert np.isfinite(corr["chaos_512"]) and corr["chaos_512"] < 0.5, corr

@@ -59,9 +59,12 @@ the training dataset) keys class 6 on a single temporal peak plus a smooth
 (monotonic) sech^2 spectral envelope.  An earlier JAX heuristic — "fraction of
 power in the top ~32 points" — mislabeled a single DKS as chaotic (class 3)
 because the soliton sits on a bright CW background that carries most of the
-energy; that gate was replaced by the envelope test (see
-``make_state_labeler``), so JAX and NumPy now agree (class 6) at both n_tau = 512
-and 2048.  Classification here uses the NumPy labeler.
+energy; that gate was replaced by the envelope test (see ``make_state_labeler``),
+so JAX and NumPy now agree (class 6) at both n_tau = 512 and 2048.  Class 6 also
+requires real comb structure (a minimum inner/outer sideband ratio), so a CW field
+carrying a single-sample numerical spike — high peak-to-mean but a FLAT sideband
+spectrum — is classified CW (class 1), not soliton.  Classification here uses the
+NumPy labeler.
 """
 
 from __future__ import annotations

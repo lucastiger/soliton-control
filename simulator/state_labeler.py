@@ -105,6 +105,7 @@ def make_state_labeler(threshold_params: dict | None = None):
     PEAK_AMP_THRESHOLD = float(_params["peak_prominence"])  # fraction of p_max
     SECH2_ENV_MONO_MIN = float(_params["sech2_env_mono_min"])  # single-DKS envelope test
     SECH2_ENV_TOL      = float(_params["sech2_env_tol"])       # per-step log tolerance
+    COMB_MIN_DB        = float(_params["comb_structure_min_db"])  # comb-vs-flat-floor gate
 
     def state_labeler(e_t: jnp.ndarray) -> jnp.int32:
         n_tau = e_t.shape[0]
@@ -161,6 +162,25 @@ def make_state_labeler(threshold_params: dict | None = None):
             + jnp.mean((left_steps <= SECH2_ENV_TOL).astype(jnp.float32))
         )
 
+        # Comb-structure ("central bulge") test: a real soliton comb concentrates
+        # sideband power NEAR the pump (inner half-band) and decays outward, so the
+        # inner-band mean is well above the outer-band mean. A CW field carrying a
+        # single-sample numerical spike has a FLAT sideband floor (the spike spreads
+        # equally over all modes), giving inner ≈ outer ≈ 0 dB. mono_frac alone
+        # cannot separate these — a flat floor is trivially "monotonic" — so we also
+        # require a minimum inner/outer sideband ratio. This is the JAX analogue of
+        # "the spectrum is a comb, not a pump line on a flat floor".
+        q_idx = n_tau // 4
+        inner_band = jnp.concatenate(
+            [spec_shift[c_idx + 1:c_idx + q_idx], spec_shift[c_idx - q_idx + 1:c_idx]]
+        )
+        outer_band = jnp.concatenate(
+            [spec_shift[c_idx + q_idx:], spec_shift[:c_idx - q_idx + 1]]
+        )
+        inner_outer_db = 10.0 * jnp.log10(
+            jnp.mean(inner_band) / jnp.maximum(jnp.mean(outer_band), 1e-30)
+        )
+
 
         # --- decision tree (all jnp.where for JAX traceability) ---
         # Physical fields are in Joules (mean|E|² ~ 1e-11–1e-9). Use mean(|E|²)
@@ -209,25 +229,40 @@ def make_state_labeler(threshold_params: dict | None = None):
             & ~is_crystal                                 # anything multi that isn't crystal
         )
 
-        # single soliton: high contrast, ordered spectrum, ONE temporal peak, and a
-        # smooth (monotonic) sech² spectral envelope. Keying on single-peak + smooth
-        # envelope (the features the NumPy sech²-fit path uses) makes this robust to
-        # a soliton sitting on a bright CW background, while chaos (jagged, low
-        # mono_frac) and multi/MI (multiple peaks) are still excluded.
+        # CW-dominated with a single-sample numerical spike: high contrast and ONE
+        # peak, but the sideband spectrum is FLAT (no comb — inner ≈ outer). This is
+        # physically a CW state whose lone hot sample fakes a high peak-to-mean; it
+        # must NOT be read as a soliton. Route it to CW (1). (A genuine soliton has a
+        # comb: inner_outer_db well above COMB_MIN_DB.)
+        is_flat_spike = (
+            (contrast >= CONTRAST_HIGH)
+            & (sign_changes <= 1.5)
+            & (inner_outer_db < COMB_MIN_DB)
+        )
+
+        # single soliton: high contrast, ordered spectrum, ONE temporal peak, a smooth
+        # (monotonic) sech² spectral envelope, AND real comb structure (sidebands
+        # concentrated near the pump, not a flat floor). Keying on single-peak +
+        # smooth sech² comb (the features the NumPy sech²-fit path uses) makes this
+        # robust to a soliton on a bright CW background, while chaos (jagged, low
+        # mono_frac), multi/MI (multiple peaks), and CW+spike (flat, is_flat_spike)
+        # are all excluded.
         is_single = (
             (contrast >= CONTRAST_HIGH) & (norm_entropy <= ENTROPY_CHAOTIC)
             & (sign_changes <= 1.5)
             & (mono_frac >= SECH2_ENV_MONO_MIN)
+            & (inner_outer_db >= COMB_MIN_DB)
         )
 
-        label = jnp.where(is_off,     0,
-                jnp.where(is_cw,      1,
-                jnp.where(is_mi,      2,
-                jnp.where(is_chaotic, 3,
-                jnp.where(is_multi,   4,
-                jnp.where(is_crystal, 5,
-                jnp.where(is_single,  6,
-                                      3)))))))
+        label = jnp.where(is_off,        0,
+                jnp.where(is_cw,         1,
+                jnp.where(is_mi,         2,
+                jnp.where(is_chaotic,    3,
+                jnp.where(is_flat_spike, 1,   # CW + single-sample spike -> CW
+                jnp.where(is_multi,      4,
+                jnp.where(is_crystal,    5,
+                jnp.where(is_single,     6,
+                                         3))))))))
 
         return label.astype(jnp.int32)
 
@@ -249,6 +284,11 @@ _DEFAULT_THRESHOLD_PARAMS: dict = {
     # top-N-power-fraction proxy, which mislabeled a DKS on a bright CW background.
     "sech2_env_mono_min": 0.9,
     "sech2_env_tol": 0.05,
+    # Minimum inner/outer sideband power ratio (dB) for a real comb. A single DKS is
+    # >= ~2.5 dB (sidebands bunch near the pump); a CW field with a single-sample
+    # numerical spike has a FLAT sideband floor (~0 dB) and is routed to CW. Used by
+    # both is_single (require a comb) and is_flat_spike (flat floor -> CW).
+    "comb_structure_min_db": 1.5,
     "sharpness_min": 0.75,   # DEPRECATED: no longer used by the JAX labeler
     "peak_prominence": 0.3,
     "peak_width": 2.0,
@@ -282,6 +322,23 @@ def label_soliton_state(E_tau, threshold_params) -> int:
     )
     n_peaks = int(peaks.size)
 
+    # Comb-structure ("central bulge") metric: inner/outer sideband power ratio (dB).
+    # A real soliton comb bunches sideband power near the pump (inner >> outer); a CW
+    # field carrying a single-sample numerical spike has a FLAT sideband floor
+    # (inner ≈ outer ≈ 0 dB). Mirrors the JAX labeler's inner_outer_db.
+    spec_shift = np.fft.fftshift(spec)
+    c_idx = n_tau // 2
+    q_idx = n_tau // 4
+    inner_band = np.concatenate(
+        [spec_shift[c_idx + 1:c_idx + q_idx], spec_shift[c_idx - q_idx + 1:c_idx]]
+    )
+    outer_band = np.concatenate(
+        [spec_shift[c_idx + q_idx:], spec_shift[:c_idx - q_idx + 1]]
+    )
+    inner_outer_db = 10.0 * np.log10(
+        float(np.mean(inner_band)) / max(float(np.mean(outer_band)), 1e-300)
+    )
+
     if contrast >= params["contrast_high"]:
         if norm_entropy > params["entropy_chaotic"]:
             return 3
@@ -294,6 +351,13 @@ def label_soliton_state(E_tau, threshold_params) -> int:
         if n_peaks == 2:
             return 4
         if n_peaks <= 1:
+            # CW + single-sample numerical spike: high contrast, <=1 wide peak, but a
+            # FLAT sideband spectrum (no comb). Physically a CW state; route to CW (1)
+            # so it is never read as a soliton. A genuine soliton has real comb
+            # structure (inner_outer_db well above the flat floor).
+            if inner_outer_db < params["comb_structure_min_db"]:
+                return 1
+
             x = np.arange(n_tau, dtype=float)
 
             def sech2_model(x_vals, A, x0, w, B):
