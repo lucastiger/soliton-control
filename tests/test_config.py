@@ -59,12 +59,12 @@ def test_all_physical_parameters_are_numeric(config):
 @pytest.mark.parametrize(
     "key, expected",
     [
-        ("fsr_hz", 2.0e11),
-        ("intrinsic_q", 1.0e7),
-        ("coupling_q", 1.0e7),
-        ("d2_rad_per_s2", 1.2566370614e7),
-        ("kappa_i_rad_per_s", 1.215e8),
-        ("gamma_LLE_per_J_per_s", 2.92e19),
+        ("fsr_hz", 2.46e+10),
+        ("intrinsic_q", 4.0e+7),
+        ("coupling_q", 1.0e+7),
+        ("d2_rad_per_s2", 3.76991e+4),
+        ("kappa_i_rad_per_s", 3.038e+7),
+        ("gamma_LLE_per_J_per_s", 1.029e+18),
     ],
 )
 def test_previously_unsigned_exponents_parse_to_expected_floats(config, key, expected):
