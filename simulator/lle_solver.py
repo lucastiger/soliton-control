@@ -222,7 +222,12 @@ def _single_trajectory_solver(
         e_pumped = (e_t + pump_amp).astype(jnp.complex64)
         
         # (b) Half linear step in frequency domain.
-        lin_exp = (-kappa / 2.0 + 1j * disp - 1j * delta_omega_eff) * t_r
+        # Dispersion enters as -i·D_int, the SAME sign as the -i·delta_omega_eff
+        # detuning term (they share one detuning axis). build_dispersion returns
+        # D_int(μ) = ½D₂μ² + … with all-positive coefficients, so for anomalous
+        # dispersion (D₂>0) this -i·D_int is what supports MI/soliton formation;
+        # a +i·D_int here is effectively normal dispersion and yields only CW.
+        lin_exp = (-kappa / 2.0 - 1j * disp - 1j * delta_omega_eff) * t_r
         lin_exp_half = lin_exp / 2.0
         h_half = jnp.exp(lin_exp_half).astype(jnp.complex64)
         e_w = jnp.fft.fft(e_pumped)
