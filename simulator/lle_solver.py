@@ -402,6 +402,8 @@ def solve_lle_ssfm_jax(
     config_path: str | Path | None = None,
     l_eff: float = 1.0,
     snapshot_interval: int = 10,
+    e0_override: np.ndarray | jnp.ndarray | None = None,
+    delta_t0_override: np.ndarray | jnp.ndarray | float | None = None,
 ) -> dict[str, np.ndarray]:
     """Batch-capable SSFM solver for the generalized LLE using JAX.
 
@@ -426,6 +428,15 @@ def solve_lle_ssfm_jax(
         config_path: Optional YAML config override.
         l_eff: Effective nonlinear interaction length.
         snapshot_interval: Round-trip interval for field snapshots and labels.
+        e0_override: Optional warm-start intracavity field. ``None`` (default) =
+            cold start from the analytic CW state + seeding noise (the historical
+            behaviour). If given, it is the exact initial field E(tau) and NO
+            seeding noise is added, so it can inject an analytic soliton ansatz for
+            deterministic DKS access. Shape (n_tau,) is broadcast to every
+            trajectory; shape (n_traj, n_tau) supplies a per-trajectory warm start.
+        delta_t0_override: Optional warm-start thermal state DeltaT (K). ``None``
+            (default) = start cold (DeltaT=0). Scalar broadcasts to all
+            trajectories; shape (n_traj,) is per-trajectory.
 
     Returns:
         Dictionary containing requested histories.
@@ -594,8 +605,44 @@ def solve_lle_ssfm_jax(
     noise_sequences = jax.vmap(_gen_noise)(noise_keys)   # (n_traj, t_slow)
     
     n_traj = delta_arr.shape[0]
-    e0_cold = jnp.zeros((n_traj, n_tau), dtype=jnp.complex64)
-    delta_t0_cold = jnp.zeros((n_traj,), dtype=jnp.float32)
+
+    # Warm-start handling. Cold start (override None) uses an all-zero e0, which the
+    # low-level solver detects (via jnp.all(e0 == 0)) to build the analytic CW state
+    # plus seeding noise. A non-zero e0_override is passed through verbatim as the
+    # exact initial field (no seeding noise), enabling deterministic soliton seeding.
+    if e0_override is None:
+        e0_init = jnp.zeros((n_traj, n_tau), dtype=jnp.complex64)
+    else:
+        e0_arr = jnp.asarray(e0_override, dtype=jnp.complex64)
+        if e0_arr.ndim == 1:
+            if e0_arr.shape[0] != n_tau:
+                raise ValueError(
+                    f"e0_override 1-D length must be n_tau={n_tau}, got {e0_arr.shape[0]}."
+                )
+            e0_init = jnp.broadcast_to(e0_arr, (n_traj, n_tau))
+        elif e0_arr.ndim == 2:
+            if e0_arr.shape != (n_traj, n_tau):
+                raise ValueError(
+                    f"e0_override 2-D shape must be (n_traj={n_traj}, n_tau={n_tau}), "
+                    f"got {tuple(e0_arr.shape)}."
+                )
+            e0_init = e0_arr
+        else:
+            raise ValueError(f"e0_override must be 1/2-D, got ndim={e0_arr.ndim}.")
+
+    if delta_t0_override is None:
+        delta_t0_init = jnp.zeros((n_traj,), dtype=jnp.float32)
+    else:
+        dt0_arr = jnp.asarray(delta_t0_override, dtype=jnp.float32)
+        if dt0_arr.ndim == 0:
+            delta_t0_init = jnp.broadcast_to(dt0_arr, (n_traj,))
+        elif dt0_arr.ndim == 1 and dt0_arr.shape[0] == n_traj:
+            delta_t0_init = dt0_arr
+        else:
+            raise ValueError(
+                f"delta_t0_override must be scalar or shape (n_traj={n_traj},), "
+                f"got shape {tuple(dt0_arr.shape)}."
+            )
 
     # Physically-scaled OFF floor: f·U_cw,min with U_cw,min at the largest |δω|
     # in the sweep. Built from the concrete config so OFF tracks the energy scale
@@ -621,8 +668,8 @@ def solve_lle_ssfm_jax(
         thermal,
         state_labeler,
         noise_sequences,
-        e0_cold,
-        delta_t0_cold,
+        e0_init,
+        delta_t0_init,
     )
 
     return {k: np.asarray(v) for k, v in out.items()}
