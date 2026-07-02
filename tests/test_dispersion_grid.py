@@ -218,3 +218,15 @@ def test_dealias_zeros_modes_above_two_thirds_and_changes_result():
     absmu = np.abs(np.fft.fftfreq(n_tau) * n_tau)
     assert sp[absmu > n_tau / 3].max() < 1e-20 * max(sp.max(), 1e-300), \
         "dealias must zero the |mu|>n_tau/3 band"
+
+
+def test_dispersion_validity_mask_off_identical_on_changes():
+    """Validity mask OFF is bit-identical; ON damps high-|D_int*t_r| modes."""
+    golden = np.load(REPO_ROOT / "tests" / "data" / "lle_singlestep_legacy_128.npy")
+    e_off = np.asarray(_substep_case(dispersion_validity_mask=False)["e_final"])
+    assert np.array_equal(e_off, golden), "validity mask OFF must be the legacy path"
+    e_on = np.asarray(
+        _substep_case(dispersion_validity_mask=True, validity_phase_threshold=1.0)["e_final"]
+    )
+    assert np.all(np.isfinite(e_on))
+    assert not np.array_equal(e_on, e_off)
