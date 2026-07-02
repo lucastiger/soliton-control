@@ -305,6 +305,17 @@ def load_dint_grid(n_tau, csv_path=None, config_path=None) -> "DintGrid":
 _ABSORBER_POWER = 8.0
 _ABSORBER_STRENGTH = 40.0
 
+# Dispersion-validity mask shape: modes whose per-round-trip linear phase
+# |D_int*t_r| exceeds ``validity_phase_threshold`` are smoothly damped, since the
+# once-per-round-trip split-step map is only a faithful LLE integrator while that
+# phase is small (a phase near pi drives a parametric round-trip-map resonance
+# that is a numerical artifact, not physics). The window |D_int*t_r| <= threshold
+# is the solver's honest regime of validity. validity = exp(-STRENGTH*over^POWER)
+# with over = max(|D_int*t_r|/threshold - 1, 0): exactly 1 inside the window,
+# rolling to ~0 within ~half the threshold above it.
+_VALIDITY_POWER = 2.0
+_VALIDITY_STRENGTH = 10.0
+
 
 def _single_trajectory_solver(
     delta_omega: float,
@@ -329,6 +340,8 @@ def _single_trajectory_solver(
     dealias_two_thirds: bool,     # static; zero |mu|>n_tau/3 after each nonlinear kick (2/3 rule)
     edge_absorber: bool,          # static; super-Gaussian edge damping once per round trip
     edge_absorber_frac: float,    # outer fraction of |mu| (each side) over which the absorber ramps
+    dispersion_validity_mask: bool,  # static; damp modes with |D_int*t_r| > threshold each round trip
+    validity_phase_threshold: float,  # per-round-trip phase threshold |D_int*t_r| for the validity mask
 ) -> dict[str, jnp.ndarray]:
     """Solve one detuning trajectory with SSFM + thermal Euler update.
 
@@ -379,6 +392,13 @@ def _single_trajectory_solver(
         onset = (1.0 - edge_absorber_frac) * mu_max        # interior edge of ramp
         s = jnp.clip((abs_mu - onset) / jnp.maximum(mu_max - onset, 1.0), 0.0, 1.0)
         absorber = jnp.exp(-_ABSORBER_STRENGTH * s ** _ABSORBER_POWER)
+    if dispersion_validity_mask:
+        # Damp modes whose per-round-trip linear phase |D_int*t_r| exceeds the
+        # validity threshold (the once-per-round-trip map is only trustworthy
+        # while that phase is small). disp is D_int(mu) [rad/s] in FFT-bin order.
+        phase_rt = jnp.abs(disp) * t_r
+        over = jnp.maximum(phase_rt / validity_phase_threshold - 1.0, 0.0)
+        validity = jnp.exp(-_VALIDITY_STRENGTH * over ** _VALIDITY_POWER)
 
     def _step(carry, step_idx):
         e_t, delta_t, e_snapshots, label_history, snap_count = carry
@@ -430,6 +450,10 @@ def _single_trajectory_solver(
         # back into the interior. The onset is beyond the physical window.
         if edge_absorber:
             e_next = jnp.fft.ifft(jnp.fft.fft(e_next) * absorber).astype(jnp.complex128)
+        # Dispersion-validity mask: damp modes past the |D_int*t_r| threshold once
+        # per round trip, containing the round-trip-map parametric resonance.
+        if dispersion_validity_mask:
+            e_next = jnp.fft.ifft(jnp.fft.fft(e_next) * validity).astype(jnp.complex128)
 
         # Through-port power via energy balance (exact for all-pass ring, any state).
         # P_trans = P_in - κ_i * U_int / t_r = P_in - κ_i * mean(|E|²)
@@ -575,9 +599,9 @@ def _physical_state_labeler(
 _PER_TRAJ = jax.jit(
     jax.vmap(
         _single_trajectory_solver,
-        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0, 0, 0, None, None, None, None, None),
+        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0, 0, 0, None, None, None, None, None, None, None),
     ),
-    static_argnums=(2, 3, 7, 10, 13, 18, 19, 20),
+    static_argnums=(2, 3, 7, 10, 13, 18, 19, 20, 22),
 )
 
 
@@ -600,6 +624,8 @@ def solve_lle_ssfm_jax(
     dealias_two_thirds: bool = False,
     edge_absorber: bool = False,
     edge_absorber_frac: float = 0.12,
+    dispersion_validity_mask: bool = False,
+    validity_phase_threshold: float = 1.0,
 ) -> dict[str, np.ndarray]:
     """Batch-capable SSFM solver for the generalized LLE using JAX.
 
@@ -661,6 +687,15 @@ def solve_lle_ssfm_jax(
             edge absorber ramps (default 0.12). At n_tau=8192 the onset is
             |mu| ~ 3604 and at 16384 ~ 7209, both beyond the physical window
             (|mu|<=2744) so the absorber never touches it.
+        dispersion_validity_mask: If True, damp (once per round trip) the modes
+            whose per-round-trip linear phase |D_int*t_r| exceeds
+            ``validity_phase_threshold``. The once-per-round-trip split-step map
+            is only a faithful LLE integrator while that phase is small; modes
+            near |D_int*t_r|=pi host a parametric round-trip-map resonance (a
+            numerical artifact). The |D_int*t_r| <= threshold window is the
+            solver's honest regime of validity. Default False (bit-identical).
+        validity_phase_threshold: |D_int*t_r| threshold (rad) for the validity
+            mask (default 1.0, ~1/pi of a round trip).
 
     Returns:
         Dictionary containing requested histories.
@@ -671,6 +706,8 @@ def solve_lle_ssfm_jax(
     n_substeps = int(n_substeps)
     dealias_two_thirds = bool(dealias_two_thirds)
     edge_absorber = bool(edge_absorber)
+    dispersion_validity_mask = bool(dispersion_validity_mask)
+    validity_phase_threshold = float(validity_phase_threshold)
     edge_absorber_frac = float(edge_absorber_frac)
 
     thermal = _thermal_params(config_path)
@@ -924,6 +961,8 @@ def solve_lle_ssfm_jax(
         dealias_two_thirds,
         edge_absorber,
         edge_absorber_frac,
+        dispersion_validity_mask,
+        validity_phase_threshold,
     )
 
     return {k: np.asarray(v) for k, v in out.items()}
