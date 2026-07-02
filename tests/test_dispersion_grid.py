@@ -225,3 +225,18 @@ def test_dispersion_validity_mask_off_identical_on_changes():
     )
     assert np.all(np.isfinite(e_on))
     assert not np.array_equal(e_on, e_off)
+
+
+def test_fine_cadence_M1_identical_M_gt1_changes():
+    """fine_cadence_M=1 is bit-identical; M>1 (fine-cadence integration) changes it."""
+    golden = np.load(REPO_ROOT / "tests" / "data" / "lle_singlestep_legacy_128.npy")
+    e1 = np.asarray(_substep_case(fine_cadence_M=1)["e_final"])
+    assert np.array_equal(e1, golden), "fine_cadence_M=1 must be the legacy path"
+    e8 = np.asarray(_substep_case(fine_cadence_M=8)["e_final"])
+    assert np.all(np.isfinite(e8))
+    assert not np.array_equal(e1, e8)
+
+
+def test_fine_cadence_must_be_positive():
+    with pytest.raises(ValueError):
+        _substep_case(fine_cadence_M=0)
