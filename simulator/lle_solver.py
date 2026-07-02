@@ -13,6 +13,18 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import jax
+
+# Enable 64-bit precision (float64/complex128) process-wide. JAX bakes the x64
+# flag in at ARRAY-CREATION time, so this MUST run before any jax.numpy array is
+# built — hence it sits here, immediately after `import jax` and before both
+# `import jax.numpy` and the state_labeler import (which may create arrays). The
+# solver runs the SSFM loop for hundreds of thousands of round trips; in
+# complex64 the accumulated roundoff pins the spectral floor at ~-70 dB and
+# buries sub--70 dB structure (e.g. dispersive waves). float64 pushes that floor
+# far lower. Guarded so it is set exactly once (idempotent across re-imports).
+if not jax.config.read("jax_enable_x64"):
+    jax.config.update("jax_enable_x64", True)
+
 import jax.numpy as jnp
 import numpy as np
 import yaml
@@ -193,7 +205,7 @@ class DintGrid(NamedTuple):
 
     Attributes:
         grid: D_int(mu) [rad/s], shape (n_tau,), in FFT-bin order (NOT fftshifted),
-            jnp float32 — ready to drop into the linear operator as ``disp``.
+            jnp float64 — ready to drop into the linear operator as ``disp``.
         d1:  Measured D1 = 2π·FSR [rad/s] from the central difference of ω at mu=0,
             so callers can reconcile the FSR / round-trip time.
 
@@ -219,7 +231,7 @@ def load_dint_grid(n_tau, csv_path=None, config_path=None) -> "DintGrid":
       (This yields the same bin ordering as _build_omega_grid, so disp aligns
       with the existing FFT convention.)
     - D_int_grid = np.interp(k, mu_csv, D_int_csv). Assert the mu=0 bin is 0.
-    - D_int_grid is returned as a jnp float32 array (complex-compatible for the
+    - D_int_grid is returned as a jnp float64 array (complex-compatible for the
       -1j*disp linear-operator term).
 
     Args:
@@ -267,7 +279,7 @@ def load_dint_grid(n_tau, csv_path=None, config_path=None) -> "DintGrid":
         f"mu=0 FFT bin (k={k[0]}) must have D_int == 0, got {d_int_grid[0]!r}."
     )
 
-    result = DintGrid(grid=jnp.asarray(d_int_grid, dtype=jnp.float32), d1=float(d1))
+    result = DintGrid(grid=jnp.asarray(d_int_grid, dtype=jnp.float64), d1=float(d1))
     _DINT_GRID_CACHE[cache_key] = result
     return result
 
@@ -288,7 +300,7 @@ def _single_trajectory_solver(
     thermal: dict[str, float],
     state_labeler,
     noise_sequence: jnp.ndarray,   # shape (t_slow,), rad/s, AR(1) pre-generated
-    e0_override: jnp.ndarray,     # warm-start field; pass jnp.zeros((n_tau,), complex64) for cold start
+    e0_override: jnp.ndarray,     # warm-start field; pass jnp.zeros((n_tau,), complex128) for cold start
     delta_t0_override: jnp.ndarray,  # warm-start thermal state (scalar); pass jnp.zeros(()) for cold start
     d_int_grid: jnp.ndarray | None,  # per-mode measured D_int(mu) (FFT-bin order); None = Taylor path
 ) -> dict[str, jnp.ndarray]:
@@ -300,14 +312,14 @@ def _single_trajectory_solver(
         disp = jnp.asarray(d_int_grid).astype(omega.dtype)
     else:
         disp = build_dispersion(omega, beta)
-    pump_amp = (jnp.sqrt(jnp.maximum(kappa_c * pin, 0.0)) * t_r).astype(jnp.complex64)
+    pump_amp = (jnp.sqrt(jnp.maximum(kappa_c * pin, 0.0)) * t_r).astype(jnp.complex128)
     kappa_i = jnp.maximum(thermal["kappa_i"], 0.0)
     omega0 = 2.0 * jnp.pi * 299_792_458.0 / thermal["pump_wavelength_m"]
     n_snapshots = (t_slow + snapshot_interval - 1) // snapshot_interval
 
     def _step(carry, step_idx):
         e_t, delta_t, e_snapshots, label_history, snap_count = carry
-        e_t = e_t.astype(jnp.complex64)
+        e_t = e_t.astype(jnp.complex128)
 
         # Deterministic thermal detuning shift. δω = ω_res − ω_pump, so heating
         # (dn/dT>0 → n↑ → ω_res↓) LOWERS δω: the shift enters with a minus sign.
@@ -318,8 +330,8 @@ def _single_trajectory_solver(
 
         # (a) Inject pump before the symmetric split so the full round-trip
         #     linear operator acts on the pumped field.
-        e_pumped = (e_t + pump_amp).astype(jnp.complex64)
-        
+        e_pumped = (e_t + pump_amp).astype(jnp.complex128)
+
         # (b) Half linear step in frequency domain.
         # Dispersion enters as -i·D_int, the SAME sign as the -i·delta_omega_eff
         # detuning term (they share one detuning axis). build_dispersion returns
@@ -328,17 +340,17 @@ def _single_trajectory_solver(
         # a +i·D_int here is effectively normal dispersion and yields only CW.
         lin_exp = (-kappa / 2.0 - 1j * disp - 1j * delta_omega_eff) * t_r
         lin_exp_half = lin_exp / 2.0
-        h_half = jnp.exp(lin_exp_half).astype(jnp.complex64)
+        h_half = jnp.exp(lin_exp_half).astype(jnp.complex128)
         e_w = jnp.fft.fft(e_pumped)
-        e_half = jnp.fft.ifft(e_w * h_half).astype(jnp.complex64)
-        
+        e_half = jnp.fft.ifft(e_w * h_half).astype(jnp.complex128)
+
         # (c) Nonlinear phase kick in time domain.
-        nl_phase = jnp.exp(1j * gamma * jnp.abs(e_half) ** 2 * t_r).astype(jnp.complex64)
-        e_nl = (e_half * nl_phase).astype(jnp.complex64)
-        
+        nl_phase = jnp.exp(1j * gamma * jnp.abs(e_half) ** 2 * t_r).astype(jnp.complex128)
+        e_nl = (e_half * nl_phase).astype(jnp.complex128)
+
         # (d) Second half linear step in frequency domain.
         e_w2 = jnp.fft.fft(e_nl)
-        e_next = jnp.fft.ifft(e_w2 * h_half).astype(jnp.complex64)
+        e_next = jnp.fft.ifft(e_w2 * h_half).astype(jnp.complex128)
 
         # Through-port power via energy balance (exact for all-pass ring, any state).
         # P_trans = P_in - κ_i * U_int / t_r = P_in - κ_i * mean(|E|²)
@@ -408,7 +420,7 @@ def _single_trajectory_solver(
     _amp = jnp.sqrt(jnp.maximum(kappa_c * pin, 0.0))
     _d2  = (kappa / 2.0) ** 2 + delta_omega[0] ** 2
     e_cw = (_amp * (kappa / 2.0) / _d2 + 1j * (-_amp * delta_omega[0] / _d2)) * jnp.ones(
-        n_tau, dtype=jnp.complex64
+        n_tau, dtype=jnp.complex128
     )
 
     key, subkey_r, subkey_i = jax.random.split(rng_key, 3)
@@ -417,20 +429,21 @@ def _single_trajectory_solver(
     # (|e_cw| ≈ 1.24e-5), so U_int is noise-dominated at t=0, clipping
     # P_trans to zero for the first ~566 round trips of every trajectory.
     noise = 1e-3 * jnp.abs(e_cw[0]) * (
-        jax.random.normal(subkey_r, (n_tau,)) + 1j * jax.random.normal(subkey_i, (n_tau,))
-    ).astype(jnp.complex64)
+        jax.random.normal(subkey_r, (n_tau,), dtype=jnp.float64)
+        + 1j * jax.random.normal(subkey_i, (n_tau,), dtype=jnp.float64)
+    ).astype(jnp.complex128)
 
     # Select warm-start vs cold-start without a scalar jnp.where on complex arrays.
     # jnp.where with a scalar condition is unsafe for complex dtypes under jit/vmap:
     # type promotion can silently drop the imaginary part.
     # Instead, use a float mask broadcast elementwise over the n_tau dimension.
-    _is_cold = jnp.all(e0_override == 0.0).astype(jnp.float32)   # 1.0 = cold, 0.0 = warm
-    _cold = (e_cw + noise).astype(jnp.complex64)
-    _warm = e0_override.astype(jnp.complex64)
-    e0 = (_is_cold * _cold + (1.0 - _is_cold) * _warm).astype(jnp.complex64)
-    
-    delta_t0 = delta_t0_override.astype(jnp.float32)
-    e_snapshots0 = jnp.zeros((n_snapshots, n_tau), dtype=jnp.complex64)
+    _is_cold = jnp.all(e0_override == 0.0).astype(jnp.float64)   # 1.0 = cold, 0.0 = warm
+    _cold = (e_cw + noise).astype(jnp.complex128)
+    _warm = e0_override.astype(jnp.complex128)
+    e0 = (_is_cold * _cold + (1.0 - _is_cold) * _warm).astype(jnp.complex128)
+
+    delta_t0 = delta_t0_override.astype(jnp.float64)
+    e_snapshots0 = jnp.zeros((n_snapshots, n_tau), dtype=jnp.complex128)
     label_history0 = jnp.zeros((n_snapshots,), dtype=jnp.int32)
     snap_count0 = jnp.array(0, dtype=jnp.int32)
 
@@ -654,7 +667,7 @@ def solve_lle_ssfm_jax(
     )
 
     # convert every leaf to a scalar JAX array so vmap can trace through it
-    thermal = {k: jnp.array(v, dtype=jnp.float32) for k, v in thermal.items()}
+    thermal = {k: jnp.array(v, dtype=jnp.float64) for k, v in thermal.items()}
 
     # delta_omega is a per-trajectory, per-round-trip sweep of shape (n_traj, t_slow)
     # (it is vmapped over axis 0 and indexed as delta_omega[step] inside the solver).
@@ -662,7 +675,7 @@ def solve_lle_ssfm_jax(
     #   scalar         -> (1, t_slow) constant detuning
     #   1-D (t_slow,)  -> (1, t_slow) single-trajectory sweep
     #   2-D            -> used as-is, must be (n_traj, t_slow)
-    delta_omega_arr = jnp.asarray(delta_omega, dtype=jnp.float32)
+    delta_omega_arr = jnp.asarray(delta_omega, dtype=jnp.float64)
     if delta_omega_arr.ndim == 0:
         delta_arr = jnp.broadcast_to(delta_omega_arr, (1, int(t_slow)))
     elif delta_omega_arr.ndim == 1:
@@ -710,7 +723,10 @@ def solve_lle_ssfm_jax(
     def _gen_noise(key):
         return _noise_model.sample(key, int(t_slow))
 
-    noise_sequences = jax.vmap(_gen_noise)(noise_keys)   # (n_traj, t_slow)
+    # Noise models emit float32; upcast the detuning-noise sequences to float64
+    # so the delta_omega_eff axis (and thus the linear-operator phase) is fully
+    # double precision inside the SSFM loop.
+    noise_sequences = jax.vmap(_gen_noise)(noise_keys).astype(jnp.float64)  # (n_traj, t_slow)
     
     n_traj = delta_arr.shape[0]
 
@@ -719,9 +735,10 @@ def solve_lle_ssfm_jax(
     # plus seeding noise. A non-zero e0_override is passed through verbatim as the
     # exact initial field (no seeding noise), enabling deterministic soliton seeding.
     if e0_override is None:
-        e0_init = jnp.zeros((n_traj, n_tau), dtype=jnp.complex64)
+        e0_init = jnp.zeros((n_traj, n_tau), dtype=jnp.complex128)
     else:
-        e0_arr = jnp.asarray(e0_override, dtype=jnp.complex64)
+        # Accept complex64 (or real) warm-start fields but upcast to complex128.
+        e0_arr = jnp.asarray(e0_override, dtype=jnp.complex128)
         if e0_arr.ndim == 1:
             if e0_arr.shape[0] != n_tau:
                 raise ValueError(
@@ -739,9 +756,9 @@ def solve_lle_ssfm_jax(
             raise ValueError(f"e0_override must be 1/2-D, got ndim={e0_arr.ndim}.")
 
     if delta_t0_override is None:
-        delta_t0_init = jnp.zeros((n_traj,), dtype=jnp.float32)
+        delta_t0_init = jnp.zeros((n_traj,), dtype=jnp.float64)
     else:
-        dt0_arr = jnp.asarray(delta_t0_override, dtype=jnp.float32)
+        dt0_arr = jnp.asarray(delta_t0_override, dtype=jnp.float64)
         if dt0_arr.ndim == 0:
             delta_t0_init = jnp.broadcast_to(dt0_arr, (n_traj,))
         elif dt0_arr.ndim == 1 and dt0_arr.shape[0] == n_traj:
@@ -766,7 +783,7 @@ def solve_lle_ssfm_jax(
     if d_int_grid is None:
         d_int_grid_arr = None
     else:
-        d_int_grid_arr = jnp.asarray(d_int_grid, dtype=jnp.float32)
+        d_int_grid_arr = jnp.asarray(d_int_grid, dtype=jnp.float64)
         if d_int_grid_arr.shape != (int(n_tau),):
             raise ValueError(
                 f"d_int_grid must have shape (n_tau={n_tau},), "
