@@ -303,8 +303,19 @@ def _single_trajectory_solver(
     e0_override: jnp.ndarray,     # warm-start field; pass jnp.zeros((n_tau,), complex128) for cold start
     delta_t0_override: jnp.ndarray,  # warm-start thermal state (scalar); pass jnp.zeros(()) for cold start
     d_int_grid: jnp.ndarray | None,  # per-mode measured D_int(mu) (FFT-bin order); None = Taylor path
+    n_substeps: int,              # Strang sub-steps per round trip (static); 1 = legacy single step
 ) -> dict[str, jnp.ndarray]:
-    """Solve one detuning trajectory with SSFM + thermal Euler update."""
+    """Solve one detuning trajectory with SSFM + thermal Euler update.
+
+    The round trip is integrated with ``n_substeps`` Strang sub-steps, each over
+    dt = t_r / n_substeps, so the per-sub-step linear phase |D_int·dt| shrinks
+    with n_substeps. This suppresses the split-step spurious-sideband instability
+    that appears once |D_int·t_r| approaches π at large |mu| (an n_tau-independent
+    artifact). With n_substeps=1 the arithmetic reduces exactly to the legacy
+    single Strang step (bit-identical regression guard). The detuning
+    (thermal_shift + noise), thermal Euler update, energy balance, snapshots, and
+    labels are all evaluated ONCE per round trip on the end-of-round-trip field.
+    """
     omega = _build_omega_grid(n_tau, t_r)
     # Per-mode measured dispersion when supplied, else the Taylor beta polynomial.
     # Cast to omega's real dtype and rely on the (n_tau,) shape guaranteed upstream.
@@ -312,7 +323,12 @@ def _single_trajectory_solver(
         disp = jnp.asarray(d_int_grid).astype(omega.dtype)
     else:
         disp = build_dispersion(omega, beta)
-    pump_amp = (jnp.sqrt(jnp.maximum(kappa_c * pin, 0.0)) * t_r).astype(jnp.complex128)
+    # Sub-step size and per-sub pump kick. With n_substeps=1, dt == t_r and
+    # pump_kick == the legacy pump_amp = sqrt(max(κ_c·pin,0))·t_r, and the drive
+    # summed over sub-steps is n_substeps·(F·dt) = F·t_r (per-round-trip total
+    # unchanged). dt = t_r / 1 == t_r exactly, so n_substeps=1 stays bit-identical.
+    dt = t_r / n_substeps
+    pump_kick = (jnp.sqrt(jnp.maximum(kappa_c * pin, 0.0)) * dt).astype(jnp.complex128)
     kappa_i = jnp.maximum(thermal["kappa_i"], 0.0)
     omega0 = 2.0 * jnp.pi * 299_792_458.0 / thermal["pump_wavelength_m"]
     n_snapshots = (t_slow + snapshot_interval - 1) // snapshot_interval
@@ -326,31 +342,37 @@ def _single_trajectory_solver(
         thermal_shift = -(omega0 / thermal["n0"]) * thermal["dn_dT"] * delta_t
         # Stochastic TCCR/TRN/PyroEO detuning noise at this round trip
         freq_noise = noise_sequence[step_idx]
-        delta_omega_eff = delta_omega[step_idx] + thermal_shift + freq_noise   # <-- CHANGED
+        # Held CONSTANT across all sub-steps of this round trip.
+        delta_omega_eff = delta_omega[step_idx] + thermal_shift + freq_noise
 
-        # (a) Inject pump before the symmetric split so the full round-trip
-        #     linear operator acts on the pumped field.
-        e_pumped = (e_t + pump_amp).astype(jnp.complex128)
-
-        # (b) Half linear step in frequency domain.
+        # Half-linear operator over dt/2 in the frequency domain.
         # Dispersion enters as -i·D_int, the SAME sign as the -i·delta_omega_eff
         # detuning term (they share one detuning axis). build_dispersion returns
         # D_int(μ) = ½D₂μ² + … with all-positive coefficients, so for anomalous
         # dispersion (D₂>0) this -i·D_int is what supports MI/soliton formation;
         # a +i·D_int here is effectively normal dispersion and yields only CW.
-        lin_exp = (-kappa / 2.0 - 1j * disp - 1j * delta_omega_eff) * t_r
+        # (lin_exp/2 with lin_exp = coeff·dt matches the legacy expression exactly
+        # when dt == t_r, keeping n_substeps=1 bit-identical.)
+        lin_exp = (-kappa / 2.0 - 1j * disp - 1j * delta_omega_eff) * dt
         lin_exp_half = lin_exp / 2.0
         h_half = jnp.exp(lin_exp_half).astype(jnp.complex128)
-        e_w = jnp.fft.fft(e_pumped)
-        e_half = jnp.fft.ifft(e_w * h_half).astype(jnp.complex128)
 
-        # (c) Nonlinear phase kick in time domain.
-        nl_phase = jnp.exp(1j * gamma * jnp.abs(e_half) ** 2 * t_r).astype(jnp.complex128)
-        e_nl = (e_half * nl_phase).astype(jnp.complex128)
-
-        # (d) Second half linear step in frequency domain.
-        e_w2 = jnp.fft.fft(e_nl)
-        e_next = jnp.fft.ifft(e_w2 * h_half).astype(jnp.complex128)
+        # n_substeps Strang sub-steps over dt: pump kick, L(dt/2)·N(dt)·L(dt/2).
+        # n_substeps is static, so this Python loop unrolls at trace time.
+        e_sub = e_t
+        for _ in range(n_substeps):
+            # (a) distribute the pump: additive kick sqrt(max(κ_c·pin,0))·dt each sub.
+            e_pumped = (e_sub + pump_kick).astype(jnp.complex128)
+            # (b) first half linear step.
+            e_w = jnp.fft.fft(e_pumped)
+            e_half = jnp.fft.ifft(e_w * h_half).astype(jnp.complex128)
+            # (c) nonlinear phase kick over the full sub-step dt.
+            nl_phase = jnp.exp(1j * gamma * jnp.abs(e_half) ** 2 * dt).astype(jnp.complex128)
+            e_nl = (e_half * nl_phase).astype(jnp.complex128)
+            # (d) second half linear step.
+            e_w2 = jnp.fft.fft(e_nl)
+            e_sub = jnp.fft.ifft(e_w2 * h_half).astype(jnp.complex128)
+        e_next = e_sub
 
         # Through-port power via energy balance (exact for all-pass ring, any state).
         # P_trans = P_in - κ_i * U_int / t_r = P_in - κ_i * mean(|E|²)
@@ -496,9 +518,9 @@ def _physical_state_labeler(
 _PER_TRAJ = jax.jit(
     jax.vmap(
         _single_trajectory_solver,
-        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0, 0, 0, None),
+        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0, 0, 0, None, None),
     ),
-    static_argnums=(2, 3, 7, 10, 13),
+    static_argnums=(2, 3, 7, 10, 13, 18),
 )
 
 
@@ -517,6 +539,7 @@ def solve_lle_ssfm_jax(
     e0_override: np.ndarray | jnp.ndarray | None = None,
     delta_t0_override: np.ndarray | jnp.ndarray | float | None = None,
     d_int_grid: np.ndarray | jnp.ndarray | None = None,
+    n_substeps: int = 1,
 ) -> dict[str, np.ndarray]:
     """Batch-capable SSFM solver for the generalized LLE using JAX.
 
@@ -556,12 +579,24 @@ def solve_lle_ssfm_jax(
             used verbatim as the linear-operator dispersion (broadcast across all
             trajectories) and the Taylor path is bypassed; use
             :func:`load_dint_grid` to build it from a measured dispersion CSV.
+        n_substeps: Number of Strang split-step sub-steps per round trip
+            (positive int, default 1). Each sub-step integrates over
+            dt = t_r / n_substeps, shrinking the per-sub-step linear phase
+            |D_int·dt| so the split-step spurious-sideband instability (which
+            appears once |D_int·t_r| nears π at large |mu|) is pushed out of the
+            physical band. n_substeps=1 reproduces the legacy single-step solver
+            bit-for-bit. The pump drive is distributed across sub-steps so the
+            per-round-trip total is unchanged; detuning, thermal update, energy
+            balance, snapshots, and labels are computed once per round trip.
 
     Returns:
         Dictionary containing requested histories.
     """
 
-    
+    if int(n_substeps) < 1:
+        raise ValueError(f"n_substeps must be a positive integer, got {n_substeps}.")
+    n_substeps = int(n_substeps)
+
     thermal = _thermal_params(config_path)
     physical = _load_config(config_path)
     gamma = float(physical.get("gamma_LLE_per_J_per_s"))
@@ -809,6 +844,7 @@ def solve_lle_ssfm_jax(
         e0_init,
         delta_t0_init,
         d_int_grid_arr,
+        n_substeps,
     )
 
     return {k: np.asarray(v) for k, v in out.items()}
