@@ -145,3 +145,49 @@ def test_parabolic_grid_reduces_to_taylor_path():
 
     max_diff = float(np.max(np.abs(norm_power(e_taylor) - norm_power(e_grid))))
     assert max_diff < 1e-3, f"grid vs Taylor normalized-power diff {max_diff:.3e}"
+
+
+# ---------------------------------------------------------------------------
+# 3. Sub-stepping: n_substeps=1 is the legacy single Strang step, bit-for-bit
+# ---------------------------------------------------------------------------
+def _substep_case(**overrides):
+    """The fixed tiny deterministic run used for the n_substeps regression."""
+    kappa_i, kappa_c, kappa = resolve_cavity_rates(CONFIG_PATH)
+    n_tau, t_slow = 128, 300
+    dw = np.full(t_slow, 3.0 * kappa, dtype=np.float64)[None, :]
+    kw = dict(
+        pin=0.214, delta_omega=dw, t_slow=t_slow, beta=[1e-16],
+        kappa=kappa, kappa_c=kappa_c, rng_key=jax.random.PRNGKey(7),
+        n_tau=n_tau, snapshot_interval=t_slow - 1, config_path=CONFIG_PATH,
+    )
+    kw.update(overrides)
+    return solve_lle_ssfm_jax(**kw)
+
+
+def test_n_substeps_1_matches_legacy_single_step():
+    """n_substeps=1 must reproduce the pre-substep single Strang step bit-for-bit.
+
+    The golden field ``tests/data/lle_singlestep_legacy_128.npy`` was captured
+    from the single-step solver (the commit before ``n_substeps`` existed) for
+    this exact deterministic case, and verified bit-identical to the n_substeps=1
+    path when sub-stepping was added. This guards the n_substeps=1 fast path (and
+    the default) against silently diverging from the legacy round-trip update.
+    """
+    golden = np.load(REPO_ROOT / "tests" / "data" / "lle_singlestep_legacy_128.npy")
+    e1 = np.asarray(_substep_case(n_substeps=1)["e_final"])
+    e_default = np.asarray(_substep_case()["e_final"])
+    assert np.array_equal(e1, golden), "n_substeps=1 diverged from legacy single step"
+    assert np.array_equal(e_default, golden), "default n_substeps must be the legacy path"
+
+
+def test_n_substeps_gt1_changes_result_but_stays_finite():
+    """Sub-stepping is actually wired: n_substeps>1 finite and != the single step."""
+    e1 = np.asarray(_substep_case(n_substeps=1)["e_final"])
+    e2 = np.asarray(_substep_case(n_substeps=2)["e_final"])
+    assert np.all(np.isfinite(e2))
+    assert not np.array_equal(e1, e2), "n_substeps=2 must differ from the single step"
+
+
+def test_n_substeps_must_be_positive():
+    with pytest.raises(ValueError):
+        _substep_case(n_substeps=0)
