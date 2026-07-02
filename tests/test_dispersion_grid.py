@@ -186,3 +186,30 @@ def test_n_substeps_gt1_changes_result_but_stays_finite():
 def test_n_substeps_must_be_positive():
     with pytest.raises(ValueError):
         _substep_case(n_substeps=0)
+
+
+# ---------------------------------------------------------------------------
+# 4. Anti-aliasing toggles: OFF is bit-identical; ON de-aliases and stays finite
+# ---------------------------------------------------------------------------
+def test_antialiasing_toggles_off_are_bit_identical():
+    """dealias/absorber OFF must reproduce the legacy single-step field bit-for-bit."""
+    golden = np.load(REPO_ROOT / "tests" / "data" / "lle_singlestep_legacy_128.npy")
+    e_off = np.asarray(
+        _substep_case(n_substeps=1, dealias_two_thirds=False, edge_absorber=False)["e_final"]
+    )
+    assert np.array_equal(e_off, golden), "toggles OFF must be the legacy path"
+
+
+def test_dealias_zeros_modes_above_two_thirds_and_changes_result():
+    """dealias ON removes |mu|>n_tau/3 content and changes the field; stays finite."""
+    n_tau = 128
+    e_on = np.asarray(
+        _substep_case(n_substeps=1, dealias_two_thirds=True, edge_absorber=True)["e_final"]
+    )[0]
+    e_off = np.asarray(_substep_case(n_substeps=1)["e_final"])[0]
+    assert np.all(np.isfinite(e_on))
+    assert not np.array_equal(e_on, e_off)
+    sp = np.abs(np.fft.fft(e_on)) ** 2
+    absmu = np.abs(np.fft.fftfreq(n_tau) * n_tau)
+    assert sp[absmu > n_tau / 3].max() < 1e-20 * max(sp.max(), 1e-300), \
+        "dealias must zero the |mu|>n_tau/3 band"

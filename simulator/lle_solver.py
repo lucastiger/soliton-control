@@ -275,6 +275,19 @@ def load_dint_grid(n_tau, csv_path=None, config_path=None) -> "DintGrid":
     k = np.round(np.fft.fftfreq(int(n_tau), d=t_r / int(n_tau)) / fsr).astype(int)
 
     d_int_grid = np.interp(k, mu_csv, d_int_csv)
+    # np.interp holds D_int FLAT beyond the CSV span (here the red edge: the CSV
+    # stops at mu=-3261 while an n_tau>=8192 FFT reaches mu=-4096..). A flat clamp
+    # injects a slope discontinuity at the CSV edge — a spurious kink that seeds
+    # aliasing. Replace the out-of-range modes with a LINEAR extension that
+    # continues the boundary slope (C1-continuous), so the extrapolated edge is
+    # smooth; the solver's edge absorber then damps those modes cleanly.
+    lo_mu, hi_mu = int(mu_csv[0]), int(mu_csv[-1])
+    slope_lo = float(d_int_csv[1] - d_int_csv[0])       # per unit mu at low edge
+    slope_hi = float(d_int_csv[-1] - d_int_csv[-2])     # per unit mu at high edge
+    below = k < lo_mu
+    above = k > hi_mu
+    d_int_grid[below] = d_int_csv[0] + slope_lo * (k[below] - lo_mu)
+    d_int_grid[above] = d_int_csv[-1] + slope_hi * (k[above] - hi_mu)
     assert d_int_grid[0] == 0.0, (
         f"mu=0 FFT bin (k={k[0]}) must have D_int == 0, got {d_int_grid[0]!r}."
     )
@@ -282,6 +295,15 @@ def load_dint_grid(n_tau, csv_path=None, config_path=None) -> "DintGrid":
     result = DintGrid(grid=jnp.asarray(d_int_grid, dtype=jnp.float64), d1=float(d1))
     _DINT_GRID_CACHE[cache_key] = result
     return result
+
+
+# Super-Gaussian edge-absorber shape: A(mu) = exp(-STRENGTH * s**POWER) with
+# s = 0 at the interior onset ramping to 1 at the Nyquist edge. POWER=8 keeps
+# A~1 across most of the ramp then rolls off sharply; STRENGTH=40 makes the very
+# edge ~e^-40 (effectively zero), so energy reaching the extrapolated grid edge
+# is damped rather than aliased/folded back into the interior.
+_ABSORBER_POWER = 8.0
+_ABSORBER_STRENGTH = 40.0
 
 
 def _single_trajectory_solver(
@@ -304,6 +326,9 @@ def _single_trajectory_solver(
     delta_t0_override: jnp.ndarray,  # warm-start thermal state (scalar); pass jnp.zeros(()) for cold start
     d_int_grid: jnp.ndarray | None,  # per-mode measured D_int(mu) (FFT-bin order); None = Taylor path
     n_substeps: int,              # Strang sub-steps per round trip (static); 1 = legacy single step
+    dealias_two_thirds: bool,     # static; zero |mu|>n_tau/3 after each nonlinear kick (2/3 rule)
+    edge_absorber: bool,          # static; super-Gaussian edge damping once per round trip
+    edge_absorber_frac: float,    # outer fraction of |mu| (each side) over which the absorber ramps
 ) -> dict[str, jnp.ndarray]:
     """Solve one detuning trajectory with SSFM + thermal Euler update.
 
@@ -315,6 +340,15 @@ def _single_trajectory_solver(
     single Strang step (bit-identical regression guard). The detuning
     (thermal_shift + noise), thermal Euler update, energy balance, snapshots, and
     labels are all evaluated ONCE per round trip on the end-of-round-trip field.
+
+    Two anti-aliasing toggles (both default OFF at the public API, giving
+    bit-identical legacy behaviour): ``dealias_two_thirds`` zeros the Fourier
+    modes with |mu| > n_tau/3 after each nonlinear kick (the standard 2/3 rule
+    that removes cubic-nonlinearity aliasing), and ``edge_absorber`` multiplies
+    the field once per round trip by a super-Gaussian in mode space that is ~1
+    across the interior and ramps to strong attenuation over the outer
+    ``edge_absorber_frac`` of |mu| on each side, damping energy that reaches the
+    (partly extrapolated) grid edges instead of letting it fold back inward.
     """
     omega = _build_omega_grid(n_tau, t_r)
     # Per-mode measured dispersion when supplied, else the Taylor beta polynomial.
@@ -332,6 +366,19 @@ def _single_trajectory_solver(
     kappa_i = jnp.maximum(thermal["kappa_i"], 0.0)
     omega0 = 2.0 * jnp.pi * 299_792_458.0 / thermal["pump_wavelength_m"]
     n_snapshots = (t_slow + snapshot_interval - 1) // snapshot_interval
+
+    # Anti-aliasing masks in FFT-bin mode order (|mu| per bin). Built once and
+    # only when the corresponding toggle is on, so the OFF path is untouched.
+    if dealias_two_thirds or edge_absorber:
+        abs_mu = jnp.abs(jnp.fft.fftfreq(n_tau) * n_tau)   # |mu| per FFT bin
+    if dealias_two_thirds:
+        # 2/3 rule: keep |mu| <= n_tau/3, zero the rest.
+        mask_23 = (abs_mu <= (n_tau / 3.0)).astype(jnp.float64)
+    if edge_absorber:
+        mu_max = n_tau / 2.0
+        onset = (1.0 - edge_absorber_frac) * mu_max        # interior edge of ramp
+        s = jnp.clip((abs_mu - onset) / jnp.maximum(mu_max - onset, 1.0), 0.0, 1.0)
+        absorber = jnp.exp(-_ABSORBER_STRENGTH * s ** _ABSORBER_POWER)
 
     def _step(carry, step_idx):
         e_t, delta_t, e_snapshots, label_history, snap_count = carry
@@ -369,10 +416,20 @@ def _single_trajectory_solver(
             # (c) nonlinear phase kick over the full sub-step dt.
             nl_phase = jnp.exp(1j * gamma * jnp.abs(e_half) ** 2 * dt).astype(jnp.complex128)
             e_nl = (e_half * nl_phase).astype(jnp.complex128)
-            # (d) second half linear step.
+            # (d) second half linear step. Apply the 2/3 de-alias mask right after
+            #     the cubic nonlinear kick (in the frequency domain) so aliased
+            #     high modes are removed before they re-enter the dynamics.
             e_w2 = jnp.fft.fft(e_nl)
+            if dealias_two_thirds:
+                e_w2 = e_w2 * mask_23
             e_sub = jnp.fft.ifft(e_w2 * h_half).astype(jnp.complex128)
         e_next = e_sub
+
+        # Edge absorber: damp energy that has reached the (partly extrapolated)
+        # grid edges, once per round trip, so it is attenuated rather than folded
+        # back into the interior. The onset is beyond the physical window.
+        if edge_absorber:
+            e_next = jnp.fft.ifft(jnp.fft.fft(e_next) * absorber).astype(jnp.complex128)
 
         # Through-port power via energy balance (exact for all-pass ring, any state).
         # P_trans = P_in - κ_i * U_int / t_r = P_in - κ_i * mean(|E|²)
@@ -518,9 +575,9 @@ def _physical_state_labeler(
 _PER_TRAJ = jax.jit(
     jax.vmap(
         _single_trajectory_solver,
-        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0, 0, 0, None, None),
+        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0, 0, 0, None, None, None, None, None),
     ),
-    static_argnums=(2, 3, 7, 10, 13, 18),
+    static_argnums=(2, 3, 7, 10, 13, 18, 19, 20),
 )
 
 
@@ -540,6 +597,9 @@ def solve_lle_ssfm_jax(
     delta_t0_override: np.ndarray | jnp.ndarray | float | None = None,
     d_int_grid: np.ndarray | jnp.ndarray | None = None,
     n_substeps: int = 1,
+    dealias_two_thirds: bool = False,
+    edge_absorber: bool = False,
+    edge_absorber_frac: float = 0.12,
 ) -> dict[str, np.ndarray]:
     """Batch-capable SSFM solver for the generalized LLE using JAX.
 
@@ -588,6 +648,19 @@ def solve_lle_ssfm_jax(
             bit-for-bit. The pump drive is distributed across sub-steps so the
             per-round-trip total is unchanged; detuning, thermal update, energy
             balance, snapshots, and labels are computed once per round trip.
+        dealias_two_thirds: If True, zero the Fourier modes with |mu| > n_tau/3
+            after each nonlinear kick (standard 2/3 de-aliasing of the cubic
+            nonlinearity). Default False (bit-identical legacy behaviour).
+        edge_absorber: If True, multiply the field once per round trip by a
+            super-Gaussian in mode space that is ~1 across the interior and ramps
+            to strong attenuation over the outer ``edge_absorber_frac`` of |mu| on
+            each side, damping energy at the (partly extrapolated) grid edges.
+            Default False. Both toggles OFF reproduce the current solver exactly;
+            production physical runs should set both ON.
+        edge_absorber_frac: Outer fraction of |mu| (each side) over which the
+            edge absorber ramps (default 0.12). At n_tau=8192 the onset is
+            |mu| ~ 3604 and at 16384 ~ 7209, both beyond the physical window
+            (|mu|<=2744) so the absorber never touches it.
 
     Returns:
         Dictionary containing requested histories.
@@ -596,6 +669,9 @@ def solve_lle_ssfm_jax(
     if int(n_substeps) < 1:
         raise ValueError(f"n_substeps must be a positive integer, got {n_substeps}.")
     n_substeps = int(n_substeps)
+    dealias_two_thirds = bool(dealias_two_thirds)
+    edge_absorber = bool(edge_absorber)
+    edge_absorber_frac = float(edge_absorber_frac)
 
     thermal = _thermal_params(config_path)
     physical = _load_config(config_path)
@@ -845,6 +921,9 @@ def solve_lle_ssfm_jax(
         delta_t0_init,
         d_int_grid_arr,
         n_substeps,
+        dealias_two_thirds,
+        edge_absorber,
+        edge_absorber_frac,
     )
 
     return {k: np.asarray(v) for k, v in out.items()}
