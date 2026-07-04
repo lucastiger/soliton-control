@@ -174,7 +174,7 @@ def _fit_local_d2(csv_path=None) -> float:
     omega0 = omega[i0]
     d1 = 0.5 * (omega[i0 + 1] - omega[i0 - 1])
     d_int = omega - omega0 - d1 * mu
-    sel = np.abs(mu) <= 40
+    sel = (np.abs(mu) <= 300) & (np.abs(mu) > 5)
     coeff2 = float(np.polyfit(mu[sel].astype(np.float64), d_int[sel], 2)[0])
     return 2.0 * coeff2
 
