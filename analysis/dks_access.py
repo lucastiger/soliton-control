@@ -102,9 +102,10 @@ RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 PIN_W = 0.214
 # Full-dispersion default: the measured D_int grid spreads the single-DKS comb
-# across thousands of cavity modes (dispersive waves at the 1150 / 2300 nm band
-# edges), so the display window needs a large FFT grid. A CLI/kwarg override
-# keeps smaller, faster runs possible.
+# across thousands of cavity modes (phase-matched dispersive waves near mu ~
+# +3269 / -3051, i.e. ~1096 / 2520 nm at delta_omega = 8 kappa), so the display
+# window needs a large FFT grid. A CLI/kwarg override keeps smaller, faster runs
+# possible.
 N_TAU = 8192
 LABEL_SINGLE_SOLITON = 6
 
@@ -158,12 +159,21 @@ def load_cavity_params(config_path=CONFIG_PATH) -> CavityParams:
 
 
 def _fit_local_d2(csv_path=None) -> float:
-    """CSV-derived LOCAL D2: fit D_int(mu) ~ (D2/2)*mu^2 over |mu| <= 40.
+    """CSV-derived LOCAL D2: fit D_int(mu) ~ (D2/2)*mu^2 over 5 < |mu| <= 300.
 
     Near the pump the integrated dispersion is dominated by its quadratic term,
     D_int(mu) ~ (D2/2) mu^2, so a degree-2 fit of D_int vs mu over the central
     modes recovers the local curvature; the mu^2 coefficient times two is the
     local D2 [rad/s^2] used to size the analytic sech seed.
+
+    The fit window excludes the innermost |mu| <= 5 modes: a localized
+    pump-neighborhood defect displaces those resonances by up to -27 MHz, which
+    biases the curvature high (the old |mu| <= 40 window returned
+    D2 ~ 2*pi*15.7 kHz vs the window-converged smooth value 2*pi*7.8 kHz). The
+    outer edge sits at |mu| = 300, on the converged plateau (+/-100 -> 2*pi*6.4
+    kHz, +/-300 -> 2*pi*7.9 kHz, +/-400 -> 2*pi*7.8 kHz). Because the fit is
+    degree 2, the (defect-biased) linear D1 term does not affect the recovered
+    quadratic coefficient.
     """
     csv_path = Path(csv_path) if csv_path is not None else DINT_CSV_PATH
     data = np.loadtxt(csv_path, delimiter=",")
@@ -335,28 +345,144 @@ def optical_spectrum(e_field: np.ndarray, cav: CavityParams) -> dict:
     }
 
 
-def dispersive_wave_peaks(sp: dict, band_nm, n_peaks: int = 2) -> list:
-    """Largest ``n_peaks`` local maxima of the dB spectrum inside ``band_nm``.
+def _measured_dint_native(csv_path=None):
+    """Native (mu, D_int, D1, f0) from the CSV in the soliton-rest gauge.
 
-    ``sp`` is an :func:`optical_spectrum` result; ``band_nm`` is a (lo, hi)
-    wavelength window (nm). Returns a list of {wavelength_nm, power_db, mu}
-    dicts, sorted by descending dB — candidate dispersive-wave (Cherenkov) peaks
-    at the comb band edges. Empty if no local maximum falls in the window.
+    Identical construction to :func:`simulator.lle_solver.load_dint_grid` but on
+    the CSV's own integer mode axis (no FFT interpolation), so crossings can be
+    resolved out to the full |mu| the CSV spans regardless of the run's n_tau:
+
+    - omega = 2*pi*f; omega0 = the MEASURED mu=0 resonance so D_int(0) == 0.
+    - D1 from a degree-7 smooth-trend fit of omega over 5 < |mu| <= 600. A plain
+      3-point central difference at mu=0 is biased +2*pi*3.35 MHz by a localized
+      pump-neighborhood defect; that tilt is pure gauge for mode powers but it
+      corrupts every crossing / dispersive-wave readout, so the smooth trend is
+      used instead (this is the D1 gauge fixed in PR #40).
+    - D_int(mu) = omega - omega0 - D1*mu.
+    - f0 = the CSV pump frequency at mu=0 [Hz], used for the absolute-wavelength
+      map lambda(mu) = c / (f0 + mu*D1/(2*pi)).
+
+    Returns ``(mu, d_int, d1, f0)`` with float64 arrays/scalars.
     """
-    lo, hi = band_nm
-    wl = sp["wavelength_nm"]
-    db = sp["power_db"]
-    order = np.argsort(wl)
-    wl_s, db_s = wl[order], db[order]
-    mu_s = sp["mu"][order]
-    peaks, _ = find_peaks(db_s)
-    in_band = [p for p in peaks if lo <= wl_s[p] <= hi]
-    in_band.sort(key=lambda p: db_s[p], reverse=True)
-    return [
-        {"wavelength_nm": float(wl_s[p]), "power_db": float(db_s[p]),
-         "mu": int(mu_s[p])}
-        for p in in_band[:n_peaks]
-    ]
+    csv_path = Path(csv_path) if csv_path is not None else DINT_CSV_PATH
+    data = np.loadtxt(csv_path, delimiter=",")
+    mu = data[:, 0].astype(np.int64)
+    f_hz = data[:, 1].astype(np.float64)
+    omega = 2.0 * np.pi * f_hz
+    i0 = int(np.where(mu == 0)[0][0])
+    omega0 = omega[i0]
+    sel = (np.abs(mu) <= 600) & (np.abs(mu) > 5)
+    pf = np.polynomial.Polynomial.fit(mu[sel].astype(np.float64), omega[sel], 7)
+    d1 = float(pf.deriv()(0.0))
+    d_int = omega - omega0 - d1 * mu
+    return mu, d_int, d1, float(f_hz[i0])
+
+
+def dispersive_wave_crossings(delta_omega: float, csv_path=None,
+                              mu_core: int = 500) -> list:
+    """Phase-matched dispersive-wave crossings from the measured dispersion.
+
+    A dispersive wave (Cherenkov radiation) is emitted where the soliton is
+    phase-matched to a linear cavity mode, i.e. where the integrated dispersion
+    equals the detuning, ``D_int(mu) = delta_omega``. This scans the measured
+    D_int(mu) (soliton-rest gauge, see :func:`_measured_dint_native`) for sign
+    changes of ``D_int(mu) - delta_omega`` at ``|mu| > mu_core`` — the
+    ``|mu| ~ 200-300`` comb-core crossings are excluded so only the genuine
+    far-detuned band edges survive.
+
+    Returns a list of ``{crossing_mu, wavelength_nm, mu}`` dicts (one per
+    crossing, ``mu`` = nearest integer mode), sorted by ascending wavelength.
+    """
+    mu, d_int, d1, f0 = _measured_dint_native(csv_path)
+    fsr = d1 / (2.0 * math.pi)
+    g = d_int - float(delta_omega)
+    core = np.abs(mu) > int(mu_core)
+    idx = np.where(core)[0]
+    out = []
+    for a, b in zip(idx[:-1], idx[1:]):
+        if b != a + 1:  # only adjacent modes bracket a real crossing
+            continue
+        ga, gb = g[a], g[b]
+        if ga == 0.0 or (ga < 0.0) != (gb < 0.0):
+            mx = mu[a] - ga * (mu[b] - mu[a]) / (gb - ga)
+            lam_nm = C_LIGHT / (f0 + mx * fsr) * 1e9
+            out.append({"crossing_mu": float(mx),
+                        "wavelength_nm": float(lam_nm),
+                        "mu": int(round(mx))})
+    out.sort(key=lambda r: r["wavelength_nm"])
+    return out
+
+
+def dispersive_wave_peaks(sp: dict, delta_omega: float, *, csv_path=None,
+                          scan_modes: int = 30, baseline_mu=(400, 700),
+                          mu_core: int = 500) -> list:
+    """Dispersive-wave candidates derived from D_int / detuning phase matching.
+
+    Rather than scanning fixed wavelength windows (both true DWs at this
+    operating point fall OUTSIDE the old [1120,1260] / [2150,2400] nm bands),
+    this derives the search windows from the physics:
+
+    1. Compute the phase-matched crossings ``D_int(mu) = delta_omega`` at
+       ``|mu| > mu_core`` (:func:`dispersive_wave_crossings`).
+    2. Around each crossing mode ``mu_x`` scan the spectrum over
+       ``mu_x +/- scan_modes`` for the largest dB peak (the empirical DW lands a
+       few modes out from the linear crossing because of soliton recoil, so the
+       +/-30-mode window brackets it).
+    3. Convert the peak mode to wavelength with
+       ``lambda(mu) = c / (f0 + mu*D1/(2*pi))``, f0 = the CSV pump frequency at
+       mu=0.
+    4. Report ``prominence_db`` = peak height above a local sech-tail baseline:
+       a line fit in dB to the spectrum over ``|mu|`` in ``baseline_mu`` on the
+       SAME sign side as the crossing, extrapolated to the peak mode.
+
+    ``sp`` is an :func:`optical_spectrum` result. Returns a list of
+    ``{wavelength_nm, mu, power_db, prominence_db, crossing_mu}`` dicts sorted by
+    descending prominence. A crossing whose scan window falls outside the
+    resolved spectrum (n_tau too small) is skipped.
+    """
+    _, _, d1, f0 = _measured_dint_native(csv_path)
+    fsr = d1 / (2.0 * math.pi)
+    sp_mu = np.asarray(sp["mu"])
+    sp_db = np.asarray(sp["power_db"])
+    blo, bhi = baseline_mu
+
+    results = []
+    for cr in dispersive_wave_crossings(delta_omega, csv_path, mu_core=mu_core):
+        mx = cr["crossing_mu"]
+        win = (sp_mu >= mx - scan_modes) & (sp_mu <= mx + scan_modes)
+        if not win.any():
+            continue  # crossing outside the resolved FFT window (raise n_tau)
+        wi = np.where(win)[0]
+        j = wi[int(np.argmax(sp_db[wi]))]
+        peak_mu = int(sp_mu[j])
+        peak_db = float(sp_db[j])
+
+        # Local sech-tail baseline: line fit in dB over the same-sign tail,
+        # extrapolated to the peak mode. prominence = peak - baseline.
+        side = 1.0 if mx > 0 else -1.0
+        bsel = (sp_mu * side >= blo) & (sp_mu * side <= bhi)
+        if int(bsel.sum()) >= 2:
+            coeff = np.polyfit(sp_mu[bsel].astype(np.float64), sp_db[bsel], 1)
+            baseline_db = float(np.polyval(coeff, peak_mu))
+            prominence = peak_db - baseline_db
+        else:
+            prominence = float("nan")
+
+        lam_nm = C_LIGHT / (f0 + peak_mu * fsr) * 1e9
+        results.append({
+            "wavelength_nm": float(lam_nm),
+            "mu": peak_mu,
+            "power_db": peak_db,
+            "prominence_db": float(prominence),
+            "crossing_mu": float(mx),
+        })
+
+    results.sort(
+        key=lambda r: (r["prominence_db"]
+                       if np.isfinite(r["prominence_db"]) else -np.inf),
+        reverse=True,
+    )
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -607,13 +733,15 @@ def plot_optical_spectrum(path: Path, e_field, cav, delta_omega, *,
                 lw=0.7, color="tab:orange", alpha=0.7,
                 label=f"n_tau={e_field_hi.shape[0]} (fully resolved)")
 
-    # Light vertical guides at the lab's dispersive-wave band edges.
-    for edge in (1150.0, 2300.0):
-        ax.axvline(edge, color="0.5", ls=":", lw=0.8, alpha=0.7)
+    # Light vertical guides at the physics-derived dispersive-wave crossings
+    # (D_int(mu) = delta_omega, soliton-rest gauge), not fixed band edges.
+    crossings = dispersive_wave_crossings(delta_omega)
+    for c in crossings:
+        ax.axvline(c["wavelength_nm"], color="0.5", ls=":", lw=0.8, alpha=0.7)
 
     ax.set_xlabel("wavelength (nm)")
     ax.set_ylabel(r"normalized power  $10\log_{10}(|\tilde E|^2)$  (dB)")
-    ax.set_xlim(1150, 2300)
+    ax.set_xlim(1050, 2600)
     # Show the full dynamic range down to the numerical floor (the spectrum is
     # clamped at 1e-12 -> -120 dB): with a -70 dB floor the comb wings drop off
     # the bottom axis near 1400 / 1700 nm and vanish. -125 dB keeps the roll-off
@@ -829,23 +957,34 @@ def write_report(path: Path, cav, validated, fb, control, repro, emap,
         "swamped by background MI; above it the seed decays to CW.\n\n"
     )
     lines.append("## Resolution / dispersion note\n\n")
+    d2_khz = cav.d2_local / (2.0 * math.pi) / 1e3
+    crossings = dispersive_wave_crossings(validated["delta_omega"])
+    cross_txt = "; ".join(
+        f"mu ~ {c['crossing_mu']:+.0f} (~{c['wavelength_nm']:.0f} nm)"
+        for c in crossings
+    ) or "none"
     lines.append(
         f"The solver is driven by the full MEASURED integrated dispersion "
         f"D_int(mu) (from `config/pyLLE_dispersion_w4400_h800.csv`), not a pure D2 "
-        f"parabola, so it can in principle radiate dispersive waves (Cherenkov "
-        f"peaks) at dispersion-matched band edges rather than showing a plain "
-        f"sech^2 roll-off. Those edges span roughly 1150-2300 nm, thousands of "
-        f"cavity modes from the pump, so the default grid is n_tau = {N_TAU} to "
-        f"resolve the full display window (measured FSR = "
-        f"{cav.fsr_measured_hz:.4e} Hz; CSV local D2 = {cav.d2_local:.3e} "
-        f"rad/s^2). The analytic sech seed is sized from the local (near-pump) "
-        f"curvature; the full dispersion then reshapes the wings. The measured "
-        f"D_int has a blue-side phase-matching point near mu ~ +2400 (~1180 nm), "
-        f"but at this operating point the warm-started single-sech comb decays to "
-        f"the numerical floor before reaching it, so no edge peaks are populated "
-        f"in the [1120,1260] / [2150,2400] nm windows scanned by the run (the two "
-        f"largest local maxima per window are printed to stdout for lab "
-        f"comparison).\n\n"
+        f"parabola, so it can radiate dispersive waves (Cherenkov peaks) at "
+        f"phase-matched band edges rather than showing a plain sech^2 roll-off. "
+        f"The near-pump curvature gives a CSV local D2 = {cav.d2_local:.3e} "
+        f"rad/s^2 = 2*pi*{d2_khz:.1f} kHz (fit over 5 < |mu| <= 300, excluding "
+        f"the |mu| <= 5 pump-neighborhood defect; window-converged, cf. the old "
+        f"|mu| <= 40 window's biased 2*pi*15.7 kHz). The analytic sech seed is "
+        f"sized from this local curvature; the full dispersion then reshapes the "
+        f"wings (measured FSR = {cav.fsr_measured_hz:.4e} Hz).\n\n"
+        f"Working in the soliton-rest gauge (the D1 fixed in PR #40; a raw "
+        f"central-difference D1 tilted D_int and produced a spurious mu ~ +2400 "
+        f"/ 1188 nm crossing), the dispersive-wave phase-matching condition "
+        f"D_int(mu) = delta_omega has two crossings at |mu| > 500 for this run: "
+        f"{cross_txt}. These, not the fixed [1120,1260] / [2150,2400] nm windows "
+        f"of the old scanner, are the physical dispersive-wave band edges (the "
+        f"true DWs fall OUTSIDE those windows). `dispersive_wave_peaks` scans the "
+        f"spectrum +/-30 modes around each crossing (covering the few-mode recoil "
+        f"shift) and reports each peak's dB height and prominence above the local "
+        f"sech-tail baseline; the default grid is n_tau = {N_TAU} to resolve those "
+        f"crossing modes.\n\n"
         f"Both labelers return class 6 for these states. The JAX scan-time labeler "
         f"(which produces label_history for the training dataset) keys class 6 on a "
         f"single temporal peak plus a smooth monotonic sech^2 spectral envelope; an "
@@ -961,24 +1100,24 @@ def main() -> None:
         print(f"existence band: [{b['lower_over_kappa']:.1f}, "
               f"{b['upper_over_kappa']:.1f}] kappa (contiguous={b['contiguous']})")
 
-    # Candidate dispersive waves at the lab's comb band edges.
+    # Candidate dispersive waves derived from the D_int / detuning phase-matching
+    # crossings (soliton-rest gauge), not fixed wavelength windows.
     sp = optical_spectrum(validated["e_final"], cav)
-    wl_min, wl_max = float(np.min(sp["wavelength_nm"])), float(np.max(sp["wavelength_nm"]))
-    print(f"\nspectrum wavelength span: [{wl_min:.1f}, {wl_max:.1f}] nm "
-          f"(need to cover [1150, 2300] nm)")
-    if not (wl_min <= 1150.0 and wl_max >= 2300.0):
-        print("  WARNING: spectrum window does not fully cover [1150, 2300] nm "
-              "(increase --n-tau).")
-    print("candidate dispersive-wave peaks (two largest local maxima per band):")
-    for band in ((1120.0, 1260.0), (2150.0, 2400.0)):
-        pks = dispersive_wave_peaks(sp, band, n_peaks=2)
-        if not pks:
-            print(f"  [{band[0]:.0f}, {band[1]:.0f}] nm: none found")
-            continue
-        for pk in pks:
-            print(f"  [{band[0]:.0f}, {band[1]:.0f}] nm: "
-                  f"lambda = {pk['wavelength_nm']:.1f} nm (mu = {pk['mu']:+d}), "
-                  f"{pk['power_db']:.1f} dB")
+    crossings = dispersive_wave_crossings(dw)
+    print("\nphase-matched dispersive-wave crossings D_int(mu) = delta_omega "
+          f"(|mu| > 500, delta_omega = {args.dw:.1f} kappa):")
+    for cr in crossings:
+        print(f"  crossing mu ~ {cr['crossing_mu']:+.0f} "
+              f"(~{cr['wavelength_nm']:.1f} nm)")
+    pks = dispersive_wave_peaks(sp, dw)
+    print("candidate dispersive-wave peaks (spectrum max within +/-30 modes of "
+          "each crossing):")
+    if not pks:
+        print("  none resolved (raise --n-tau to cover the crossing modes)")
+    for pk in pks:
+        print(f"  lambda = {pk['wavelength_nm']:.1f} nm (mu = {pk['mu']:+d}, "
+              f"crossing {pk['crossing_mu']:+.0f}): {pk['power_db']:.1f} dB, "
+              f"prominence {pk['prominence_db']:.1f} dB")
 
     print(f"\nArtifacts in {RESULTS_DIR}")
 
