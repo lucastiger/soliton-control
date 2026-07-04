@@ -37,7 +37,12 @@ def csv_arrays():
     f = data[:, 1].astype(np.float64)
     omega = 2.0 * np.pi * f
     i0 = int(np.where(mu == 0)[0][0])
-    d1 = 0.5 * (omega[i0 + 1] - omega[i0 - 1])
+    # Mirror the loader's smooth-trend fit (NOT a raw central difference at mu=0,
+    # which a localized pump-neighborhood defect biases by +2π·3.35 MHz). omega0
+    # stays the MEASURED mu=0 resonance so D_int(0) == 0.
+    _sel = (np.abs(mu) <= 600) & (np.abs(mu) > 5)
+    _pf = np.polynomial.Polynomial.fit(mu[_sel].astype(float), omega[_sel], 7)
+    d1 = float(_pf.deriv()(0.0))
     d_int = omega - omega[i0] - d1 * mu
     return mu, d_int, d1
 

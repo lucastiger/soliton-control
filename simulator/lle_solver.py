@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import math
+import warnings
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -194,7 +195,9 @@ class DintGrid(NamedTuple):
     Attributes:
         grid: D_int(mu) [rad/s], shape (n_tau,), in FFT-bin order (NOT fftshifted),
             jnp float32 — ready to drop into the linear operator as ``disp``.
-        d1:  Measured D1 = 2π·FSR [rad/s] from the central difference of ω at mu=0,
+        d1:  Measured D1 = 2π·FSR [rad/s] from a smooth-trend fit, excluding the
+            5 < |mu| region around a known pump-neighborhood defect (a plain
+            central difference at mu=0 is biased +2π·3.35 MHz by that defect),
             so callers can reconcile the FSR / round-trip time.
 
     A ``NamedTuple`` so it is importable, picklable, and supports both attribute
@@ -211,8 +214,9 @@ def load_dint_grid(n_tau, csv_path=None, config_path=None) -> "DintGrid":
 
     - Default csv_path = config/pyLLE_dispersion_w4400_h800.csv.
     - Load (mu, f_hz). Compute omega = 2*pi*f. Locate mu==0 -> omega0.
-    - D1 = central difference of omega at mu==0 (rad/s). Returned too (as the
-      ``d1`` attribute of the DintGrid result) so callers can reconcile FSR.
+    - D1 = smooth-trend fit of omega, excluding the 5 < |mu| region around a
+      known pump-neighborhood defect (rad/s). Returned too (as the ``d1``
+      attribute of the DintGrid result) so callers can reconcile FSR.
     - D_int(mu) = omega - omega0 - D1*mu.
     - Build the integer FFT mode grid: k = np.round(np.fft.fftfreq(n_tau,
       d=t_r/n_tau) / fsr).astype(int), where fsr = D1/(2*pi) and t_r = 1/fsr.
