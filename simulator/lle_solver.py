@@ -253,7 +253,14 @@ def load_dint_grid(n_tau, csv_path=None, config_path=None) -> "DintGrid":
 
     # Central difference of omega at mu==0 (relies on mu=±1 flanking mu=0 in the
     # contiguous integer mode list).
-    d1 = 0.5 * (omega[i0 + 1] - omega[i0 - 1])          # rad/s
+    # 3-point central difference is biased +2π·3.35 MHz by a localized
+    # pump-neighborhood defect (|Δf| up to ~27 MHz for |mu|<=4), tilting
+    # D_int by (Δd1)·mu: provably harmless for mode powers (pure drift),
+    # but it corrupts every crossing/DW readout. Fit the smooth trend,
+    # excluding the defect region. omega0 stays measured: D_int(0) == 0.
+    _sel = (np.abs(mu_csv) <= 600) & (np.abs(mu_csv) > 5)
+    _pf = np.polynomial.Polynomial.fit(mu_csv[_sel].astype(float), omega[_sel], 7)
+    d1 = float(_pf.deriv()(0.0))                        # rad/s
     d_int_csv = omega - omega0 - d1 * mu_csv            # rad/s
 
     fsr = d1 / (2.0 * np.pi)                            # Hz
@@ -263,6 +270,14 @@ def load_dint_grid(n_tau, csv_path=None, config_path=None) -> "DintGrid":
     k = np.round(np.fft.fftfreq(int(n_tau), d=t_r / int(n_tau)) / fsr).astype(int)
 
     d_int_grid = np.interp(k, mu_csv, d_int_csv)
+    # interp clamps out-of-range bins flat (zero relative dispersion =
+    # FWM-degenerate band). Continue with the edge slope and warn.
+    below, above = k < mu_csv.min(), k > mu_csv.max()
+    if below.any() or above.any():
+        d_int_grid[below] = d_int_csv[0]  + (d_int_csv[1]  - d_int_csv[0])  * (k[below] - mu_csv.min())
+        d_int_grid[above] = d_int_csv[-1] + (d_int_csv[-1] - d_int_csv[-2]) * (k[above] - mu_csv.max())
+        warnings.warn(f"{int(below.sum()+above.sum())} FFT bins outside CSV range "
+                      f"[{mu_csv.min()},{mu_csv.max()}]; slope-continued. Mask for octave runs.")
     assert d_int_grid[0] == 0.0, (
         f"mu=0 FFT bin (k={k[0]}) must have D_int == 0, got {d_int_grid[0]!r}."
     )
