@@ -330,7 +330,10 @@ def optical_spectrum(e_field: np.ndarray, cav: CavityParams) -> dict:
     n = e_field.shape[0]
     spec = np.abs(np.fft.fftshift(np.fft.fft(e_field))) ** 2
     spec_n = spec / max(spec.max(), 1e-300)
-    power_db = 10.0 * np.log10(np.maximum(spec_n, 1e-12))
+    # Clamp at 1e-36 (-360 dB): below the ~-320 dB float64 aliasing-free floor,
+    # so real structure is never clipped, while exactly-zero (dealiased) bins
+    # stay finite. The old 1e-12 clamp hid everything under -120 dB.
+    power_db = 10.0 * np.log10(np.maximum(spec_n, 1e-36))
     mu = np.arange(n) - n // 2
     f_pump = C_LIGHT / cav.pump_wavelength_m
     fsr = cav.fsr_measured_hz if cav.fsr_measured_hz is not None else cav.fsr_hz
@@ -733,24 +736,44 @@ def plot_optical_spectrum(path: Path, e_field, cav, delta_omega, *,
                 lw=0.7, color="tab:orange", alpha=0.7,
                 label=f"n_tau={e_field_hi.shape[0]} (fully resolved)")
 
-    # Light vertical guides at the physics-derived dispersive-wave crossings
-    # (D_int(mu) = delta_omega, soliton-rest gauge), not fixed band edges.
+    # Scanner windows (crossing mu_x +/- 30 modes) and the physics-derived
+    # dispersive-wave crossings (D_int(mu) = delta_omega, soliton-rest gauge).
+    _, _, _d1, _f0 = _measured_dint_native()
+    _fsr = _d1 / (2.0 * math.pi)
     crossings = dispersive_wave_crossings(delta_omega)
     for c in crossings:
         ax.axvline(c["wavelength_nm"], color="0.5", ls=":", lw=0.8, alpha=0.7)
+        lam_a = C_LIGHT / (_f0 + (c["crossing_mu"] - 30) * _fsr) * 1e9
+        lam_b = C_LIGHT / (_f0 + (c["crossing_mu"] + 30) * _fsr) * 1e9
+        ax.axvspan(min(lam_a, lam_b), max(lam_a, lam_b), color="tab:purple",
+                   alpha=0.12, label="_scanner window")
+
+    # Annotate the measured dispersive-wave peaks (wavelength + dB).
+    for p in dispersive_wave_peaks(sp, delta_omega):
+        ax.annotate(
+            f"DW {p['wavelength_nm']:.0f} nm\n{p['power_db']:.1f} dB "
+            f"(+{p['prominence_db']:.0f} dB)",
+            xy=(p["wavelength_nm"], p["power_db"]),
+            xytext=(p["wavelength_nm"], p["power_db"] + 55),
+            ha="center", fontsize=8,
+            arrowprops=dict(arrowstyle="->", color="tab:red", lw=0.9),
+            color="tab:red",
+        )
 
     ax.set_xlabel("wavelength (nm)")
     ax.set_ylabel(r"normalized power  $10\log_{10}(|\tilde E|^2)$  (dB)")
     ax.set_xlim(1050, 2600)
-    # Show the full dynamic range down to the numerical floor (the spectrum is
-    # clamped at 1e-12 -> -120 dB): with a -70 dB floor the comb wings drop off
-    # the bottom axis near 1400 / 1700 nm and vanish. -125 dB keeps the roll-off
-    # and the noise-floor plateau visible across the whole 1150-2300 nm window.
-    ax.set_ylim(-125, 5)
+    # Show the full dynamic range down to the float64 + dealias numerical floor
+    # (~-320 dB); the -360 dB clamp in optical_spectrum keeps zeroed (dealiased)
+    # bins finite. Never cut above -200 dB: the DW peaks (~-95 dB) and the
+    # aliasing-free floor must both stay visible.
+    _ymin = min(-200.0, float(np.min(sp["power_db"])) - 10.0)
+    ax.set_ylim(max(_ymin, -370.0), 8)
     ax.set_title(
         f"Single-DKS optical spectrum @ delta_omega = "
         f"{delta_omega / cav.kappa:.1f} kappa, pin = {PIN_W} W "
-        f"(full measured dispersion, n_tau={e_field.shape[0]}){title_extra}"
+        f"(full measured dispersion, n_tau={e_field.shape[0]}){title_extra}",
+        fontsize=9,
     )
     ax.legend(fontsize=8)
     ax.grid(alpha=0.25)
@@ -781,7 +804,9 @@ def plot_soliton_summary(path: Path, res, cav):
     axes[1].plot(sp["mu"][order], sp["power_db"][order], "-", lw=0.8, color="tab:blue")
     axes[1].set_xlabel("cavity mode index $\\mu$")
     axes[1].set_ylabel("power (dB)")
-    axes[1].set_ylim(-70, 3)
+    # Deep axis: the float64 + dealias floor sits near -320 dB and the
+    # dispersive-wave peaks near -100 dB; the old -70 dB cut hid both.
+    axes[1].set_ylim(min(-200.0, float(np.min(sp["power_db"])) - 10.0), 8)
     axes[1].set_title(
         f"(b) Comb spectrum — sech$^2$ env corr = "
         f"{res['metrics']['sech2_env_corr']:.3f}"
