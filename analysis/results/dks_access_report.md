@@ -6,19 +6,25 @@ Classification of every file in `analysis/results/` after the dispersion-layer
 fixes on branch `claude/measured-dispersion-grid-px220y` (D1 soliton-rest gauge
 from PR #40; `_fit_local_d2` window fix; crossing-derived `dispersive_wave_peaks`).
 Nothing in this directory should be trusted without checking this table.
-**Post-rebase validation rerun completed** (numerics stack: float64,
-sub-stepping, 2/3 dealias + edge absorber, smooth D_int extrapolation +
-validity mask, fine-cadence mode available): the spectrum/summary PNGs below
-are regenerated from that run; see "Dispersive-wave peak scan" for the
-measured floor and DW peaks.
+**Validation rerun completed with the corrected numerics defaults** (float64,
+n_substeps=4, 2/3 dealias + edge absorber, smooth D_int extrapolation,
+fine-cadence mode available, **dispersion-validity mask OFF**): the
+spectrum/summary PNGs below are regenerated from that run; see
+"Dispersive-wave peak scan" for the measured floor and DW peaks. The earlier
+rerun had the |D_int*t_r|-keyed validity mask ON (threshold 1.0 rad), which
+amputated real comb spectrum over mu ~ [-2950, -1000] and [+1150, +3050]; the
+mask is now keyed to the per-sub-step mismatch phase, defaults OFF, and is
+kept only as an opt-in guard for n_substeps=1 runs
+(see `simulator/lle_solver.py`). The five spectral-integrity checks V1-V5
+(`tests/test_dks_spectral_integrity.py`) all pass on the rerun.
 
 | File | Status | Reason |
 |------|--------|--------|
 | `dks_access_report.md` | **REGENERATED HERE** | Dispersion sections rebuilt from the corrected code + CSV (pure analysis, no solver): corrected local D2, rest-gauge crossings, crossing-derived DW windows. Solver-derived sections (validated soliton, reproducibility, control, existence band) carried over unchanged because mode powers are gauge-invariant under the D1 fix. |
-| `dks_single_soliton_spectrum.png` | **REGENERATED — post-rebase validation rerun** | Rebuilt from the post-rebase rerun (float64, n_substeps=4, 2/3 dealias, edge absorber, validity mask; n_tau=16384, 16000 RT). Far-wing floor median -206 dB (blue) / -357 dB (red) over 3200<\|mu\|<3900 — the old -100..-120 dB floor was aliasing, as the audit attributed. Both DW peaks annotated (1096 nm @ -103.5 dB, 2531 nm @ -100.5 dB); scanner windows overlaid; y-axis extends to the numerical floor. |
-| `dks_single_soliton_summary.png` | **REGENERATED — post-rebase validation rerun** | Same run as the spectrum PNG; comb panel now shows the full dynamic range down to the float64 floor. |
-| `dks_existence_map.csv` | **REGENERATED — full map re-run** | Staged boundary re-probe (7, 7.5, 13, 13.5 kappa, new seed/numerics, 1 tau_th) flipped two labels: 7.0 and 13.5 kappa are now single solitons (the corrected seed is 1.42x wider), so the full map was regenerated over 1.0-18.0 kappa. New single-DKS band **[6.5, 16.0] kappa** (was [7.5, 13.0]). |
-| `dks_existence_map.png` | **REGENERATED — full map re-run** | Plot of the regenerated `dks_existence_map.csv`. |
+| `dks_single_soliton_spectrum.png` | **REGENERATED — mask-OFF validation rerun** | Rebuilt with the corrected defaults (float64, n_substeps=4, 2/3 dealias, edge absorber, **validity mask OFF**; n_tau=16384, 12000 RT). The previous version (mask ON at \|D_int*t_r\| > 1) amputated the comb over mu ~ [-2950, -1000] / [+1150, +3050]; the envelope is now smooth and continuous from the pump out to BOTH DW peaks (V2 worst tail-line deficit 6.7 dB blue / 0.9 dB red, limit 25 dB). DW peaks -90.8 dB @ 1096 nm (mu = +3266) and -87.7 dB @ 2529 nm (mu = -3069), within a few dB/modes of the numpy reference (-95.4 @ 1095, -93.1 @ 2529). Floor median -355 dB beyond the 2/3 cutoff. |
+| `dks_single_soliton_summary.png` | **REGENERATED — mask-OFF validation rerun** | Same run as the spectrum PNG; comb panel shows the full dynamic range down to the float64 floor. |
+| `dks_existence_map.csv` | **VALID — mask-OFF boundary re-probe confirms** | The full map re-run (band **[6.5, 16.0] kappa**, was [7.5, 13.0]) was generated with the buggy validity mask ON; but the mask bands sit at \|mu\| > ~1000 where the comb tail is < -80 dB, so the classification is insensitive to it. Confirmed by re-probing the four band-boundary points (6.0 / 6.5 / 16.0 / 16.5 kappa) with the fixed numerics (mask OFF, same seed, 1 tau_th, n_tau = 8192): labels 1 / 6 / 3 unchanged at every point (6.0 -> 1, 6.5 -> 6, 16.0 -> 6, 16.5 -> 3), no is_single flip, so the map was NOT regenerated. |
+| `dks_existence_map.png` | **VALID — mask-OFF boundary re-probe confirms** | Plot of `dks_existence_map.csv` (see that row). |
 | `adiabatic_sweeps.png` | **VALID — predates numerics fixes** | Unaffected by these analysis-layer fixes (gauge-invariant dynamics, no scanner dependence). Predates the dealiasing/float64/sub-stepping numerics fixes; re-check if quantitative wing/width numbers are used. |
 | `adiabatic_sweeps_report.md` | **VALID — predates numerics fixes** | Same as above. |
 | `forward_sweep.csv` | **VALID — predates numerics fixes** | Same as above. |
@@ -36,7 +42,7 @@ Two routes were implemented (`analysis/dks_access.py`):
 
 ## Validated single soliton
 
-_Solver-derived; carried over from the pre-rebase run. Mode powers are gauge-invariant under the D1 fix, so these numbers are unchanged. The post-rebase rerun (16000 RT, n_tau = 16384, new numerics — see "Dispersive-wave peak scan") re-validates the state: class 6, n_peaks = 1, env corr = 0.9988, U_int tail rel-std = 4.05%._
+_Solver-derived; carried over from the pre-rebase run. Mode powers are gauge-invariant under the D1 fix, so these numbers are unchanged. The mask-OFF rerun (12000 RT, n_tau = 16384, corrected numerics defaults — see "Dispersive-wave peak scan") re-validates the state: class 6, n_peaks = 1, env corr = 0.9960, U_int tail rel-std = 4.09%._
 
 Route (b) at programmed delta_omega = 8.0 kappa (effective 7.96 kappa after thermal shift), integrated for t_slow = 615000 round trips = 5.0 tau_th:
 
@@ -65,7 +71,9 @@ Cold start held at the same detuning (8.0 kappa) with NO seed and NO tuning prot
 
 ## Existence window (seeded)
 
-**Regenerated post-rebase** (new seed with corrected local D2; numerics: float64, n_substeps=4, 2/3 dealias, edge absorber, validity mask; 1 tau_th = 123000 RT per point, n_tau = 8192, rng seed 0). The staged boundary re-probe (7, 7.5, 13, 13.5 kappa) flipped 7.0 and 13.5 kappa to single, so the full map was regenerated over 1.0-18.0 kappa in 0.5 kappa steps (35 points).
+**Regenerated post-rebase** (new seed with corrected local D2; numerics: float64, n_substeps=4, 2/3 dealias, edge absorber, validity mask ON — see below; 1 tau_th = 123000 RT per point, n_tau = 8192, rng seed 0). The staged boundary re-probe (7, 7.5, 13, 13.5 kappa) flipped 7.0 and 13.5 kappa to single, so the full map was regenerated over 1.0-18.0 kappa in 0.5 kappa steps (35 points).
+
+**Mask-OFF confirmation:** that map re-run predates the validity-mask fix (the \|D_int*t_r\|-keyed mask amputated the comb at \|mu\| > ~1000, where the tail is already < -80 dB — far below anything the labeler keys on). Re-probing the four band-boundary points (6.0 / 6.5 / 16.0 / 16.5 kappa) with the corrected defaults (`PRODUCTION_NUMERICS`, mask OFF; same seed, 1 tau_th, n_tau = 8192) reproduces every label exactly (1 / 6 / 6 / 3) with no is_single flip, so the **[6.5, 16.0] kappa** band stands and the map was not regenerated.
 
 Class-6 single solitons now appear in a single contiguous detuning band **[6.5, 16.0] kappa** (20 sampled points, contiguous = True). The old map's band was [7.5, 13.0] kappa: the corrected `_fit_local_d2` widens the seed sech by 1.42x (tau_s ∝ sqrt(D2)), which is enough for the seed to survive at both former boundaries.
 
@@ -94,18 +102,19 @@ Wavelengths use `lambda(mu) = c / (f0 + mu*D1/(2*pi))` with `f0` = the CSV pump 
 
 Both true dispersive waves fall **outside** the old scanner's hard-coded `[1120, 1260]` / `[2150, 2400]` nm windows, which is why the old run reported no edge peaks. The rewritten `dispersive_wave_peaks()` derives its search windows from these crossings instead: for each crossing `mu_x` it scans the spectrum over `mu_x +/- 30` modes for the largest dB peak, then reports `(lambda_nm, mu, peak_dB, prominence_dB)`, where prominence is the peak height above a local sech-tail baseline (a line fit in dB over `|mu|` in `[400, 700]` on the same sign side, extrapolated to the peak mode). The `+/-30`-mode window covers the empirical peaks, which land a few modes further out (**+3281 / -3069 = 1095 / 2529 nm**) due to soliton recoil.
 
-## Dispersive-wave peak scan (post-rebase validation rerun)
+## Dispersive-wave peak scan (mask-OFF validation rerun)
 
-Measured on the final snapshot of the post-rebase validation rerun: programmed delta_omega = 8 kappa (kappa = 1.519e8 rad/s), pin = 0.214 W, seeded single soliton (corrected local D2 = 2*pi*7.93 kHz), **n_tau = 16384**, 16000 round trips (~49 cavity fills), solver flags float64 (module-wide x64), `n_substeps=4`, `dealias_two_thirds=True` (cutoff |mu| = 5461, retaining both DW regions), `edge_absorber=True`, `dispersion_validity_mask=True` (handles the extrapolated out-of-CSV red bins mu < -3261). The thermal transient barely develops over this window (tau_th ~ 123k RT): effective detuning drifts only 8.000 -> 7.995 kappa, so the thermal loop stayed ON.
+Measured on the final field of the validation rerun with the corrected numerics defaults: programmed delta_omega = 8 kappa (kappa = 1.519e8 rad/s), pin = 0.214 W, seeded single soliton (corrected local D2 = 2*pi*7.93 kHz), **n_tau = 16384**, 12000 round trips, solver flags float64 (module-wide x64), `n_substeps=4`, `dealias_two_thirds=True` (cutoff |mu| = 5461, retaining both DW regions), `edge_absorber=True`, **`dispersion_validity_mask=False`**. The previous rerun's mask (keyed to |D_int*t_r| > 1, i.e. |D_int| > ~162 kappa) was amputating real comb spectrum — the linear exponential is exact at any phase; the genuine discrete-map artifact (spurious FWM at mismatch phase ~2*pi per nonlinear kick) sits at ~4070 kappa with n_substeps=4, outside the band — so its -103.5/-100.5 dB DW peaks and -206 dB blue "floor" were artifacts of the amputation. Effective detuning drifts only 8.000 -> 7.996 kappa over this window (tau_th ~ 123k RT), thermal loop ON.
 
-All numbers dB relative to the max mode:
+All numbers dB relative to the max mode (matching the V1-V5 checks in `tests/test_dks_spectral_integrity.py`, all of which pass on this run):
 
-- **Far-wing floor** (median over 3200 < |mu| < 3900): **-206.3 dB** (blue side, +mu) and **-357.2 dB** (red side, -mu). Both <= -180 dB — the audit's aliasing attribution for the old -100..-120 dB floor is confirmed. (Audit numpy reference floor ~ -320 dB; the blue side sits higher because the 1096 nm DW shoulder is real comb structure inside that window, the red side at the FFT-roundoff limit below it.)
+- **Numerical floor** (median over |mu| > n_tau/3 + 50 = 5511, past the 2/3 dealias cutoff): **-355.2 dB** (blue) / **-355.5 dB** (red) — at the float64 roundoff limit, <= -300 dB required (V5). The 3200 < |mu| < 3900 window used by the previous rerun is no longer a floor readout: with the mask OFF it contains the real DW shoulders (medians -174.5 / -190.1 dB there).
 - **DW peaks** (max within +/-60 modes of the crossings, prominence over the sech-tail baseline — linear dB fit over |mu| in [400, 700] on the same sign side, extrapolated):
-  - blue: **-103.5 dB at mu = +3272 (1096 nm)**, prominence **+161 dB** — audit reference -95.4 dB at mu = +3281 (1095 nm): delta -8.1 dB, 9 modes.
-  - red: **-100.5 dB at mu = -3073 (2531 nm)**, prominence **+159 dB** — audit reference -93.1 dB at mu = -3069 (2529 nm): delta -7.4 dB, 4 modes.
-  - Prominence deltas vs the reference's 60-70 dB are large because the [400,700] sech-tail baseline extrapolates to ~-264 dB at the DW modes on this (deeper-floored) spectrum; measured against the local floor instead the peaks stand ~100 dB (blue) / ~257 dB (red) proud. Either way both clear the >50 dB criterion by a wide margin.
-- Steady state remains a class-6 single soliton: n_peaks = 1, sech^2 env corr = 0.9988, U_int tail rel-std = 4.05%.
+  - blue: **-90.8 dB at mu = +3266 (1096 nm)**, prominence **+150 dB** — audit reference -95.4 dB at mu = +3281 (1095 nm): delta +4.6 dB, 15 modes.
+  - red: **-87.7 dB at mu = -3069 (2529 nm)**, prominence **+149 dB** — audit reference -93.1 dB at mu = -3069 (2529 nm): delta +5.4 dB, 0 modes.
+  - Both clear the >50 dB prominence criterion (V4) by a wide margin.
+- **Spectral integrity**: dB-linear sech tail over 400 <= |mu| <= 1500, RMS < 3 dB per side, slope asymmetry < 15% (V1); NO interior hole — everywhere in 300 < |mu| < 2900 the spectrum stays within 25 dB of the fitted tail line, worst deficit 6.7 dB (blue, mu = 2627) / 0.9 dB (red, mu = -2598) (V2); sech^2 core fit over 3 <= |mu| <= 200 with RMS 1.50 dB, width ~124 modes (V3).
+- Steady state remains a class-6 single soliton: n_peaks = 1, sech^2 env corr = 0.9960, U_int tail rel-std = 4.09%.
 
 ## Labeler note
 
@@ -115,6 +124,6 @@ Both labelers return class 6 for these states. The JAX scan-time labeler (which 
 
 See the **Stale artifacts** table at the top for the current status of each file.
 
-- `dks_single_soliton_spectrum.png` — optical power vs wavelength (nm) — STALE
-- `dks_single_soliton_summary.png` — waveform, comb, U_int stability — STALE
-- `dks_existence_map.png` / `dks_existence_map.csv` — existence window — STALE
+- `dks_single_soliton_spectrum.png` — optical power vs wavelength (nm) — regenerated (mask-OFF rerun)
+- `dks_single_soliton_summary.png` — waveform, comb, U_int stability — regenerated (mask-OFF rerun)
+- `dks_existence_map.png` / `dks_existence_map.csv` — existence window — valid (boundary points re-confirmed with mask OFF)
