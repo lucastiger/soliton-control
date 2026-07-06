@@ -109,6 +109,20 @@ PIN_W = 0.214
 N_TAU = 8192
 LABEL_SINGLE_SOLITON = 6
 
+# Production numerics stack for physical (quantitative-spectrum) runs. float64
+# is module-wide in the solver; n_substeps=4 keeps the per-kick linear-phase
+# mismatch far below the ~2*pi spurious-FWM onset; the 2/3 dealias + edge
+# absorber contain cubic-nonlinearity aliasing. The dispersion-validity mask
+# stays OFF: the exact linear exponential is valid at any phase, and the mask
+# (an opt-in guard for n_substeps=1 runs) amputates real soliton-tail /
+# dispersive-wave spectrum when enabled here.
+PRODUCTION_NUMERICS = dict(
+    n_substeps=4,
+    dealias_two_thirds=True,
+    edge_absorber=True,
+    dispersion_validity_mask=False,
+)
+
 
 # ---------------------------------------------------------------------------
 # Cavity / material parameters bundled once
@@ -492,12 +506,15 @@ def dispersive_wave_peaks(sp: dict, delta_omega: float, *, csv_path=None,
 # Low-level trajectory runner (constant or ramped detuning, optional warm start)
 # ---------------------------------------------------------------------------
 def _run(delta_omega, t_slow, cav, *, e0=None, delta_t0=None, seed=0,
-         n_tau=N_TAU, pin=PIN_W, snapshot_interval=None, config_path=CONFIG_PATH):
+         n_tau=N_TAU, pin=PIN_W, snapshot_interval=None, config_path=CONFIG_PATH,
+         **solver_kwargs):
     """Thin wrapper around solve_lle_ssfm_jax for a single trajectory.
 
     ``delta_omega`` is a scalar (held) or a (t_slow,) ramp.  ``e0`` is an optional
-    (n_tau,) warm-start field (None = cold start).  Returns the numpy result dict
-    plus the final field / U_int history sliced to trajectory 0.
+    (n_tau,) warm-start field (None = cold start).  Extra ``solver_kwargs`` are
+    forwarded to :func:`solve_lle_ssfm_jax` (pass ``**PRODUCTION_NUMERICS`` for
+    quantitative-spectrum runs; the default is the legacy path).  Returns the
+    numpy result dict plus the final field / U_int history sliced to trajectory 0.
     """
     if snapshot_interval is None:
         snapshot_interval = max(t_slow // 200, 1)
@@ -519,6 +536,7 @@ def _run(delta_omega, t_slow, cav, *, e0=None, delta_t0=None, seed=0,
         e0_override=None if e0 is None else np.asarray(e0),
         delta_t0_override=None if delta_t0 is None else np.asarray(delta_t0),
         d_int_grid=cav.d_int_grid,
+        **solver_kwargs,
     )
     return sol
 
@@ -527,7 +545,7 @@ def _run(delta_omega, t_slow, cav, *, e0=None, delta_t0=None, seed=0,
 # Access protocol (b): direct single-sech seeding
 # ---------------------------------------------------------------------------
 def access_by_seeding(delta_omega, cav, *, t_slow=None, seed=0, n_tau=N_TAU,
-                      pin=PIN_W, config_path=CONFIG_PATH):
+                      pin=PIN_W, config_path=CONFIG_PATH, **solver_kwargs):
     """Deterministic single-DKS access by warm-starting an analytic sech ansatz.
 
     Builds ``sech_soliton_seed(delta_omega)`` and integrates at constant
@@ -540,7 +558,7 @@ def access_by_seeding(delta_omega, cav, *, t_slow=None, seed=0, n_tau=N_TAU,
         t_slow = cav.tau_th_round_trips  # ~1 tau_th
     seed_field = sech_soliton_seed(delta_omega, cav, n_tau=n_tau, pin=pin)
     sol = _run(delta_omega, t_slow, cav, e0=seed_field, seed=seed,
-               n_tau=n_tau, pin=pin, config_path=config_path)
+               n_tau=n_tau, pin=pin, config_path=config_path, **solver_kwargs)
     e_final = np.asarray(sol["e_final"])[0]
     u_hist = np.asarray(sol["U_int_history"])[0]
     dweff = np.asarray(sol["delta_omega_eff_history"])[0]
@@ -630,7 +648,7 @@ def access_by_forward_backward(
 # Existence-window map (batched over detuning via the vmapped solver)
 # ---------------------------------------------------------------------------
 def existence_map(cav, dw_over_kappa, *, t_slow=None, seed=0, n_tau=N_TAU,
-                  pin=PIN_W, config_path=CONFIG_PATH):
+                  pin=PIN_W, config_path=CONFIG_PATH, **solver_kwargs):
     """Seed a single soliton at each detuning and classify the steady state.
 
     All detunings are integrated in one batched (vmapped) solver call: the seed
@@ -649,7 +667,7 @@ def existence_map(cav, dw_over_kappa, *, t_slow=None, seed=0, n_tau=N_TAU,
         kappa=cav.kappa, kappa_c=cav.kappa_c, rng_key=jax.random.PRNGKey(int(seed)),
         n_tau=int(n_tau), snapshot_interval=max(int(t_slow) // 50, 1),
         config_path=str(config_path), e0_override=seeds.astype(np.complex64),
-        d_int_grid=cav.d_int_grid,
+        d_int_grid=cav.d_int_grid, **solver_kwargs,
     )
     e_finals = np.asarray(sol["e_final"])
     u_hists = np.asarray(sol["U_int_history"])

@@ -221,15 +221,28 @@ def test_dealias_zeros_modes_above_two_thirds_and_changes_result():
 
 
 def test_dispersion_validity_mask_off_identical_on_changes():
-    """Validity mask OFF is bit-identical; ON damps high-|D_int*t_r| modes."""
+    """Validity mask OFF is bit-identical; ON damps high-mismatch-phase modes.
+
+    The mask keys to the per-sub-step linear-phase MISMATCH
+    |D_int - delta_omega|*dt_sub (not |D_int*t_r|). For this tiny case
+    (beta2 = 1e-16, n_tau = 128, n_substeps = 1) the edge-mode mismatch phase is
+    ~0.18 rad, far below the pi default, so a sub-edge threshold is passed to
+    exercise the ON path.
+    """
     golden = np.load(REPO_ROOT / "tests" / "data" / "lle_singlestep_legacy_128.npy")
     e_off = np.asarray(_substep_case(dispersion_validity_mask=False)["e_final"])
     assert np.array_equal(e_off, golden), "validity mask OFF must be the legacy path"
     e_on = np.asarray(
-        _substep_case(dispersion_validity_mask=True, validity_phase_threshold=1.0)["e_final"]
+        _substep_case(dispersion_validity_mask=True, validity_phase_threshold=0.05)["e_final"]
     )
     assert np.all(np.isfinite(e_on))
     assert not np.array_equal(e_on, e_off)
+    # At the pi default the mismatch phase never crosses the threshold here, so
+    # the mask multiplies by exactly 1 everywhere; only the extra FFT->iFFT
+    # round trip's float roundoff remains.
+    e_pi = np.asarray(_substep_case(dispersion_validity_mask=True)["e_final"])
+    assert np.max(np.abs(e_pi - e_off)) <= 1e-10 * np.max(np.abs(e_off)), \
+        "pi-threshold mask must be inert when the mismatch phase stays below it"
 
 
 def test_fine_cadence_M1_identical_M_gt1_changes():

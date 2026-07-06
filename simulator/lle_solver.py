@@ -316,14 +316,18 @@ def load_dint_grid(n_tau, csv_path=None, config_path=None) -> "DintGrid":
 _ABSORBER_POWER = 8.0
 _ABSORBER_STRENGTH = 40.0
 
-# Dispersion-validity mask shape: modes whose per-round-trip linear phase
-# |D_int*t_r| exceeds ``validity_phase_threshold`` are smoothly damped, since the
-# once-per-round-trip split-step map is only a faithful LLE integrator while that
-# phase is small (a phase near pi drives a parametric round-trip-map resonance
-# that is a numerical artifact, not physics). The window |D_int*t_r| <= threshold
-# is the solver's honest regime of validity. validity = exp(-STRENGTH*over^POWER)
-# with over = max(|D_int*t_r|/threshold - 1, 0): exactly 1 inside the window,
-# rolling to ~0 within ~half the threshold above it.
+# Dispersion-validity mask shape (opt-in guard; see solve_lle_ssfm_jax). The
+# linear half-step applies the EXACT exponential exp(-i*(D_int+delta)*dt), which
+# is correct at ANY phase, so |D_int*t_r| by itself is NOT an error metric — an
+# earlier mask keyed to |D_int*t_r| > 1 amputated real comb structure (soliton
+# tail and dispersive waves, ~|mu| > 1000 on the measured grid). The genuine
+# discrete-map artifact is spurious four-wave mixing that phase-matches when the
+# linear-phase MISMATCH accrued across one nonlinear kick,
+# |D_int - delta_omega|*dt_sub, approaches 2*pi. The mask therefore keys to that
+# per-sub-step mismatch phase, with the default threshold pi safely below the
+# 2*pi onset. validity = exp(-STRENGTH*over^POWER) with
+# over = max(phase_sub/threshold - 1, 0): exactly 1 inside the window, rolling
+# to ~0 within ~half the threshold above it.
 _VALIDITY_POWER = 2.0
 _VALIDITY_STRENGTH = 10.0
 
@@ -351,8 +355,8 @@ def _single_trajectory_solver(
     dealias_two_thirds: bool,     # static; zero |mu|>n_tau/3 after each nonlinear kick (2/3 rule)
     edge_absorber: bool,          # static; super-Gaussian edge damping once per round trip
     edge_absorber_frac: float,    # outer fraction of |mu| (each side) over which the absorber ramps
-    dispersion_validity_mask: bool,  # static; damp modes with |D_int*t_r| > threshold each round trip
-    validity_phase_threshold: float,  # per-round-trip phase threshold |D_int*t_r| for the validity mask
+    dispersion_validity_mask: bool,  # static; opt-in damping of modes whose per-sub-step mismatch phase exceeds the threshold
+    validity_phase_threshold: float,  # |D_int - delta_omega|*dt_sub threshold (rad) for the validity mask
     fine_cadence_M: int,          # static; advance thermal/detuning/energy at dt=t_r/M (1 = per-round-trip)
 ) -> dict[str, jnp.ndarray]:
     """Solve one detuning trajectory with SSFM + thermal Euler update.
@@ -418,14 +422,15 @@ def _single_trajectory_solver(
         s = jnp.clip((abs_mu - onset) / jnp.maximum(mu_max - onset, 1.0), 0.0, 1.0)
         absorber = jnp.exp(-_ABSORBER_STRENGTH * s ** _ABSORBER_POWER)
     if dispersion_validity_mask:
-        # Damp modes whose per-round-trip linear phase |D_int*t_r| exceeds the
-        # validity threshold (the once-per-round-trip map is only trustworthy
-        # while that phase is small). disp is D_int(mu) [rad/s] in FFT-bin order.
         # The exact linear exponential is valid at ANY phase; the genuine
-        # discrete-map artifact is spurious FWM phase-matching when the
+        # discrete-map artifact is spurious FWM phase-matching when the linear
         # MISMATCH phase per nonlinear kick nears 2*pi. Key the mask to the
-        # sub-step actually taken and to the detuned dispersion.
-        phase_sub = jnp.abs(grid - delta_omega) * dt_sub
+        # sub-step actually taken and to the detuned dispersion. disp is
+        # D_int(mu) [rad/s] in FFT-bin order; delta_omega is the (t_slow,)
+        # programmed-detuning schedule and the mask is built once, so use its
+        # first value (sweeps move by ~kappa, negligible against the ~1e3*kappa
+        # phase scale where the mask engages).
+        phase_sub = jnp.abs(disp - delta_omega[0]) * dt_sub
         over = jnp.maximum(phase_sub / validity_phase_threshold - 1.0, 0.0)
         validity = jnp.exp(-_VALIDITY_STRENGTH * over ** _VALIDITY_POWER)
 
@@ -704,15 +709,22 @@ def solve_lle_ssfm_jax(
             edge absorber ramps (default 0.12). At n_tau=8192 the onset is
             |mu| ~ 3604 and at 16384 ~ 7209, both beyond the physical window
             (|mu|<=2744) so the absorber never touches it.
-        dispersion_validity_mask: If True, damp (once per round trip) the modes
-            whose per-round-trip linear phase |D_int*t_r| exceeds
-            ``validity_phase_threshold``. The once-per-round-trip split-step map
-            is only a faithful LLE integrator while that phase is small; modes
-            near |D_int*t_r|=pi host a parametric round-trip-map resonance (a
-            numerical artifact). The |D_int*t_r| <= threshold window is the
-            solver's honest regime of validity. Default False (bit-identical).
-        validity_phase_threshold: |D_int*t_r| threshold (rad) for the validity
-            mask (default pi).
+        dispersion_validity_mask: If True, smoothly damp (once per fine step)
+            the modes whose per-sub-step linear-phase MISMATCH
+            |D_int - delta_omega|*dt_sub exceeds ``validity_phase_threshold``.
+            The linear step applies the exact exponential, which is valid at any
+            phase, so a large |D_int*t_r| does NOT by itself invalidate the map
+            (an earlier |D_int*t_r|-keyed mask amputated real soliton-tail and
+            dispersive-wave spectrum). The only genuine discrete-map artifact is
+            spurious four-wave mixing that phase-matches when the mismatch phase
+            per nonlinear kick nears 2*pi; this mask is an opt-in guard for
+            coarse n_substeps=1 runs where that onset can fall inside the
+            resolved band. With n_substeps>=4 the onset sits far outside the
+            physical window and the mask should stay OFF. Default False
+            (bit-identical).
+        validity_phase_threshold: per-sub-step mismatch-phase threshold (rad)
+            for the validity mask (default pi, below the ~2*pi spurious-FWM
+            onset).
         fine_cadence_M: Advance the whole evolution (field, thermal ODE, detuning,
             pump, energy balance, masks) at the fine cadence dt = t_r / M instead
             of refreshing the thermal/detuning/energy once per round trip. This
