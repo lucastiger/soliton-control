@@ -421,8 +421,12 @@ def _single_trajectory_solver(
         # Damp modes whose per-round-trip linear phase |D_int*t_r| exceeds the
         # validity threshold (the once-per-round-trip map is only trustworthy
         # while that phase is small). disp is D_int(mu) [rad/s] in FFT-bin order.
-        phase_rt = jnp.abs(disp) * t_r
-        over = jnp.maximum(phase_rt / validity_phase_threshold - 1.0, 0.0)
+        # The exact linear exponential is valid at ANY phase; the genuine
+        # discrete-map artifact is spurious FWM phase-matching when the
+        # MISMATCH phase per nonlinear kick nears 2*pi. Key the mask to the
+        # sub-step actually taken and to the detuned dispersion.
+        phase_sub = jnp.abs(grid - delta_omega) * dt_sub
+        over = jnp.maximum(phase_sub / validity_phase_threshold - 1.0, 0.0)
         validity = jnp.exp(-_VALIDITY_STRENGTH * over ** _VALIDITY_POWER)
 
     def _fine_step(e_cur, delta_t_cur, dw_step, freq_noise):
@@ -637,7 +641,7 @@ def solve_lle_ssfm_jax(
     edge_absorber: bool = False,
     edge_absorber_frac: float = 0.12,
     dispersion_validity_mask: bool = False,
-    validity_phase_threshold: float = 1.0,
+    validity_phase_threshold: float = float(jnp.pi),
     fine_cadence_M: int = 1,
 ) -> dict[str, np.ndarray]:
     """Batch-capable SSFM solver for the generalized LLE using JAX.
@@ -708,7 +712,7 @@ def solve_lle_ssfm_jax(
             numerical artifact). The |D_int*t_r| <= threshold window is the
             solver's honest regime of validity. Default False (bit-identical).
         validity_phase_threshold: |D_int*t_r| threshold (rad) for the validity
-            mask (default 1.0, ~1/pi of a round trip).
+            mask (default pi).
         fine_cadence_M: Advance the whole evolution (field, thermal ODE, detuning,
             pump, energy balance, masks) at the fine cadence dt = t_r / M instead
             of refreshing the thermal/detuning/energy once per round trip. This
