@@ -1,0 +1,219 @@
+{
+  "script": "scripts/regenerate_dks_artifacts.py",
+  "generated_unix_time": 1783471265,
+  "pin_w": 0.214,
+  "numerics": {
+    "n_substeps": 4,
+    "dealias_two_thirds": true,
+    "edge_absorber": true,
+    "dispersion_validity_mask": false
+  },
+  "settle": {
+    "dw_kappa": 8.0,
+    "n_tau": 16384,
+    "t_slow_rt": 12000,
+    "seed": 0
+  },
+  "cycle_average": {
+    "n_rt": 304
+  },
+  "scan": {
+    "dw_kappa_lo": 7.0,
+    "dw_kappa_hi": 16.0,
+    "dw_kappa_step": 0.5,
+    "t_slow_rt": 4000,
+    "n_tau": 8192,
+    "seed": 0
+  },
+  "measured": {
+    "is_single": true,
+    "stationarity": "breather",
+    "breathing_period_rt": 154.0,
+    "breathing_relstd": 0.04090545738813848,
+    "red_tail_slope_db_per_mode": -0.041530376076792656,
+    "db_at_1800nm": -77.00294458208117,
+    "db_at_2000nm": -102.67780020256882,
+    "dispersive_waves": [
+      {
+        "wavelength_nm": 2528.885539426114,
+        "power_db": -88.6420092355725,
+        "prominence_db": 81.68465660997303,
+        "mu": -3069
+      },
+      {
+        "wavelength_nm": 1096.3401082025505,
+        "power_db": -91.72683028798362,
+        "prominence_db": 75.74884045808348,
+        "mu": 3266
+      }
+    ]
+  },
+  "scan_result": {
+    "breathing_bands_kappa": [
+      [
+        7.0,
+        9.0
+      ]
+    ],
+    "stationary_windows_kappa": [
+      [
+        9.5,
+        16.0
+      ]
+    ],
+    "rows": [
+      {
+        "dw_over_kappa": 7.0,
+        "is_single": true,
+        "is_breather": true,
+        "is_stationary": false,
+        "breathing_period_rt": 178.0,
+        "breathing_relstd": 0.04785726979761532
+      },
+      {
+        "dw_over_kappa": 7.5,
+        "is_single": true,
+        "is_breather": true,
+        "is_stationary": false,
+        "breathing_period_rt": 165.0,
+        "breathing_relstd": 0.04560400517816226
+      },
+      {
+        "dw_over_kappa": 8.0,
+        "is_single": true,
+        "is_breather": true,
+        "is_stationary": false,
+        "breathing_period_rt": 154.0,
+        "breathing_relstd": 0.04086517887092337
+      },
+      {
+        "dw_over_kappa": 8.5,
+        "is_single": true,
+        "is_breather": true,
+        "is_stationary": false,
+        "breathing_period_rt": 144.0,
+        "breathing_relstd": 0.032747775784847645
+      },
+      {
+        "dw_over_kappa": 9.0,
+        "is_single": true,
+        "is_breather": true,
+        "is_stationary": false,
+        "breathing_period_rt": 136.0,
+        "breathing_relstd": 0.016260645578269093
+      },
+      {
+        "dw_over_kappa": 9.5,
+        "is_single": true,
+        "is_breather": false,
+        "is_stationary": true,
+        "breathing_period_rt": NaN,
+        "breathing_relstd": 4.312305592153727e-06
+      },
+      {
+        "dw_over_kappa": 10.0,
+        "is_single": true,
+        "is_breather": false,
+        "is_stationary": true,
+        "breathing_period_rt": NaN,
+        "breathing_relstd": 5.920423483942198e-06
+      },
+      {
+        "dw_over_kappa": 10.5,
+        "is_single": true,
+        "is_breather": false,
+        "is_stationary": true,
+        "breathing_period_rt": NaN,
+        "breathing_relstd": 5.100487194783698e-06
+      },
+      {
+        "dw_over_kappa": 11.0,
+        "is_single": true,
+        "is_breather": false,
+        "is_stationary": true,
+        "breathing_period_rt": NaN,
+        "breathing_relstd": 3.7113650622522484e-06
+      },
+      {
+        "dw_over_kappa": 11.5,
+        "is_single": true,
+        "is_breather": false,
+        "is_stationary": true,
+        "breathing_period_rt": NaN,
+        "breathing_relstd": 4.127062287768934e-06
+      },
+      {
+        "dw_over_kappa": 12.0,
+        "is_single": true,
+        "is_breather": false,
+        "is_stationary": true,
+        "breathing_period_rt": NaN,
+        "breathing_relstd": 2.80871508315666e-06
+      },
+      {
+        "dw_over_kappa": 12.5,
+        "is_single": true,
+        "is_breather": false,
+        "is_stationary": true,
+        "breathing_period_rt": NaN,
+        "breathing_relstd": 2.160951522419148e-06
+      },
+      {
+        "dw_over_kappa": 13.0,
+        "is_single": true,
+        "is_breather": false,
+        "is_stationary": true,
+        "breathing_period_rt": NaN,
+        "breathing_relstd": 2.3979551422323084e-06
+      },
+      {
+        "dw_over_kappa": 13.5,
+        "is_single": true,
+        "is_breather": false,
+        "is_stationary": true,
+        "breathing_period_rt": NaN,
+        "breathing_relstd": 1.9881238426392633e-06
+      },
+      {
+        "dw_over_kappa": 14.0,
+        "is_single": true,
+        "is_breather": false,
+        "is_stationary": true,
+        "breathing_period_rt": NaN,
+        "breathing_relstd": 2.3143550318954174e-06
+      },
+      {
+        "dw_over_kappa": 14.5,
+        "is_single": true,
+        "is_breather": false,
+        "is_stationary": true,
+        "breathing_period_rt": NaN,
+        "breathing_relstd": 1.4786638264328967e-06
+      },
+      {
+        "dw_over_kappa": 15.0,
+        "is_single": true,
+        "is_breather": false,
+        "is_stationary": true,
+        "breathing_period_rt": NaN,
+        "breathing_relstd": 1.7708822827460827e-06
+      },
+      {
+        "dw_over_kappa": 15.5,
+        "is_single": true,
+        "is_breather": false,
+        "is_stationary": true,
+        "breathing_period_rt": NaN,
+        "breathing_relstd": 1.1936773427750655e-06
+      },
+      {
+        "dw_over_kappa": 16.0,
+        "is_single": true,
+        "is_breather": false,
+        "is_stationary": true,
+        "breathing_period_rt": NaN,
+        "breathing_relstd": 1.5857151413031612e-06
+      }
+    ]
+  }
+}
