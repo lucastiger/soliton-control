@@ -37,7 +37,12 @@ def csv_arrays():
     f = data[:, 1].astype(np.float64)
     omega = 2.0 * np.pi * f
     i0 = int(np.where(mu == 0)[0][0])
-    d1 = 0.5 * (omega[i0 + 1] - omega[i0 - 1])
+    # Mirror the loader's smooth-trend fit (NOT a raw central difference at mu=0,
+    # which a localized pump-neighborhood defect biases by +2π·3.35 MHz). omega0
+    # stays the MEASURED mu=0 resonance so D_int(0) == 0.
+    _sel = (np.abs(mu) <= 600) & (np.abs(mu) > 5)
+    _pf = np.polynomial.Polynomial.fit(mu[_sel].astype(float), omega[_sel], 7)
+    d1 = float(_pf.deriv()(0.0))
     d_int = omega - omega[i0] - d1 * mu
     return mu, d_int, d1
 
@@ -140,3 +145,116 @@ def test_parabolic_grid_reduces_to_taylor_path():
 
     max_diff = float(np.max(np.abs(norm_power(e_taylor) - norm_power(e_grid))))
     assert max_diff < 1e-3, f"grid vs Taylor normalized-power diff {max_diff:.3e}"
+
+
+# ---------------------------------------------------------------------------
+# 3. Sub-stepping: n_substeps=1 is the legacy single Strang step, bit-for-bit
+# ---------------------------------------------------------------------------
+def _substep_case(**overrides):
+    """The fixed tiny deterministic run used for the n_substeps regression."""
+    kappa_i, kappa_c, kappa = resolve_cavity_rates(CONFIG_PATH)
+    n_tau, t_slow = 128, 300
+    dw = np.full(t_slow, 3.0 * kappa, dtype=np.float64)[None, :]
+    kw = dict(
+        pin=0.214, delta_omega=dw, t_slow=t_slow, beta=[1e-16],
+        kappa=kappa, kappa_c=kappa_c, rng_key=jax.random.PRNGKey(7),
+        n_tau=n_tau, snapshot_interval=t_slow - 1, config_path=CONFIG_PATH,
+    )
+    kw.update(overrides)
+    return solve_lle_ssfm_jax(**kw)
+
+
+def test_n_substeps_1_matches_legacy_single_step():
+    """n_substeps=1 must reproduce the pre-substep single Strang step bit-for-bit.
+
+    The golden field ``tests/data/lle_singlestep_legacy_128.npy`` was captured
+    from the single-step solver (the commit before ``n_substeps`` existed) for
+    this exact deterministic case, and verified bit-identical to the n_substeps=1
+    path when sub-stepping was added. This guards the n_substeps=1 fast path (and
+    the default) against silently diverging from the legacy round-trip update.
+    """
+    golden = np.load(REPO_ROOT / "tests" / "data" / "lle_singlestep_legacy_128.npy")
+    e1 = np.asarray(_substep_case(n_substeps=1)["e_final"])
+    e_default = np.asarray(_substep_case()["e_final"])
+    assert np.array_equal(e1, golden), "n_substeps=1 diverged from legacy single step"
+    assert np.array_equal(e_default, golden), "default n_substeps must be the legacy path"
+
+
+def test_n_substeps_gt1_changes_result_but_stays_finite():
+    """Sub-stepping is actually wired: n_substeps>1 finite and != the single step."""
+    e1 = np.asarray(_substep_case(n_substeps=1)["e_final"])
+    e2 = np.asarray(_substep_case(n_substeps=2)["e_final"])
+    assert np.all(np.isfinite(e2))
+    assert not np.array_equal(e1, e2), "n_substeps=2 must differ from the single step"
+
+
+def test_n_substeps_must_be_positive():
+    with pytest.raises(ValueError):
+        _substep_case(n_substeps=0)
+
+
+# ---------------------------------------------------------------------------
+# 4. Anti-aliasing toggles: OFF is bit-identical; ON de-aliases and stays finite
+# ---------------------------------------------------------------------------
+def test_antialiasing_toggles_off_are_bit_identical():
+    """dealias/absorber OFF must reproduce the legacy single-step field bit-for-bit."""
+    golden = np.load(REPO_ROOT / "tests" / "data" / "lle_singlestep_legacy_128.npy")
+    e_off = np.asarray(
+        _substep_case(n_substeps=1, dealias_two_thirds=False, edge_absorber=False)["e_final"]
+    )
+    assert np.array_equal(e_off, golden), "toggles OFF must be the legacy path"
+
+
+def test_dealias_zeros_modes_above_two_thirds_and_changes_result():
+    """dealias ON removes |mu|>n_tau/3 content and changes the field; stays finite."""
+    n_tau = 128
+    e_on = np.asarray(
+        _substep_case(n_substeps=1, dealias_two_thirds=True, edge_absorber=True)["e_final"]
+    )[0]
+    e_off = np.asarray(_substep_case(n_substeps=1)["e_final"])[0]
+    assert np.all(np.isfinite(e_on))
+    assert not np.array_equal(e_on, e_off)
+    sp = np.abs(np.fft.fft(e_on)) ** 2
+    absmu = np.abs(np.fft.fftfreq(n_tau) * n_tau)
+    assert sp[absmu > n_tau / 3].max() < 1e-20 * max(sp.max(), 1e-300), \
+        "dealias must zero the |mu|>n_tau/3 band"
+
+
+def test_dispersion_validity_mask_off_identical_on_changes():
+    """Validity mask OFF is bit-identical; ON damps high-mismatch-phase modes.
+
+    The mask keys to the per-sub-step linear-phase MISMATCH
+    |D_int - delta_omega|*dt_sub (not |D_int*t_r|). For this tiny case
+    (beta2 = 1e-16, n_tau = 128, n_substeps = 1) the edge-mode mismatch phase is
+    ~0.18 rad, far below the pi default, so a sub-edge threshold is passed to
+    exercise the ON path.
+    """
+    golden = np.load(REPO_ROOT / "tests" / "data" / "lle_singlestep_legacy_128.npy")
+    e_off = np.asarray(_substep_case(dispersion_validity_mask=False)["e_final"])
+    assert np.array_equal(e_off, golden), "validity mask OFF must be the legacy path"
+    e_on = np.asarray(
+        _substep_case(dispersion_validity_mask=True, validity_phase_threshold=0.05)["e_final"]
+    )
+    assert np.all(np.isfinite(e_on))
+    assert not np.array_equal(e_on, e_off)
+    # At the pi default the mismatch phase never crosses the threshold here, so
+    # the mask multiplies by exactly 1 everywhere; only the extra FFT->iFFT
+    # round trip's float roundoff remains.
+    e_pi = np.asarray(_substep_case(dispersion_validity_mask=True)["e_final"])
+    assert np.max(np.abs(e_pi - e_off)) <= 1e-10 * np.max(np.abs(e_off)), \
+        "pi-threshold mask must be inert when the mismatch phase stays below it"
+
+
+def test_fine_cadence_M1_identical_M_gt1_changes():
+    """fine_cadence_M=1 is bit-identical; M>1 (fine-cadence integration) changes it."""
+    golden = np.load(REPO_ROOT / "tests" / "data" / "lle_singlestep_legacy_128.npy")
+    e1 = np.asarray(_substep_case(fine_cadence_M=1)["e_final"])
+    assert np.array_equal(e1, golden), "fine_cadence_M=1 must be the legacy path"
+    e8 = np.asarray(_substep_case(fine_cadence_M=8)["e_final"])
+    assert np.all(np.isfinite(e8))
+    assert not np.array_equal(e1, e8)
+
+
+def test_fine_cadence_must_be_positive():
+    with pytest.raises(ValueError):
+        _substep_case(fine_cadence_M=0)

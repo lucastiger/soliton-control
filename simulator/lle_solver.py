@@ -9,10 +9,23 @@ from __future__ import annotations
 
 import functools
 import math
+import warnings
 from pathlib import Path
 from typing import Any, NamedTuple
 
 import jax
+
+# Enable 64-bit precision (float64/complex128) process-wide. JAX bakes the x64
+# flag in at ARRAY-CREATION time, so this MUST run before any jax.numpy array is
+# built — hence it sits here, immediately after `import jax` and before both
+# `import jax.numpy` and the state_labeler import (which may create arrays). The
+# solver runs the SSFM loop for hundreds of thousands of round trips; in
+# complex64 the accumulated roundoff pins the spectral floor at ~-70 dB and
+# buries sub--70 dB structure (e.g. dispersive waves). float64 pushes that floor
+# far lower. Guarded so it is set exactly once (idempotent across re-imports).
+if not jax.config.read("jax_enable_x64"):
+    jax.config.update("jax_enable_x64", True)
+
 import jax.numpy as jnp
 import numpy as np
 import yaml
@@ -193,8 +206,10 @@ class DintGrid(NamedTuple):
 
     Attributes:
         grid: D_int(mu) [rad/s], shape (n_tau,), in FFT-bin order (NOT fftshifted),
-            jnp float32 — ready to drop into the linear operator as ``disp``.
-        d1:  Measured D1 = 2π·FSR [rad/s] from the central difference of ω at mu=0,
+            jnp float64 — ready to drop into the linear operator as ``disp``.
+        d1:  Measured D1 = 2π·FSR [rad/s] from a smooth-trend fit, excluding the
+            5 < |mu| region around a known pump-neighborhood defect (a plain
+            central difference at mu=0 is biased +2π·3.35 MHz by that defect),
             so callers can reconcile the FSR / round-trip time.
 
     A ``NamedTuple`` so it is importable, picklable, and supports both attribute
@@ -211,15 +226,16 @@ def load_dint_grid(n_tau, csv_path=None, config_path=None) -> "DintGrid":
 
     - Default csv_path = config/pyLLE_dispersion_w4400_h800.csv.
     - Load (mu, f_hz). Compute omega = 2*pi*f. Locate mu==0 -> omega0.
-    - D1 = central difference of omega at mu==0 (rad/s). Returned too (as the
-      ``d1`` attribute of the DintGrid result) so callers can reconcile FSR.
+    - D1 = smooth-trend fit of omega, excluding the 5 < |mu| region around a
+      known pump-neighborhood defect (rad/s). Returned too (as the ``d1``
+      attribute of the DintGrid result) so callers can reconcile FSR.
     - D_int(mu) = omega - omega0 - D1*mu.
     - Build the integer FFT mode grid: k = np.round(np.fft.fftfreq(n_tau,
       d=t_r/n_tau) / fsr).astype(int), where fsr = D1/(2*pi) and t_r = 1/fsr.
       (This yields the same bin ordering as _build_omega_grid, so disp aligns
       with the existing FFT convention.)
     - D_int_grid = np.interp(k, mu_csv, D_int_csv). Assert the mu=0 bin is 0.
-    - D_int_grid is returned as a jnp float32 array (complex-compatible for the
+    - D_int_grid is returned as a jnp float64 array (complex-compatible for the
       -1j*disp linear-operator term).
 
     Args:
@@ -253,7 +269,14 @@ def load_dint_grid(n_tau, csv_path=None, config_path=None) -> "DintGrid":
 
     # Central difference of omega at mu==0 (relies on mu=±1 flanking mu=0 in the
     # contiguous integer mode list).
-    d1 = 0.5 * (omega[i0 + 1] - omega[i0 - 1])          # rad/s
+    # 3-point central difference is biased +2π·3.35 MHz by a localized
+    # pump-neighborhood defect (|Δf| up to ~27 MHz for |mu|<=4), tilting
+    # D_int by (Δd1)·mu: provably harmless for mode powers (pure drift),
+    # but it corrupts every crossing/DW readout. Fit the smooth trend,
+    # excluding the defect region. omega0 stays measured: D_int(0) == 0.
+    _sel = (np.abs(mu_csv) <= 600) & (np.abs(mu_csv) > 5)
+    _pf = np.polynomial.Polynomial.fit(mu_csv[_sel].astype(float), omega[_sel], 7)
+    d1 = float(_pf.deriv()(0.0))                        # rad/s
     d_int_csv = omega - omega0 - d1 * mu_csv            # rad/s
 
     fsr = d1 / (2.0 * np.pi)                            # Hz
@@ -263,13 +286,50 @@ def load_dint_grid(n_tau, csv_path=None, config_path=None) -> "DintGrid":
     k = np.round(np.fft.fftfreq(int(n_tau), d=t_r / int(n_tau)) / fsr).astype(int)
 
     d_int_grid = np.interp(k, mu_csv, d_int_csv)
+    # np.interp holds D_int FLAT beyond the CSV span (here the red edge: the CSV
+    # stops at mu=-3261 while an n_tau>=8192 FFT reaches mu=-4096..). A flat clamp
+    # injects a slope discontinuity at the CSV edge — a spurious kink that seeds
+    # aliasing. Replace the out-of-range modes with a LINEAR extension that
+    # continues the boundary slope (C1-continuous), so the extrapolated edge is
+    # smooth; the solver's edge absorber then damps those modes cleanly.
+    lo_mu, hi_mu = int(mu_csv[0]), int(mu_csv[-1])
+    slope_lo = float(d_int_csv[1] - d_int_csv[0])       # per unit mu at low edge
+    slope_hi = float(d_int_csv[-1] - d_int_csv[-2])     # per unit mu at high edge
+    below = k < lo_mu
+    above = k > hi_mu
+    d_int_grid[below] = d_int_csv[0] + slope_lo * (k[below] - lo_mu)
+    d_int_grid[above] = d_int_csv[-1] + slope_hi * (k[above] - hi_mu)
     assert d_int_grid[0] == 0.0, (
         f"mu=0 FFT bin (k={k[0]}) must have D_int == 0, got {d_int_grid[0]!r}."
     )
 
-    result = DintGrid(grid=jnp.asarray(d_int_grid, dtype=jnp.float32), d1=float(d1))
+    result = DintGrid(grid=jnp.asarray(d_int_grid, dtype=jnp.float64), d1=float(d1))
     _DINT_GRID_CACHE[cache_key] = result
     return result
+
+
+# Super-Gaussian edge-absorber shape: A(mu) = exp(-STRENGTH * s**POWER) with
+# s = 0 at the interior onset ramping to 1 at the Nyquist edge. POWER=8 keeps
+# A~1 across most of the ramp then rolls off sharply; STRENGTH=40 makes the very
+# edge ~e^-40 (effectively zero), so energy reaching the extrapolated grid edge
+# is damped rather than aliased/folded back into the interior.
+_ABSORBER_POWER = 8.0
+_ABSORBER_STRENGTH = 40.0
+
+# Dispersion-validity mask shape (opt-in guard; see solve_lle_ssfm_jax). The
+# linear half-step applies the EXACT exponential exp(-i*(D_int+delta)*dt), which
+# is correct at ANY phase, so |D_int*t_r| by itself is NOT an error metric — an
+# earlier mask keyed to |D_int*t_r| > 1 amputated real comb structure (soliton
+# tail and dispersive waves, ~|mu| > 1000 on the measured grid). The genuine
+# discrete-map artifact is spurious four-wave mixing that phase-matches when the
+# linear-phase MISMATCH accrued across one nonlinear kick,
+# |D_int - delta_omega|*dt_sub, approaches 2*pi. The mask therefore keys to that
+# per-sub-step mismatch phase, with the default threshold pi safely below the
+# 2*pi onset. validity = exp(-STRENGTH*over^POWER) with
+# over = max(phase_sub/threshold - 1, 0): exactly 1 inside the window, rolling
+# to ~0 within ~half the threshold above it.
+_VALIDITY_POWER = 2.0
+_VALIDITY_STRENGTH = 10.0
 
 
 def _single_trajectory_solver(
@@ -288,11 +348,46 @@ def _single_trajectory_solver(
     thermal: dict[str, float],
     state_labeler,
     noise_sequence: jnp.ndarray,   # shape (t_slow,), rad/s, AR(1) pre-generated
-    e0_override: jnp.ndarray,     # warm-start field; pass jnp.zeros((n_tau,), complex64) for cold start
+    e0_override: jnp.ndarray,     # warm-start field; pass jnp.zeros((n_tau,), complex128) for cold start
     delta_t0_override: jnp.ndarray,  # warm-start thermal state (scalar); pass jnp.zeros(()) for cold start
     d_int_grid: jnp.ndarray | None,  # per-mode measured D_int(mu) (FFT-bin order); None = Taylor path
+    n_substeps: int,              # Strang sub-steps per round trip (static); 1 = legacy single step
+    dealias_two_thirds: bool,     # static; zero |mu|>n_tau/3 after each nonlinear kick (2/3 rule)
+    edge_absorber: bool,          # static; super-Gaussian edge damping once per round trip
+    edge_absorber_frac: float,    # outer fraction of |mu| (each side) over which the absorber ramps
+    dispersion_validity_mask: bool,  # static; opt-in damping of modes whose per-sub-step mismatch phase exceeds the threshold
+    validity_phase_threshold: float,  # |D_int - delta_omega|*dt_sub threshold (rad) for the validity mask
+    fine_cadence_M: int,          # static; advance thermal/detuning/energy at dt=t_r/M (1 = per-round-trip)
 ) -> dict[str, jnp.ndarray]:
-    """Solve one detuning trajectory with SSFM + thermal Euler update."""
+    """Solve one detuning trajectory with SSFM + thermal Euler update.
+
+    The round trip is integrated with ``n_substeps`` Strang sub-steps, each over
+    dt = t_r / n_substeps, so the per-sub-step linear phase |D_int·dt| shrinks
+    with n_substeps. This suppresses the split-step spurious-sideband instability
+    that appears once |D_int·t_r| approaches π at large |mu| (an n_tau-independent
+    artifact). With n_substeps=1 the arithmetic reduces exactly to the legacy
+    single Strang step (bit-identical regression guard). The detuning
+    (thermal_shift + noise), thermal Euler update, energy balance, snapshots, and
+    labels are all evaluated ONCE per round trip on the end-of-round-trip field.
+
+    Two anti-aliasing toggles (both default OFF at the public API, giving
+    bit-identical legacy behaviour): ``dealias_two_thirds`` zeros the Fourier
+    modes with |mu| > n_tau/3 after each nonlinear kick (the standard 2/3 rule
+    that removes cubic-nonlinearity aliasing), and ``edge_absorber`` multiplies
+    the field once per round trip by a super-Gaussian in mode space that is ~1
+    across the interior and ramps to strong attenuation over the outer
+    ``edge_absorber_frac`` of |mu| on each side, damping energy that reaches the
+    (partly extrapolated) grid edges instead of letting it fold back inward.
+
+    ``fine_cadence_M`` (default 1) advances the WHOLE evolution -- field, thermal
+    ODE, detuning, pump, energy balance, and the anti-aliasing masks -- at the
+    fine cadence dt = t_r / M rather than refreshing the thermal/detuning/energy
+    once per round trip. This removes the residual t_r-periodic modulation of the
+    once-per-round-trip mean-field map (which can drive parametric round-trip-map
+    resonances); the total physical time is unchanged (M fine steps per round
+    trip). M=1 is bit-identical to the per-round-trip integrator. Histories are
+    still recorded once per round trip on the end-of-round-trip field.
+    """
     omega = _build_omega_grid(n_tau, t_r)
     # Per-mode measured dispersion when supplied, else the Taylor beta polynomial.
     # Cast to omega's real dtype and rely on the (n_tau,) shape guaranteed upstream.
@@ -300,82 +395,123 @@ def _single_trajectory_solver(
         disp = jnp.asarray(d_int_grid).astype(omega.dtype)
     else:
         disp = build_dispersion(omega, beta)
-    pump_amp = (jnp.sqrt(jnp.maximum(kappa_c * pin, 0.0)) * t_r).astype(jnp.complex64)
+    # Time-step hierarchy: each round trip is fine_cadence_M fine steps of
+    # dt_fine = t_r/M (the cadence of the thermal ODE / detuning / energy), and
+    # each fine step is n_substeps Strang sub-steps of dt_sub = dt_fine/n_substeps
+    # (the field split-step). The pump kick sqrt(max(κ_c·pin,0))·dt_sub is
+    # injected per field sub-step, so the drive summed over a round trip is
+    # M·n_substeps·(F·dt_sub) = F·t_r (unchanged). With M=1 and n_substeps=1,
+    # dt_fine=dt_sub=t_r exactly, so the legacy path stays bit-identical.
+    dt_fine = t_r / fine_cadence_M
+    dt_sub = dt_fine / n_substeps
+    pump_kick = (jnp.sqrt(jnp.maximum(kappa_c * pin, 0.0)) * dt_sub).astype(jnp.complex128)
     kappa_i = jnp.maximum(thermal["kappa_i"], 0.0)
     omega0 = 2.0 * jnp.pi * 299_792_458.0 / thermal["pump_wavelength_m"]
     n_snapshots = (t_slow + snapshot_interval - 1) // snapshot_interval
 
-    def _step(carry, step_idx):
-        e_t, delta_t, e_snapshots, label_history, snap_count = carry
-        e_t = e_t.astype(jnp.complex64)
+    # Anti-aliasing masks in FFT-bin mode order (|mu| per bin). Built once and
+    # only when the corresponding toggle is on, so the OFF path is untouched.
+    if dealias_two_thirds or edge_absorber:
+        abs_mu = jnp.abs(jnp.fft.fftfreq(n_tau) * n_tau)   # |mu| per FFT bin
+    if dealias_two_thirds:
+        # 2/3 rule: keep |mu| <= n_tau/3, zero the rest.
+        mask_23 = (abs_mu <= (n_tau / 3.0)).astype(jnp.float64)
+    if edge_absorber:
+        mu_max = n_tau / 2.0
+        onset = (1.0 - edge_absorber_frac) * mu_max        # interior edge of ramp
+        s = jnp.clip((abs_mu - onset) / jnp.maximum(mu_max - onset, 1.0), 0.0, 1.0)
+        absorber = jnp.exp(-_ABSORBER_STRENGTH * s ** _ABSORBER_POWER)
+    if dispersion_validity_mask:
+        # The exact linear exponential is valid at ANY phase; the genuine
+        # discrete-map artifact is spurious FWM phase-matching when the linear
+        # MISMATCH phase per nonlinear kick nears 2*pi. Key the mask to the
+        # sub-step actually taken and to the detuned dispersion. disp is
+        # D_int(mu) [rad/s] in FFT-bin order; delta_omega is the (t_slow,)
+        # programmed-detuning schedule and the mask is built once, so use its
+        # first value (sweeps move by ~kappa, negligible against the ~1e3*kappa
+        # phase scale where the mask engages).
+        phase_sub = jnp.abs(disp - delta_omega[0]) * dt_sub
+        over = jnp.maximum(phase_sub / validity_phase_threshold - 1.0, 0.0)
+        validity = jnp.exp(-_VALIDITY_STRENGTH * over ** _VALIDITY_POWER)
 
+    def _fine_step(e_cur, delta_t_cur, dw_step, freq_noise):
+        """Advance the field and thermal state by ONE fine step dt_fine = t_r/M.
+
+        The thermal detuning shift is recomputed from the CURRENT ΔT (so the
+        thermo-optic feedback runs at the fine cadence, not once per round trip),
+        the field takes n_substeps Strang sub-steps over dt_fine, the masks are
+        applied, then the single-pole thermal ODE is Euler-stepped by dt_fine.
+        Returns (e_next, delta_t_next, u_int, delta_omega_eff).
+        """
         # Deterministic thermal detuning shift. δω = ω_res − ω_pump, so heating
         # (dn/dT>0 → n↑ → ω_res↓) LOWERS δω: the shift enters with a minus sign.
-        thermal_shift = -(omega0 / thermal["n0"]) * thermal["dn_dT"] * delta_t
-        # Stochastic TCCR/TRN/PyroEO detuning noise at this round trip
-        freq_noise = noise_sequence[step_idx]
-        delta_omega_eff = delta_omega[step_idx] + thermal_shift + freq_noise   # <-- CHANGED
+        thermal_shift = -(omega0 / thermal["n0"]) * thermal["dn_dT"] * delta_t_cur
+        delta_omega_eff = dw_step + thermal_shift + freq_noise
 
-        # (a) Inject pump before the symmetric split so the full round-trip
-        #     linear operator acts on the pumped field.
-        e_pumped = (e_t + pump_amp).astype(jnp.complex64)
-        
-        # (b) Half linear step in frequency domain.
-        # Dispersion enters as -i·D_int, the SAME sign as the -i·delta_omega_eff
-        # detuning term (they share one detuning axis). build_dispersion returns
-        # D_int(μ) = ½D₂μ² + … with all-positive coefficients, so for anomalous
-        # dispersion (D₂>0) this -i·D_int is what supports MI/soliton formation;
-        # a +i·D_int here is effectively normal dispersion and yields only CW.
-        lin_exp = (-kappa / 2.0 - 1j * disp - 1j * delta_omega_eff) * t_r
-        lin_exp_half = lin_exp / 2.0
-        h_half = jnp.exp(lin_exp_half).astype(jnp.complex64)
-        e_w = jnp.fft.fft(e_pumped)
-        e_half = jnp.fft.ifft(e_w * h_half).astype(jnp.complex64)
-        
-        # (c) Nonlinear phase kick in time domain.
-        nl_phase = jnp.exp(1j * gamma * jnp.abs(e_half) ** 2 * t_r).astype(jnp.complex64)
-        e_nl = (e_half * nl_phase).astype(jnp.complex64)
-        
-        # (d) Second half linear step in frequency domain.
-        e_w2 = jnp.fft.fft(e_nl)
-        e_next = jnp.fft.ifft(e_w2 * h_half).astype(jnp.complex64)
+        # Half-linear operator over dt_sub/2. Dispersion enters as -i·D_int, the
+        # SAME sign as -i·delta_omega_eff (they share one detuning axis); for
+        # anomalous D₂>0 this supports MI/soliton formation.
+        lin_exp = (-kappa / 2.0 - 1j * disp - 1j * delta_omega_eff) * dt_sub
+        h_half = jnp.exp(lin_exp / 2.0).astype(jnp.complex128)
 
-        # Through-port power via energy balance (exact for all-pass ring, any state).
-        # P_trans = P_in - κ_i * U_int / t_r = P_in - κ_i * mean(|E|²)
-        # This is independent of the coupling geometry and holds for CW, MI,
-        # single-soliton, and multi-soliton states identically.
+        # n_substeps Strang sub-steps over dt_sub: pump kick, L·N·L (unrolled).
+        e_sub = e_cur
+        for _ in range(n_substeps):
+            e_pumped = (e_sub + pump_kick).astype(jnp.complex128)
+            e_w = jnp.fft.fft(e_pumped)
+            e_half = jnp.fft.ifft(e_w * h_half).astype(jnp.complex128)
+            nl_phase = jnp.exp(1j * gamma * jnp.abs(e_half) ** 2 * dt_sub).astype(jnp.complex128)
+            e_nl = (e_half * nl_phase).astype(jnp.complex128)
+            # 2/3 de-alias right after the cubic kick (frequency domain).
+            e_w2 = jnp.fft.fft(e_nl)
+            if dealias_two_thirds:
+                e_w2 = e_w2 * mask_23
+            e_sub = jnp.fft.ifft(e_w2 * h_half).astype(jnp.complex128)
+        e_next = e_sub
+
+        # Edge absorber then dispersion-validity mask (per fine step; M=1 -> once
+        # per round trip, as before).
+        if edge_absorber:
+            e_next = jnp.fft.ifft(jnp.fft.fft(e_next) * absorber).astype(jnp.complex128)
+        if dispersion_validity_mask:
+            e_next = jnp.fft.ifft(jnp.fft.fft(e_next) * validity).astype(jnp.complex128)
+
+        # Energy balance (exact for an all-pass ring, any state): P_abs = κ_i·⟨|E|²⟩,
+        # independent of dt. u_int is the physical intracavity energy (uses t_r).
         u_int = jnp.sum(jnp.abs(e_next) ** 2) * (t_r / n_tau)   # J
-        
-        #clip to [0, pin]. Physical P_trans is non-negative.
-        # The energy-balance formula underestimates P_trans during transients when
-        # dU_int/dt > 0 (cavity filling). Clip to remove unphysical artifacts.
-        p_trans = jnp.clip(pin - kappa_i * u_int / t_r, 0.0, pin)            #W
-
-        # u_int is mean(|E|²)·t_r (J·s); absorbed *power* (W) needs the /t_r,
-        # matching the energy-balance form used for p_trans above.
         p_abs = kappa_i * u_int / t_r
 
-        # --- Single-pole thermal model (units of every factor) -----------------
-        #   dΔT/dt = -ΔT/τ_th + Γ_th·P_abs/(ρ·Cp·V)
-        #   [K/s]  = [K]/[s]  + [·]·[W] / ([kg/m³]·[J/(kg·K)]·[m³])
-        #          = [K/s]    +        [J/s] / [J/K]   = [K/s]            ✓
-        # Γ_th is DIMENSIONLESS. It is NOT a bare absorbed-power fraction: that is
-        # already carried by κ_i (P_abs = κ_i·⟨|E|²⟩). Γ_th is the lumped
-        # absorbed-power → temperature-rise coupling
-        #     Γ_th = η_abs · (V_mode / V_thermal),
-        # i.e. the material-absorption fraction of κ_i loss (η_abs, vs scattering)
-        # times the correction for using the OPTICAL mode volume V here while the
-        # heat actually fills the larger thermal-diffusion volume V_thermal =
-        # L_cav·π·α·τ_th. Equivalently R_th = τ_th·Γ_th/(ρ·Cp·V) = η_abs/(π·k_th·L_cav)
-        # (τ_th cancels; the steady state is set by the spreading resistance only).
-        # See config/sin_params.yaml for the SiN numbers: Γ_th = 4.72e-3, R_th ≈
-        # 0.545 K/W, giving a steady thermal_shift of O(0.1–few)×κ. A solve-time
-        # pre-flight assertion (solve_lle_ssfm_jax) flags a mis-set Γ_th loudly.
+        # Single-pole thermal ODE, Euler-stepped by dt_fine:
+        #   dΔT/dt = -ΔT/τ_th + Γ_th·P_abs/(ρ·Cp·V)   (Γ_th dimensionless; see
+        #   config/sin_params.yaml for the SiN numbers and the pre-flight guard).
         d_delta_t = (
-            -delta_t / thermal["tau_th"]
+            -delta_t_cur / thermal["tau_th"]
             + thermal["Gamma_th"] * p_abs / (thermal["rho"] * thermal["Cp"] * thermal["V"])
         )
-        delta_t_next = delta_t + t_r * d_delta_t
+        delta_t_next = delta_t_cur + dt_fine * d_delta_t
+        return e_next, delta_t_next, u_int, delta_omega_eff
+
+    def _step(carry, step_idx):
+        e_t, delta_t, e_snapshots, label_history, snap_count = carry
+        e_t = e_t.astype(jnp.complex128)
+        dw_step = delta_omega[step_idx]
+        # Stochastic TCCR/TRN/PyroEO detuning noise for this round trip (held
+        # across the M fine steps; constant detuning has no t_r-periodicity).
+        freq_noise = noise_sequence[step_idx]
+
+        # fine_cadence_M fine steps of dt_fine per round trip (static -> unrolled).
+        e_next = e_t
+        delta_t_next = delta_t
+        u_int = jnp.sum(jnp.abs(e_t) ** 2) * (t_r / n_tau)
+        delta_omega_eff = dw_step
+        for _ in range(fine_cadence_M):
+            e_next, delta_t_next, u_int, delta_omega_eff = _fine_step(
+                e_next, delta_t_next, dw_step, freq_noise
+            )
+
+        # Through-port power via energy balance, on the end-of-round-trip field.
+        # Clip to [0, pin] (the balance underestimates P_trans during filling).
+        p_trans = jnp.clip(pin - kappa_i * u_int / t_r, 0.0, pin)            #W
         do_snapshot = (step_idx % snapshot_interval) == 0
         next_snap_count = snap_count + do_snapshot.astype(jnp.int32)
         write_idx = jnp.minimum(snap_count, n_snapshots - 1)
@@ -408,7 +544,7 @@ def _single_trajectory_solver(
     _amp = jnp.sqrt(jnp.maximum(kappa_c * pin, 0.0))
     _d2  = (kappa / 2.0) ** 2 + delta_omega[0] ** 2
     e_cw = (_amp * (kappa / 2.0) / _d2 + 1j * (-_amp * delta_omega[0] / _d2)) * jnp.ones(
-        n_tau, dtype=jnp.complex64
+        n_tau, dtype=jnp.complex128
     )
 
     key, subkey_r, subkey_i = jax.random.split(rng_key, 3)
@@ -417,20 +553,21 @@ def _single_trajectory_solver(
     # (|e_cw| ≈ 1.24e-5), so U_int is noise-dominated at t=0, clipping
     # P_trans to zero for the first ~566 round trips of every trajectory.
     noise = 1e-3 * jnp.abs(e_cw[0]) * (
-        jax.random.normal(subkey_r, (n_tau,)) + 1j * jax.random.normal(subkey_i, (n_tau,))
-    ).astype(jnp.complex64)
+        jax.random.normal(subkey_r, (n_tau,), dtype=jnp.float64)
+        + 1j * jax.random.normal(subkey_i, (n_tau,), dtype=jnp.float64)
+    ).astype(jnp.complex128)
 
     # Select warm-start vs cold-start without a scalar jnp.where on complex arrays.
     # jnp.where with a scalar condition is unsafe for complex dtypes under jit/vmap:
     # type promotion can silently drop the imaginary part.
     # Instead, use a float mask broadcast elementwise over the n_tau dimension.
-    _is_cold = jnp.all(e0_override == 0.0).astype(jnp.float32)   # 1.0 = cold, 0.0 = warm
-    _cold = (e_cw + noise).astype(jnp.complex64)
-    _warm = e0_override.astype(jnp.complex64)
-    e0 = (_is_cold * _cold + (1.0 - _is_cold) * _warm).astype(jnp.complex64)
-    
-    delta_t0 = delta_t0_override.astype(jnp.float32)
-    e_snapshots0 = jnp.zeros((n_snapshots, n_tau), dtype=jnp.complex64)
+    _is_cold = jnp.all(e0_override == 0.0).astype(jnp.float64)   # 1.0 = cold, 0.0 = warm
+    _cold = (e_cw + noise).astype(jnp.complex128)
+    _warm = e0_override.astype(jnp.complex128)
+    e0 = (_is_cold * _cold + (1.0 - _is_cold) * _warm).astype(jnp.complex128)
+
+    delta_t0 = delta_t0_override.astype(jnp.float64)
+    e_snapshots0 = jnp.zeros((n_snapshots, n_tau), dtype=jnp.complex128)
     label_history0 = jnp.zeros((n_snapshots,), dtype=jnp.int32)
     snap_count0 = jnp.array(0, dtype=jnp.int32)
 
@@ -483,9 +620,9 @@ def _physical_state_labeler(
 _PER_TRAJ = jax.jit(
     jax.vmap(
         _single_trajectory_solver,
-        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0, 0, 0, None),
+        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0, 0, 0, None, None, None, None, None, None, None, None),
     ),
-    static_argnums=(2, 3, 7, 10, 13),
+    static_argnums=(2, 3, 7, 10, 13, 18, 19, 20, 22, 24),
 )
 
 
@@ -504,6 +641,13 @@ def solve_lle_ssfm_jax(
     e0_override: np.ndarray | jnp.ndarray | None = None,
     delta_t0_override: np.ndarray | jnp.ndarray | float | None = None,
     d_int_grid: np.ndarray | jnp.ndarray | None = None,
+    n_substeps: int = 1,
+    dealias_two_thirds: bool = False,
+    edge_absorber: bool = False,
+    edge_absorber_frac: float = 0.12,
+    dispersion_validity_mask: bool = False,
+    validity_phase_threshold: float = float(jnp.pi),
+    fine_cadence_M: int = 1,
 ) -> dict[str, np.ndarray]:
     """Batch-capable SSFM solver for the generalized LLE using JAX.
 
@@ -543,12 +687,67 @@ def solve_lle_ssfm_jax(
             used verbatim as the linear-operator dispersion (broadcast across all
             trajectories) and the Taylor path is bypassed; use
             :func:`load_dint_grid` to build it from a measured dispersion CSV.
+        n_substeps: Number of Strang split-step sub-steps per round trip
+            (positive int, default 1). Each sub-step integrates over
+            dt = t_r / n_substeps, shrinking the per-sub-step linear phase
+            |D_int·dt| so the split-step spurious-sideband instability (which
+            appears once |D_int·t_r| nears π at large |mu|) is pushed out of the
+            physical band. n_substeps=1 reproduces the legacy single-step solver
+            bit-for-bit. The pump drive is distributed across sub-steps so the
+            per-round-trip total is unchanged; detuning, thermal update, energy
+            balance, snapshots, and labels are computed once per round trip.
+        dealias_two_thirds: If True, zero the Fourier modes with |mu| > n_tau/3
+            after each nonlinear kick (standard 2/3 de-aliasing of the cubic
+            nonlinearity). Default False (bit-identical legacy behaviour).
+        edge_absorber: If True, multiply the field once per round trip by a
+            super-Gaussian in mode space that is ~1 across the interior and ramps
+            to strong attenuation over the outer ``edge_absorber_frac`` of |mu| on
+            each side, damping energy at the (partly extrapolated) grid edges.
+            Default False. Both toggles OFF reproduce the current solver exactly;
+            production physical runs should set both ON.
+        edge_absorber_frac: Outer fraction of |mu| (each side) over which the
+            edge absorber ramps (default 0.12). At n_tau=8192 the onset is
+            |mu| ~ 3604 and at 16384 ~ 7209, both beyond the physical window
+            (|mu|<=2744) so the absorber never touches it.
+        dispersion_validity_mask: If True, smoothly damp (once per fine step)
+            the modes whose per-sub-step linear-phase MISMATCH
+            |D_int - delta_omega|*dt_sub exceeds ``validity_phase_threshold``.
+            The linear step applies the exact exponential, which is valid at any
+            phase, so a large |D_int*t_r| does NOT by itself invalidate the map
+            (an earlier |D_int*t_r|-keyed mask amputated real soliton-tail and
+            dispersive-wave spectrum). The only genuine discrete-map artifact is
+            spurious four-wave mixing that phase-matches when the mismatch phase
+            per nonlinear kick nears 2*pi; this mask is an opt-in guard for
+            coarse n_substeps=1 runs where that onset can fall inside the
+            resolved band. With n_substeps>=4 the onset sits far outside the
+            physical window and the mask should stay OFF. Default False
+            (bit-identical).
+        validity_phase_threshold: per-sub-step mismatch-phase threshold (rad)
+            for the validity mask (default pi, below the ~2*pi spurious-FWM
+            onset).
+        fine_cadence_M: Advance the whole evolution (field, thermal ODE, detuning,
+            pump, energy balance, masks) at the fine cadence dt = t_r / M instead
+            of refreshing the thermal/detuning/energy once per round trip. This
+            removes the residual t_r-periodic modulation of the mean-field map (a
+            driver of parametric round-trip-map resonances) at fixed total
+            physical time. Default 1 = bit-identical per-round-trip integrator.
 
     Returns:
         Dictionary containing requested histories.
     """
 
-    
+    if int(n_substeps) < 1:
+        raise ValueError(f"n_substeps must be a positive integer, got {n_substeps}.")
+    if int(fine_cadence_M) < 1:
+        raise ValueError(f"fine_cadence_M must be a positive integer, got {fine_cadence_M}.")
+    n_substeps = int(n_substeps)
+    fine_cadence_M = int(fine_cadence_M)
+    dealias_two_thirds = bool(dealias_two_thirds)
+    edge_absorber = bool(edge_absorber)
+    dispersion_validity_mask = bool(dispersion_validity_mask)
+    validity_phase_threshold = float(validity_phase_threshold)
+    edge_absorber_frac = float(edge_absorber_frac)
+
     thermal = _thermal_params(config_path)
     physical = _load_config(config_path)
     gamma = float(physical.get("gamma_LLE_per_J_per_s"))
@@ -654,7 +853,7 @@ def solve_lle_ssfm_jax(
     )
 
     # convert every leaf to a scalar JAX array so vmap can trace through it
-    thermal = {k: jnp.array(v, dtype=jnp.float32) for k, v in thermal.items()}
+    thermal = {k: jnp.array(v, dtype=jnp.float64) for k, v in thermal.items()}
 
     # delta_omega is a per-trajectory, per-round-trip sweep of shape (n_traj, t_slow)
     # (it is vmapped over axis 0 and indexed as delta_omega[step] inside the solver).
@@ -662,7 +861,7 @@ def solve_lle_ssfm_jax(
     #   scalar         -> (1, t_slow) constant detuning
     #   1-D (t_slow,)  -> (1, t_slow) single-trajectory sweep
     #   2-D            -> used as-is, must be (n_traj, t_slow)
-    delta_omega_arr = jnp.asarray(delta_omega, dtype=jnp.float32)
+    delta_omega_arr = jnp.asarray(delta_omega, dtype=jnp.float64)
     if delta_omega_arr.ndim == 0:
         delta_arr = jnp.broadcast_to(delta_omega_arr, (1, int(t_slow)))
     elif delta_omega_arr.ndim == 1:
@@ -710,7 +909,10 @@ def solve_lle_ssfm_jax(
     def _gen_noise(key):
         return _noise_model.sample(key, int(t_slow))
 
-    noise_sequences = jax.vmap(_gen_noise)(noise_keys)   # (n_traj, t_slow)
+    # Noise models emit float32; upcast the detuning-noise sequences to float64
+    # so the delta_omega_eff axis (and thus the linear-operator phase) is fully
+    # double precision inside the SSFM loop.
+    noise_sequences = jax.vmap(_gen_noise)(noise_keys).astype(jnp.float64)  # (n_traj, t_slow)
     
     n_traj = delta_arr.shape[0]
 
@@ -719,9 +921,10 @@ def solve_lle_ssfm_jax(
     # plus seeding noise. A non-zero e0_override is passed through verbatim as the
     # exact initial field (no seeding noise), enabling deterministic soliton seeding.
     if e0_override is None:
-        e0_init = jnp.zeros((n_traj, n_tau), dtype=jnp.complex64)
+        e0_init = jnp.zeros((n_traj, n_tau), dtype=jnp.complex128)
     else:
-        e0_arr = jnp.asarray(e0_override, dtype=jnp.complex64)
+        # Accept complex64 (or real) warm-start fields but upcast to complex128.
+        e0_arr = jnp.asarray(e0_override, dtype=jnp.complex128)
         if e0_arr.ndim == 1:
             if e0_arr.shape[0] != n_tau:
                 raise ValueError(
@@ -739,9 +942,9 @@ def solve_lle_ssfm_jax(
             raise ValueError(f"e0_override must be 1/2-D, got ndim={e0_arr.ndim}.")
 
     if delta_t0_override is None:
-        delta_t0_init = jnp.zeros((n_traj,), dtype=jnp.float32)
+        delta_t0_init = jnp.zeros((n_traj,), dtype=jnp.float64)
     else:
-        dt0_arr = jnp.asarray(delta_t0_override, dtype=jnp.float32)
+        dt0_arr = jnp.asarray(delta_t0_override, dtype=jnp.float64)
         if dt0_arr.ndim == 0:
             delta_t0_init = jnp.broadcast_to(dt0_arr, (n_traj,))
         elif dt0_arr.ndim == 1 and dt0_arr.shape[0] == n_traj:
@@ -766,7 +969,7 @@ def solve_lle_ssfm_jax(
     if d_int_grid is None:
         d_int_grid_arr = None
     else:
-        d_int_grid_arr = jnp.asarray(d_int_grid, dtype=jnp.float32)
+        d_int_grid_arr = jnp.asarray(d_int_grid, dtype=jnp.float64)
         if d_int_grid_arr.shape != (int(n_tau),):
             raise ValueError(
                 f"d_int_grid must have shape (n_tau={n_tau},), "
@@ -792,6 +995,13 @@ def solve_lle_ssfm_jax(
         e0_init,
         delta_t0_init,
         d_int_grid_arr,
+        n_substeps,
+        dealias_two_thirds,
+        edge_absorber,
+        edge_absorber_frac,
+        dispersion_validity_mask,
+        validity_phase_threshold,
+        fine_cadence_M,
     )
 
     return {k: np.asarray(v) for k, v in out.items()}
