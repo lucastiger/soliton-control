@@ -31,6 +31,9 @@ import pytest
 from analysis.spectral_metrics import (
     average_power_spectrum,
     comb_line_powers,
+    conversion_efficiency_report,
+    intracavity_comb_fraction,
+    pump_to_comb_efficiency,
     sech2_core_fwhm,
     spectral_envelope_db,
     three_db_span,
@@ -319,3 +322,170 @@ def test_average_power_spectrum_is_power_passthrough():
                        np.array([3.0, 2.0, 1.0, 0.0])])
     m, P = average_power_spectrum(powers, is_power=True)
     assert np.allclose(P, np.array([2.0, 2.0, 2.0, 2.0]))
+
+
+# ===========================================================================
+# Feature 2: conversion efficiency
+# ===========================================================================
+KAPPA_C = 1.215e8        # config kappa_c_rad_per_s (external out-coupling rate)
+PIN_W = 0.214            # config on-chip pump power
+
+
+def _abs_field_spectrum(n=512, w=40.0, pump=5.0, seed=2):
+    """A synthetic ABSOLUTE spectrum P = |fftshift(fft(E))|^2 and its field E.
+
+    A sech^2 comb with a strong pump line and random per-mode phases, so
+    <|E|^2> = mean(|E|^2) is a genuine (un-normalised) intracavity power scale.
+    """
+    rng = np.random.default_rng(seed)
+    mu = np.arange(n) - n // 2
+    amp = np.sqrt(_sech2(mu, w))
+    amp[mu == 0] = pump
+    modes = amp * np.exp(1j * rng.uniform(0.0, 2.0 * np.pi, n))
+    e_field = np.fft.ifft(np.fft.ifftshift(modes))
+    P = np.abs(np.fft.fftshift(np.fft.fft(e_field))) ** 2
+    return mu, P, e_field
+
+
+# ----- eta_intra: exact known-power identity -------------------------------
+def test_intracavity_comb_fraction_exact_known_powers():
+    # Known pump power P0 and known total comb power Pc: eta_intra == Pc/(P0+Pc)
+    # EXACTLY (all values are exactly representable in float64).
+    mu = np.array([-2, -1, 0, 1, 2])
+    P0, comb = 7.0, np.array([0.5, 1.5, 0.0, 2.0, 1.0])
+    Pc = comb.sum()
+    P = comb.copy()
+    P[mu == 0] = P0
+    assert intracavity_comb_fraction(mu, P) == Pc / (P0 + Pc)   # exact
+
+
+def test_intracavity_comb_fraction_pump_is_mu0_not_argmax():
+    # Pump-suppressed comb: a NON-pump line is the strongest. eta_intra must
+    # still treat mu=0 as the pump, never the max line.
+    mu = np.array([-1, 0, 1, 2])
+    P = np.array([2.0, 1.0, 9.0, 3.0])          # argmax at mu=+1
+    assert intracavity_comb_fraction(mu, P) == (15.0 - 1.0) / 15.0
+
+
+def test_intracavity_comb_fraction_in_unit_interval():
+    mu, P = synth_sech2_comb(2048, 60.0, pump_boost=80.0)
+    eta = intracavity_comb_fraction(mu, P)
+    assert 0.0 <= eta < 1.0
+
+
+# ----- eta_intra: scale / normalisation invariance -------------------------
+def test_intracavity_comb_fraction_scale_invariant():
+    mu, P = synth_sech2_comb(2048, 60.0, pump_boost=80.0)
+    base = intracavity_comb_fraction(mu, P)
+    assert intracavity_comb_fraction(mu, P / P.max()) == pytest.approx(base, rel=1e-12)
+    assert intracavity_comb_fraction(mu, 1234.5 * P) == pytest.approx(base, rel=1e-12)
+
+
+def test_intracavity_comb_fraction_invariant_under_fft_zero_padding():
+    # Mandated invariance: zero-padding the temporal field by 2x interpolates the
+    # spectrum; the PHYSICAL cavity modes are the even bins of the padded FFT and
+    # their per-mode powers are unchanged (fft(E_pad)[2k] == fft(E)[k]), so
+    # eta_intra over the physical modes is identical.
+    n = 256
+    mu = np.arange(n) - n // 2
+    rng = np.random.default_rng(1)
+    amp = np.sqrt(_sech2(mu, 30.0))
+    amp[mu == 0] += 6.0
+    modes = amp * np.exp(1j * rng.uniform(0.0, 2.0 * np.pi, n))
+    e_field = np.fft.ifft(np.fft.ifftshift(modes))
+
+    P1 = np.abs(np.fft.fftshift(np.fft.fft(e_field))) ** 2
+    e1 = intracavity_comb_fraction(mu, P1)
+
+    e_pad = np.concatenate([e_field, np.zeros_like(e_field)])   # 2x temporal pad
+    phys_bins = np.fft.fft(e_pad)[0::2]                          # == fft(e_field)
+    P2 = np.abs(np.fft.fftshift(phys_bins)) ** 2
+    assert np.allclose(P2, P1, rtol=0, atol=1e-9 * P1.max())     # powers unchanged
+    assert intracavity_comb_fraction(mu, P2) == pytest.approx(e1, rel=1e-9)
+
+
+# ----- eta_intra: ratio of averages, not average of ratios -----------------
+def test_eta_intra_is_ratio_of_averages_not_average_of_ratios():
+    # A breather sampled at many phases: averaging |a_mu|^2 in LINEAR power and
+    # THEN taking the ratio (what the metric does) is NOT the mean of the
+    # per-snapshot ratios (the ratio is nonlinear in the comb amplitude).
+    n, n_avg = 256, 40
+    mu = np.arange(n) - n // 2
+    base = np.sqrt(_sech2(mu, 25.0))
+    snaps = np.empty((n_avg, n))
+    per_snap_ratio = np.empty(n_avg)
+    for r in range(n_avg):
+        g = 1.0 + 0.6 * np.sin(2.0 * np.pi * r / n_avg)     # breathing modulation
+        amp = base.copy()
+        amp[mu == 0] = 5.0
+        amp[mu != 0] *= g
+        Pr = amp ** 2
+        snaps[r] = Pr
+        per_snap_ratio[r] = intracavity_comb_fraction(mu, Pr)
+
+    eta_roa = intracavity_comb_fraction(mu, snaps.mean(axis=0))   # ratio of averages
+    eta_aor = float(per_snap_ratio.mean())                        # average of ratios
+    assert abs(eta_roa - eta_aor) > 1e-3                          # genuinely differ
+    # the metric's value equals eta_intra of the LINEAR-power-averaged spectrum
+    m, p_avg = average_power_spectrum(snaps, is_power=True)
+    assert eta_roa == pytest.approx(intracavity_comb_fraction(m, p_avg), rel=1e-12)
+
+
+# ----- eta (pump -> comb): the intracavity->bus derivation -----------------
+def test_pump_to_comb_efficiency_matches_derivation():
+    mu, P, e_field = _abs_field_spectrum()
+    n = mu.size
+    eta_intra = intracavity_comb_fraction(mu, P)
+    mean_e2 = float(np.mean(np.abs(e_field) ** 2))
+    # Parseval: <|E|^2> == sum_mu P_mu / n_tau^2 (the repo FFT normalization).
+    assert mean_e2 == pytest.approx(P.sum() / n ** 2, rel=1e-9)
+    expected = KAPPA_C * eta_intra * mean_e2 / PIN_W
+    eta = pump_to_comb_efficiency(mu, P, {"kappa_c_rad_per_s": KAPPA_C, "pin_w": PIN_W})
+    assert eta is not None
+    assert eta == pytest.approx(expected, rel=1e-9)
+    assert eta > 0.0
+
+
+def test_pump_to_comb_efficiency_energy_anchor_overrides_normalisation():
+    # Given an explicit <|E|^2> anchor, eta is computable even from a
+    # pump-normalised spectrum (eta_intra is scale-invariant).
+    mu, P, e_field = _abs_field_spectrum()
+    eta_intra = intracavity_comb_fraction(mu, P)
+    mean_e2 = float(np.mean(np.abs(e_field) ** 2))
+    config = {"kappa_c_rad_per_s": KAPPA_C, "pin_w": PIN_W,
+              "spectrum_pump_normalized": True,
+              "mean_intracavity_energy_j": mean_e2}
+    eta = pump_to_comb_efficiency(mu, P / P.max(), config)
+    assert eta == pytest.approx(KAPPA_C * eta_intra * mean_e2 / PIN_W, rel=1e-9)
+
+
+def test_kappa_c_derived_from_coupling_q():
+    # kappa_c may come from coupling_q + pump_wavelength_m (omega0 / Q_c), the
+    # same fallback as simulator.lle_solver.resolve_cavity_rates.
+    mu, P, e_field = _abs_field_spectrum()
+    lam, q_c = 1.55e-6, 1.0e7
+    kappa_c = 2.0 * np.pi * 299_792_458.0 / lam / q_c
+    config = {"coupling_q": q_c, "pump_wavelength_m": lam, "pin_w": PIN_W}
+    expected = kappa_c * intracavity_comb_fraction(mu, P) * np.mean(np.abs(e_field) ** 2) / PIN_W
+    assert pump_to_comb_efficiency(mu, P, config) == pytest.approx(expected, rel=1e-9)
+
+
+# ----- eta: the None gates (never guess) -----------------------------------
+def test_pump_to_comb_efficiency_none_when_pump_normalised_without_anchor():
+    mu, P, _ = _abs_field_spectrum()
+    config = {"kappa_c_rad_per_s": KAPPA_C, "pin_w": PIN_W,
+              "spectrum_pump_normalized": True}
+    assert pump_to_comb_efficiency(mu, P / P.max(), config) is None
+    d = conversion_efficiency_report(mu, P / P.max(), config)
+    assert d["eta"] is None
+    assert "normalis" in d["eta_reason"]              # explains the missing scale
+    assert np.isfinite(d["eta_intra"])                # eta_intra still reported
+
+
+def test_pump_to_comb_efficiency_none_when_config_missing_params():
+    mu, P, _ = _abs_field_spectrum()
+    assert pump_to_comb_efficiency(mu, P, {"pin_w": PIN_W}) is None            # no kappa_c
+    assert pump_to_comb_efficiency(mu, P, {"kappa_c_rad_per_s": KAPPA_C}) is None  # no pin
+    d = conversion_efficiency_report(mu, P, {"pin_w": PIN_W})
+    assert d["eta"] is None
+    assert "kappa_c" in d["eta_reason"]

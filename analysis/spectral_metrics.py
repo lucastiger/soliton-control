@@ -25,6 +25,19 @@ applied, and light dB-domain median smoothing followed by monotone-cubic
 (PCHIP) interpolation.  See :func:`spectral_envelope_db` and
 :func:`three_db_span` for the full method and its justification.
 
+Feature 2 -- conversion efficiency
+----------------------------------
+Two clearly-separated efficiency metrics answer two different questions:
+:func:`intracavity_comb_fraction` (``eta_intra``, always computable, scale-
+invariant) is the fraction of intracavity power carried by non-pump comb lines,
+and :func:`pump_to_comb_efficiency` (``eta``, the physically standard
+bus-waveguide metric) is ``P_comb,out / P_in``, computable only when the
+out-coupling rate ``kappa_c`` and pump power ``P_in`` are in the run config AND
+the input spectrum carries an absolute power scale.  Both sum the TOTAL non-pump
+power (the only excluded line is the pump itself -- no envelope/threshold/dB
+cutoff).  See those functions for the exact intracavity->bus derivation in the
+repo's LLE normalization.
+
 Conventions
 -----------
 * Analysis-layer arrays are NumPy float64 (JAX arrays are converted with
@@ -39,10 +52,17 @@ Conventions
 
 from __future__ import annotations
 
+import logging
 import math
 import warnings
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
+
+# Speed of light [m/s], for deriving kappa_c from a coupling-Q when the explicit
+# rate is absent (matches simulator.lle_solver.resolve_cavity_rates).
+_C_LIGHT = 299_792_458.0
 
 # -3 dB (half-power) level.  "3 dB span" and "FWHM" denote the same thing here:
 # the full width where the envelope power falls to half its maximum, i.e. a
@@ -557,10 +577,238 @@ def sech2_core_fwhm(mu, P_mu, *, core_mu=200, exclude_pump=True, pump_mu=0,
 
 
 # ---------------------------------------------------------------------------
-# 4. Visualization
+# 4. Conversion efficiency (Feature 2)
+# ---------------------------------------------------------------------------
+# Metric-definition strings (also written verbatim into the JSON output).
+ETA_INTRA_DEFINITION = (
+    "Intracavity comb fraction eta_intra = sum_{mu != 0} P_mu / sum_mu P_mu: the "
+    "fraction of the CYCLE-AVERAGED intracavity power carried by comb lines other "
+    "than the pump mode (mu = 0). The pump line is identified from the "
+    "simulation's mode indexing (mu = 0), never as 'the strongest line'. Input "
+    "P_mu is the cycle-averaged LINEAR power spectrum <|a_mu|^2>: the average is "
+    "taken on |a_mu|^2 per breather-phase snapshot BEFORE this ratio is formed, "
+    "so eta_intra is a RATIO OF AVERAGES, never an average of per-snapshot ratios. "
+    "The only excluded line is the pump itself -- no envelope/threshold/dB-cutoff "
+    "mask is applied (numerical-floor lines contribute negligibly to the linear "
+    "power sum). LIMITATIONS: single-point estimate at one detuning, "
+    "breather-cycle-averaged; the entire pump line (residual pump + the soliton's "
+    "own mu = 0 component) is conservatively assigned to 'pump', so the soliton's "
+    "share is undercounted; eta_intra is an INTRACAVITY quantity and is NOT "
+    "comparable to experimentally quoted (bus-waveguide) conversion efficiencies."
+)
+
+ETA_DEFINITION = (
+    "Pump-to-comb conversion efficiency eta = P_comb,out / P_in: the fraction of "
+    "on-chip pump power P_in that emerges in the bus waveguide as non-pump comb "
+    "light. Intracavity->bus derivation in the repo's LLE normalization "
+    "(simulator/lle_solver.py): the fast-time field E(tau) has intracavity energy "
+    "U_int = sum_tau |E|^2 (t_r/n_tau) [J] and mean <|E|^2> = U_int/t_r = "
+    "(1/n_tau^2) sum_mu P_mu for P_mu = |fftshift(fft(E))_mu|^2 (Parseval, numpy "
+    "FFT). The solver's intrinsic-loss power is P_abs = kappa_i <|E|^2>, so by the "
+    "same rate*energy relation each mode radiates P_out,mu = kappa_c W_mu into the "
+    "bus, with W_mu = P_mu / n_tau^2 the per-mode share of <|E|^2> and kappa_c = "
+    "kappa_ext the external out-coupling rate (this device is over-coupled, "
+    "kappa_c ~ 4 kappa_i). A non-pump mode has no input field to interfere with, "
+    "so P_comb,out = kappa_c sum_{mu != 0} W_mu = (kappa_c/n_tau^2) sum_{mu != 0} "
+    "P_mu and eta = kappa_c sum_{mu != 0} P_mu / (n_tau^2 P_in) = kappa_c "
+    "eta_intra <|E|^2> / P_in. Requires an ABSOLUTE (not pump-normalized) "
+    "cycle-averaged spectrum plus kappa_c and P_in from the run config; returns "
+    "None with a logged explanation otherwise (never guesses). LIMITATIONS: "
+    "single-point estimate at one detuning, breather-cycle-averaged; the pump line "
+    "(residual pump + soliton mu = 0 component) is conservatively assigned "
+    "entirely to 'pump' and excluded from P_comb,out. Unlike eta_intra, eta is "
+    "(approximately) comparable to experimentally quoted conversion efficiencies."
+)
+
+
+def _lookup(config, *keys):
+    """First non-None value among ``keys`` in a dict-like OR attribute-holding config."""
+    if config is None:
+        return None
+    for k in keys:
+        if isinstance(config, dict):
+            v = config.get(k)
+        else:
+            v = getattr(config, k, None)
+        if v is not None:
+            return v
+    return None
+
+
+def _resolve_kappa_c(config):
+    """Absolute external out-coupling rate kappa_c [rad/s] from config, else None.
+
+    Prefers an explicit rate (``kappa_c_rad_per_s`` / ``kappa_c``); falls back to
+    ``omega0 / coupling_q`` with ``omega0 = 2*pi*c / pump_wavelength_m`` -- the same
+    resolution order as :func:`simulator.lle_solver.resolve_cavity_rates`. A bare
+    coupling *ratio* is insufficient (eta needs the absolute rate), so it is not
+    accepted here.
+    """
+    kc = _lookup(config, "kappa_c_rad_per_s", "kappa_c")
+    if kc is not None:
+        return float(kc)
+    q_c = _lookup(config, "coupling_q")
+    lam = _lookup(config, "pump_wavelength_m")
+    if q_c is not None and lam is not None and float(q_c) > 0:
+        return 2.0 * math.pi * _C_LIGHT / float(lam) / float(q_c)
+    return None
+
+
+def _resolve_pin(config):
+    """On-chip pump power P_in [W] from config, else None."""
+    pin = _lookup(config, "pin_w", "pin", "pin_watts", "on_chip_pump_w")
+    return float(pin) if pin is not None else None
+
+
+def _split_pump(mu, P_mu, pump_mu):
+    """Return ``(pump_power, comb_sum, total)`` with the pump at ``mu == pump_mu``.
+
+    Uses :func:`comb_line_powers` (validates finiteness/non-negativity and warns
+    with an argmax fallback if ``pump_mu`` is absent from the index).
+    """
+    m, P = comb_line_powers(P_mu, mu, pump_mu=pump_mu)
+    total = float(np.sum(P))
+    hits = np.nonzero(m == pump_mu)[0]
+    i_pump = int(hits[0]) if hits.size else int(np.argmax(P))
+    p_pump = float(P[i_pump])
+    return p_pump, total - p_pump, total
+
+
+def intracavity_comb_fraction(mu, P_mu, *, pump_mu: int = 0) -> float:
+    """Intracavity comb fraction ``eta_intra`` (always computable).
+
+    ``eta_intra = sum_{mu != 0} P_mu / sum_mu P_mu`` -- the fraction of
+    intracavity power in comb lines other than the pump.  This is NOT the
+    experimental conversion efficiency, but it is unambiguous, dataset-
+    independent, scale-invariant (a pump-normalised and an absolute spectrum give
+    the identical value), and monotonically related to comb strength.
+
+    See :data:`ETA_INTRA_DEFINITION` for the full definition and limitations.
+    Key points enforced here:
+
+    * **Pump = mu == pump_mu** from the mode indexing, never the strongest line
+      (via :func:`comb_line_powers`; argmax is only a warned fallback when the
+      index lacks the pump).
+    * **Total non-pump power** is the numerator -- no floor/threshold/dB-cutoff
+      mask; the only excluded line is the pump.  Numerical-floor lines add
+      negligibly to a linear-power sum, so no floor mask is needed.
+    * **Ratio of averages, not average of ratios.**  ``P_mu`` must already be the
+      cycle-averaged ``<|a_mu|^2>`` (averaged in LINEAR power per snapshot); this
+      function sums those averages and THEN divides, so it forms a ratio of
+      averages.  It never averages per-snapshot ratios (which would be biased).
+
+    Returns the float fraction in ``[0, 1)``.
+    """
+    _, comb_sum, total = _split_pump(mu, P_mu, pump_mu)
+    if not np.isfinite(total) or total <= 0.0:
+        raise ValueError("total intracavity power must be finite and > 0")
+    return comb_sum / total
+
+
+def conversion_efficiency_report(mu, P_mu, config, *, pump_mu: int = 0) -> dict:
+    """Both efficiency metrics + all inputs in one dict (for JSON / plotting).
+
+    The JSON-ready aggregator behind :func:`intracavity_comb_fraction` and
+    :func:`pump_to_comb_efficiency`: computes ``eta_intra`` (always) and attempts
+    ``eta`` (the bus-waveguide metric).  ``eta`` is left ``None`` -- with a
+    human-readable ``eta_reason`` -- when either the config lacks ``kappa_c`` /
+    ``P_in`` or the spectrum has no absolute power scale (a pump-normalised
+    spectrum, unless an explicit ``mean_intracavity_energy_j`` anchor is
+    supplied).  Never guesses.
+
+    Returns a dict with ``eta_intra``, ``eta``, ``eta_reason``, and every input
+    used (pump/comb/total power sums, ``kappa_c``, ``P_in``, ``n_tau_fft``,
+    ``mean_intracavity_energy_j``, and whether the input was pump-normalised).
+    See :data:`ETA_INTRA_DEFINITION` / :data:`ETA_DEFINITION` for the metric
+    definitions and limitations.
+    """
+    p_pump, comb_sum, total = _split_pump(mu, P_mu, pump_mu)
+    if not np.isfinite(total) or total <= 0.0:
+        raise ValueError("total intracavity power must be finite and > 0")
+    eta_intra = comb_sum / total
+    n_tau = int(_lookup(config, "n_tau_fft") or np.asarray(P_mu).size)
+
+    kappa_c = _resolve_kappa_c(config)
+    pin = _resolve_pin(config)
+    w_total = _lookup(config, "mean_intracavity_energy_j")
+    normalized = bool(_lookup(config, "spectrum_pump_normalized"))
+
+    eta = None
+    eta_reason = ""
+    w_used = None
+    if kappa_c is None or pin is None or not (pin > 0):
+        eta_reason = (
+            "kappa_c (external out-coupling rate) and/or on-chip pump power P_in "
+            "is not unambiguously available in the run config; eta not computed "
+            "(not guessing).")
+    elif w_total is None and normalized:
+        eta_reason = (
+            "the input spectrum is pump-normalised (|a_0|^2 == 1), so the absolute "
+            "intracavity power scale <|E|^2> was normalised away; the absolute "
+            "out-coupled comb power (hence eta) cannot be recovered without an "
+            "absolute-power anchor (an un-normalised spectrum, or "
+            "mean_intracavity_energy_j). eta_intra is still reported.")
+    else:
+        # <|E|^2> [repo J]: an explicit anchor if given, else recovered from the
+        # ABSOLUTE FFT powers via Parseval (<|E|^2> = sum_mu P_mu / n_tau^2).
+        w_used = float(w_total) if w_total is not None else total / float(n_tau) ** 2
+        # eta = kappa_c * (comb share of <|E|^2>) / P_in. The comb share uses the
+        # eta_intra RATIO of the already-averaged powers, so this stays a ratio of
+        # averages (never an average of per-snapshot ratios).
+        eta = float(kappa_c * (eta_intra * w_used) / pin)
+
+    return {
+        "eta_intra": float(eta_intra),
+        "eta": eta,
+        "eta_reason": eta_reason,
+        "pump_mu": int(pump_mu),
+        "pump_power": p_pump,
+        "comb_power_sum": comb_sum,
+        "total_power_sum": total,
+        "kappa_c_rad_per_s": kappa_c,
+        "pin_w": pin,
+        "n_tau_fft": n_tau,
+        "mean_intracavity_energy_j": w_used,
+        "spectrum_pump_normalized": normalized,
+    }
+
+
+def pump_to_comb_efficiency(mu, P_mu, config, *, pump_mu: int = 0):
+    """Pump-to-comb conversion efficiency ``eta = P_comb,out / P_in`` (or ``None``).
+
+    The physically standard metric.  Returns the float efficiency when the run
+    config supplies the out-coupling rate ``kappa_c`` (``kappa_c_rad_per_s`` /
+    ``kappa_c``, or ``coupling_q`` + ``pump_wavelength_m``) and the on-chip pump
+    power ``P_in`` (``pin_w``), AND the spectrum carries an absolute power scale;
+    otherwise returns ``None`` after logging why (it never guesses a missing
+    coupling rate, pump power, or absolute scale).
+
+    ``config`` is a dict-like (or attribute-holding) object.  Recognised keys:
+    ``kappa_c_rad_per_s`` / ``kappa_c`` / (``coupling_q`` + ``pump_wavelength_m``),
+    ``pin_w``, optional ``n_tau_fft`` (defaults to ``len(P_mu)`` -- the full FFT
+    grid), optional ``mean_intracavity_energy_j`` (an explicit ``<|E|^2>`` anchor,
+    which bypasses the ``n_tau^2`` FFT factor), and ``spectrum_pump_normalized``
+    (set True when ``P_mu`` is pump-normalised, which forces ``None`` unless the
+    energy anchor is given).
+
+    See :data:`ETA_DEFINITION` for the exact intracavity->bus derivation in the
+    repo's LLE normalization (``P_out,mu = kappa_c * P_mu / n_tau^2``) and the
+    limitations.  For the JSON-ready bundle (both metrics, params, reason) call
+    :func:`conversion_efficiency_report`.
+    """
+    detail = conversion_efficiency_report(mu, P_mu, config, pump_mu=pump_mu)
+    if detail["eta"] is None and detail["eta_reason"]:
+        logger.info("pump_to_comb_efficiency: eta unavailable -- %s",
+                    detail["eta_reason"])
+    return detail["eta"]
+
+
+# ---------------------------------------------------------------------------
+# 5. Visualization
 # ---------------------------------------------------------------------------
 def plot_spectrum_with_span(mu, P_mu, span_result, path, *, metadata=None,
-                            title_extra="", dpi=300, also_pdf=True):
+                            title_extra="", dpi=300, also_pdf=True,
+                            extra_metrics_lines=None):
     """Annotated comb-spectrum plot showing the 3 dB span overlay.
 
     Draws the comb lines (dB relative to the strongest non-pump line), the
@@ -569,6 +817,10 @@ def plot_spectrum_with_span(mu, P_mu, span_result, path, *, metadata=None,
     and mode count.  Matches the repo's matplotlib conventions and saves both a
     300-dpi PNG and a PDF (per shared analysis conventions).  ``path`` is the
     PNG path; the PDF sits beside it.
+
+    ``extra_metrics_lines`` (Feature 2): optional list of strings appended to the
+    same annotation box so the figure carries a COMBINED metrics readout (3 dB
+    span + conversion efficiency) rather than a near-duplicate second figure.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -602,6 +854,7 @@ def plot_spectrum_with_span(mu, P_mu, span_result, path, *, metadata=None,
     ax.plot(mu_env, s_db_env, "-", lw=1.6, color="tab:orange",
             label=f"envelope (median w={p['smooth_modes_used']} + PCHIP, dB)")
 
+    metrics_lines = []
     if math.isfinite(span_modes):
         ax.axhline(ref - level_db, color="tab:red", ls="--", lw=1.0,
                    label=f"reference $-${level_db:g} dB")
@@ -609,19 +862,29 @@ def plot_spectrum_with_span(mu, P_mu, span_result, path, *, metadata=None,
                    label="3 dB span")
         for xc in (left, right):
             ax.axvline(xc, color="tab:red", ls=":", lw=0.9, alpha=0.8)
-        ax.annotate(
-            f"3 dB span = {span_modes:.1f} modes\n"
-            f"= {span_ghz:.1f} GHz ({span_thz:.2f} THz)\n"
+        metrics_lines += [
+            f"3 dB span = {span_modes:.1f} modes",
+            f"= {span_ghz:.1f} GHz ({span_thz:.2f} THz)",
             f"[{left:.1f}, {right:.1f}] $\\mu$",
-            xy=(0.5 * (left + right), ref - level_db),
-            xytext=(0.02, 0.06), textcoords="axes fraction",
-            ha="left", va="bottom", fontsize=9,
-            bbox=dict(boxstyle="round,pad=0.35", fc="white", ec="tab:red",
-                      alpha=0.9))
+        ]
         pad = 0.9 * span_modes
         ax.set_xlim(left - pad, right + pad)
     else:
         ax.set_xlim(m_ret.min(), m_ret.max())
+
+    # Combined metrics box: 3 dB span (above) + any extra lines (e.g. Feature 2
+    # conversion efficiency), kept in ONE annotation rather than a second figure.
+    if extra_metrics_lines:
+        if metrics_lines:
+            metrics_lines.append("-" * 18)                       # thin separator
+        metrics_lines += [str(s) for s in extra_metrics_lines]
+    if metrics_lines:
+        ax.annotate(
+            "\n".join(metrics_lines),
+            xy=(0.0, 0.0), xytext=(0.02, 0.06), textcoords="axes fraction",
+            ha="left", va="bottom", fontsize=9,
+            bbox=dict(boxstyle="round,pad=0.35", fc="white", ec="tab:red",
+                      alpha=0.9))
 
     ax.axhline(ref, color="0.5", ls="-", lw=0.6, alpha=0.6)
     ax.set_xlabel(r"cavity mode index $\mu$  ($\mu=0$ = pump)")
