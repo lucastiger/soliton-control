@@ -1,0 +1,68 @@
+{
+  "three_db_span": {
+    "metric": "three_db_span",
+    "metric_definition": "Full width, in relative cavity-mode number Delta_mu, of the pump-excluded, numerical-floor-masked, dB-domain median-smoothed, PCHIP-interpolated comb-line power envelope, measured between the OUTERMOST points where the envelope falls level_db below its maximum (level_db = 3.0 dB, i.e. the -3 dB / half-power level). Converted to frequency via Delta_mu * FSR.",
+    "span_modes": 189.60000393168784,
+    "span_hz": 4636031242663.597,
+    "span_thz": 4.636031242663597,
+    "span_ghz": 4636.0312426635965,
+    "left_crossing_mu": -95.03101593851902,
+    "right_crossing_mu": 94.56898799316882,
+    "envelope_peak_mu": 52.999999998774,
+    "reference_level_db": -5.112382462991054,
+    "n_crossings": 2,
+    "one_sided": false,
+    "fsr_hz": 24451641068.182365,
+    "params": {
+      "exclude_pump": true,
+      "smooth_modes_requested": "auto",
+      "smooth_modes_used": 13,
+      "floor_db": 60.0,
+      "interp_factor": 10,
+      "level_db": 3.0,
+      "pump_mu": 0
+    },
+    "warnings": [],
+    "units": {
+      "span_modes": "cavity modes (relative mode number Delta_mu)",
+      "span_hz": "Hz",
+      "span_thz": "THz",
+      "span_ghz": "GHz",
+      "left_crossing_mu": "cavity mode number (mu)",
+      "right_crossing_mu": "cavity mode number (mu)",
+      "envelope_peak_mu": "cavity mode number (mu)",
+      "reference_level_db": "dB, relative to the strongest non-pump line",
+      "fsr_hz": "Hz",
+      "floor_db": "dB",
+      "level_db": "dB"
+    },
+    "sech2_core_fwhm_crosscheck": {
+      "fwhm_modes": 251.38768257441978,
+      "fwhm_hz": 6146841383271.875,
+      "fwhm_thz": 6.146841383271875,
+      "width_w_modes": 142.88333860132636,
+      "center_mu": 0.6940317898187397,
+      "peak_db": -6.062866384962848,
+      "fit_rms_db": 1.2326874692776866,
+      "core_mu": 200,
+      "note": "cross-check only (dB-domain sech^2 core fit); not the primary 3 dB span metric"
+    },
+    "provenance": {
+      "input_file": "analysis/results/dks_single_soliton_spectrum.npz",
+      "input_sha256": "4642784da2856257617359880a94fa3c368fe65977903d0fffa3ba6a57af9b8e",
+      "config_file": "sin_params.yaml",
+      "config_sha256": "c5adc61ccb056ce6061455586622fccb92771ddbab473701f77de0a735f04d61",
+      "run_id": {
+        "n_rt_averaged": 304,
+        "breathing_period_rt": 154.0,
+        "breathing_relstd": 0.04090545738813848
+      },
+      "fsr_hz": 24451641068.182365,
+      "fsr_source": "measured dispersion (attach_dispersion) ",
+      "n_tau": 16384,
+      "generated_utc": "2026-07-09T02:25:19.759136+00:00",
+      "module": "analysis/spectral_metrics.py",
+      "script": "analysis/compute_spectral_metrics.py"
+    }
+  }
+}
