@@ -114,5 +114,68 @@
       "module": "analysis/spectral_metrics.py",
       "script": "analysis/compute_spectral_metrics.py"
     }
+  },
+  "soliton_step": {
+    "metric": "soliton_step",
+    "metric_definition": "Soliton step: a discontinuity in the per-detuning averaged cavity power P(delta_omega) as the pump-cavity detuning is swept quasi-statically through the soliton existence range. For each detuning the observable is the power averaged over the FINAL avg_frac of a long constant-detuning hold (LINEAR power, never dB / never complex), which simultaneously discards the post-step transient and cycle-averages the deterministic breathing (the attractor is a limit cycle, so the instantaneous power oscillates). Step edges are the first-difference outliers of that trace: |diff(P)[i] - median(diff P)| > k * 1.4826 * MAD(diff P) (robust scale; conservative k). A step marks a soliton nucleation/annihilation boundary of the branch, at which the intracavity power (and hence the through-port transmission via P_trans = P_in - kappa_i * <|E|^2>) jumps discretely.",
+    "observable": "total intracavity power sum_mu |a_mu|^2 (normalised to the sweep maximum); transmitted power P_trans/P_in also stored in detuning_sweep.npz",
+    "sweep_direction": "decreasing detuning (delta_omega down) along the single-DKS branch to its lower-edge annihilation; the increasing direction gives no grid-converged step (the high-detuning collapse is an FFT-truncation artifact, non-convergent in n_tau)",
+    "n_detunings": 31,
+    "detuning_range_over_kappa": [
+      4.5,
+      12.0
+    ],
+    "single_dks_existence_region_over_kappa": [
+      6.25,
+      12.0
+    ],
+    "soliton_step": {
+      "annihilation_over_kappa": 6.125,
+      "note": "lower edge of the single-DKS existence region (label 6 + single temporal peak); the soliton is replaced by a comparable-energy MI comb, so the TOTAL power step here is small -- the step is primarily a state transition, also visible as the collapse of the breathing amplitude."
+    },
+    "power_trace_discontinuities": {
+      "rule": "|diff(P)[i] - median(diff P)| > k * 1.4826 * MAD(diff P)",
+      "k": 6.0,
+      "robust_sigma": 0.012706293577352614,
+      "detected_over_kappa": [
+        4.625,
+        4.875
+      ],
+      "interpretation": "at this operating point these fall on the near-resonance MI/CW power rise below the soliton branch, NOT on the soliton annihilation"
+    },
+    "transmission_contrast": {
+      "T_min": 0.9902246178992132,
+      "T_max": 0.9982771053616016,
+      "note": "near-unity: the cavity is nearly empty at these high detunings, so the through-port step is sub-percent"
+    },
+    "units": {
+      "detuning_over_kappa": "kappa (total cavity linewidth)",
+      "annihilation_over_kappa": "kappa"
+    },
+    "provenance": {
+      "driver": "analysis/run_detuning_sweep.py",
+      "sweep_data": "detuning_sweep.npz",
+      "figure": "soliton_steps.png",
+      "config_file": "sin_params.yaml",
+      "config_sha256": "c5adc61ccb056ce6061455586622fccb92771ddbab473701f77de0a735f04d61",
+      "noise": "disabled (deterministic; sidecar config with T_k = 0)",
+      "thermal_model": "ON (matches validated operating config; Gamma_th)",
+      "n_tau": 4096,
+      "pin_w": 0.214,
+      "sweep_config": {
+        "dw_start_kappa": 12.0,
+        "dw_stop_kappa": 4.5,
+        "n_steps": 31,
+        "settle_rt": 6000,
+        "hold_rt": 2000,
+        "avg_frac": 0.25,
+        "n_tau": 4096,
+        "seed": 0,
+        "pin_w": 0.214,
+        "step_k": 6.0,
+        "smooth_display": 0
+      },
+      "generated_utc": "2026-07-09T06:00:37.051338+00:00"
+    }
   }
 }

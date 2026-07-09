@@ -38,6 +38,18 @@ power (the only excluded line is the pump itself -- no envelope/threshold/dB
 cutoff).  See those functions for the exact intracavity->bus derivation in the
 repo's LLE normalization.
 
+Feature 3 -- soliton steps (power vs detuning)
+----------------------------------------------
+:func:`hold_window_average` reduces the per-round-trip power history of a
+constant-detuning hold to one reproducible value by averaging the FINAL fraction
+of the hold in LINEAR power (discarding the re-settling transient and cycle-
+averaging the breather).  :func:`detect_power_steps` finds the soliton-step
+discontinuities in the assembled power-vs-detuning trace via a robust MAD test on
+its first differences, and :func:`plot_soliton_steps` renders the publication
+staircase figure.  The solver-driving sweep lives in the analysis-layer driver
+``analysis/run_detuning_sweep.py``; these functions consume its output and never
+import the solver.
+
 Conventions
 -----------
 * Analysis-layer arrays are NumPy float64 (JAX arrays are converted with
@@ -904,5 +916,359 @@ def plot_spectrum_with_span(mu, P_mu, span_result, path, *, metadata=None,
     fig.savefig(path, dpi=dpi)
     if also_pdf:
         fig.savefig(path.with_suffix(".pdf"))
+    plt.close(fig)
+    return path
+
+
+# ---------------------------------------------------------------------------
+# 6. Soliton steps: power-vs-detuning staircase (Feature 3)
+# ---------------------------------------------------------------------------
+# The physically meaningful per-detuning observable of a detuning sweep is the
+# power averaged over the LAST portion of a long hold at that detuning: at the
+# validated operating point the attractor breathes (limit cycle), so the
+# instantaneous power oscillates and only a slow-time / cycle average is a
+# reproducible observable.  :func:`hold_window_average` performs that averaging
+# in LINEAR power (never dB, never on complex fields); the driver
+# ``analysis/run_detuning_sweep.py`` feeds it the per-round-trip power history of
+# each hold.  :func:`detect_power_steps` then finds the soliton-step
+# discontinuities in the assembled trace, and :func:`plot_soliton_steps` renders
+# the publication figure.
+SOLITON_STEP_DEFINITION = (
+    "Soliton step: a discontinuity in the per-detuning averaged cavity power "
+    "P(delta_omega) as the pump-cavity detuning is swept quasi-statically through "
+    "the soliton existence range. For each detuning the observable is the power "
+    "averaged over the FINAL avg_frac of a long constant-detuning hold (LINEAR "
+    "power, never dB / never complex), which simultaneously discards the post-step "
+    "transient and cycle-averages the deterministic breathing (the attractor is a "
+    "limit cycle, so the instantaneous power oscillates). Step edges are the "
+    "first-difference outliers of that trace: |diff(P)[i] - median(diff P)| > "
+    "k * 1.4826 * MAD(diff P) (robust scale; conservative k). A step marks a "
+    "soliton nucleation/annihilation boundary of the branch, at which the "
+    "intracavity power (and hence the through-port transmission via P_trans = "
+    "P_in - kappa_i * <|E|^2>) jumps discretely."
+)
+
+DEFAULT_STEP_K = 6.0        # conservative first-difference MAD multiple for a step
+_MAD_TO_SIGMA = 1.4826      # scale a MAD to a Gaussian-sigma estimate
+
+
+def hold_window_average(series, *, avg_frac: float = 0.25):
+    """Average the FINAL ``avg_frac`` of a per-hold power series in LINEAR power.
+
+    ``series`` is the per-round-trip (or per-snapshot) sequence of a POSITIVE,
+    LINEAR power/energy observable recorded while the field is held at one
+    detuning (e.g. the solver's ``U_int_history`` slice, or a per-round-trip
+    ``sum_mu |a_mu|^2``).  The window is the last ``avg_frac`` of the hold, whose
+    mean is the plotted per-detuning value and whose std is the breathing-
+    amplitude indicator (an error bar).
+
+    The averaging is done in LINEAR power -- never on dB values (which bias the
+    mean toward the peak) and never on complex fields (breathing-phase drift
+    cancels real power) -- so passing a dB or complex ``series`` is rejected.
+    Selecting the LAST fraction discards the per-step re-settling transient and,
+    because the hold spans many breathing periods, cycle-averages the limit-cycle
+    oscillation.
+
+    The window starts at index ``floor(n * (1 - avg_frac))`` and always contains
+    at least one sample.  Returns a dict with ``mean``, ``std`` (population),
+    ``i_start``, ``n_window``, ``n_total`` and ``avg_frac``.
+    """
+    x = np.asarray(series)
+    if np.iscomplexobj(x):
+        raise ValueError(
+            "series is complex; average LINEAR power |a|^2, never the field")
+    x = x.astype(np.float64).ravel()
+    n = x.size
+    if n == 0:
+        raise ValueError("series is empty")
+    if not (0.0 < avg_frac <= 1.0):
+        raise ValueError(f"avg_frac must be in (0, 1], got {avg_frac}")
+    if not np.all(np.isfinite(x)):
+        raise ValueError("series contains non-finite values")
+    i_start = int(math.floor(n * (1.0 - avg_frac)))
+    i_start = min(max(i_start, 0), n - 1)          # >= 1 sample in the window
+    w = x[i_start:]
+    return {
+        "mean": float(np.mean(w)),
+        "std": float(np.std(w)),
+        "i_start": int(i_start),
+        "n_window": int(w.size),
+        "n_total": int(n),
+        "avg_frac": float(avg_frac),
+    }
+
+
+def detect_power_steps(x, y, *, k: float = DEFAULT_STEP_K):
+    """Robust step-edge detection on a 1-D averaged trace ``y(x)``.
+
+    A soliton step is a DISCONTINUITY in ``y``: a first difference
+    ``dy[i] = y[i+1] - y[i]`` that is an outlier relative to the bulk of the
+    differences.  Robustly (no fit, no per-dataset threshold):
+
+    * ``med = median(dy)``, ``sigma = 1.4826 * MAD(dy)`` (a Gaussian-sigma
+      estimate from the median absolute deviation about the median);
+    * edge ``i`` is a step where ``|dy[i] - med| > k * sigma`` (default ``k = 6``
+      -- conservative, only large jumps flag; ``k`` is configurable).
+
+    The scaled MAD keys the threshold to the trace's own smooth-region ripple, so
+    a gentle branch (small, uniform ``dy``) does not trip while a genuine jump
+    does.  When ``sigma == 0`` (a perfectly linear ramp plus isolated jumps) a
+    tiny relative floor derived from the data range is used instead of zero.
+
+    Consecutive flagged edges are one step; the un-flagged edges partition the
+    samples into plateaus.  Returns a dict with the step ``edges`` (index ``i``,
+    the step lying between ``x[i]`` and ``x[i+1]``), ``step_x`` (edge midpoints),
+    ``step_dy`` (signed magnitudes), ``plateaus`` (inclusive index ranges) and
+    ``plateau_bounds_x`` (their ``x`` spans), plus the robust scale used.  Never
+    raises on short input: fewer than 3 samples yields no steps.
+    """
+    x = np.asarray(x, dtype=np.float64).ravel()
+    y = np.asarray(y, dtype=np.float64).ravel()
+    if x.shape != y.shape:
+        raise ValueError(f"x and y must match; got {x.shape} vs {y.shape}")
+    n = y.size
+    empty = {
+        "edges": [], "step_x": [], "step_dy": [],
+        "plateaus": [[0, n - 1]] if n else [],
+        "plateau_bounds_x": [[float(x[0]), float(x[-1])]] if n else [],
+        "n_steps": 0, "k": float(k), "sigma": 0.0, "median_dy": 0.0,
+        "units": {"step_x": "same as x (detuning)", "step_dy": "same as y (power)"},
+    }
+    if n < 3:
+        return empty
+
+    dy = np.diff(y)
+    med = float(np.median(dy))
+    mad = float(np.median(np.abs(dy - med)))
+    sigma = _MAD_TO_SIGMA * mad
+    if sigma <= 0.0:
+        span = float(np.max(y) - np.min(y))
+        sigma = max(1e-12, 1e-6 * (span if span > 0 else 1.0))
+    thr = float(k) * sigma
+
+    flagged = np.abs(dy - med) > thr            # length n-1, edge i joins i, i+1
+
+    # Plateaus = connected runs of nodes joined by UN-flagged edges.
+    plateaus = []
+    start = 0
+    for i in range(n - 1):
+        if flagged[i]:
+            plateaus.append([start, i])
+            start = i + 1
+    plateaus.append([start, n - 1])
+
+    edges = [int(i) for i in np.nonzero(flagged)[0]]
+    step_x = [0.5 * (float(x[i]) + float(x[i + 1])) for i in edges]
+    step_dy = [float(dy[i]) for i in edges]
+    plateau_bounds_x = [[float(x[a]), float(x[b])] for a, b in plateaus]
+
+    return {
+        "edges": edges,
+        "step_x": step_x,
+        "step_dy": step_dy,
+        "plateaus": [[int(a), int(b)] for a, b in plateaus],
+        "plateau_bounds_x": plateau_bounds_x,
+        "n_steps": len(edges),
+        "k": float(k),
+        "sigma": float(sigma),
+        "median_dy": med,
+        "units": {"step_x": "same as x (detuning)", "step_dy": "same as y (power)"},
+    }
+
+
+def single_dks_region(detuning, is_single):
+    """Longest contiguous single-DKS detuning span and its annihilation edge.
+
+    ``detuning`` and ``is_single`` are the per-step detuning and single-soliton
+    flag of a sweep (any order).  Returns ``(lo, hi, annihilation)`` where the
+    span is the longest run of ``is_single`` True (in ascending detuning) and
+    ``annihilation`` is the midpoint between the lowest-detuning soliton point and
+    the next-lower non-single point -- the soliton step (the branch's lower edge).
+    Any element is ``None`` when there is no single-DKS point, or the branch
+    reaches the sweep edge with no lower non-single neighbour.
+    """
+    dw = np.asarray(detuning, dtype=np.float64).ravel()
+    flag = np.asarray(is_single, dtype=bool).ravel()
+    if dw.shape != flag.shape:
+        raise ValueError("detuning and is_single must have the same shape")
+    order = np.argsort(dw)
+    dw, flag = dw[order], flag[order]
+    best_len, best = 0, None
+    i = 0
+    while i < flag.size:
+        if flag[i]:
+            j = i
+            while j < flag.size and flag[j]:
+                j += 1
+            if (j - i) > best_len:
+                best_len, best = j - i, (i, j - 1)
+            i = j
+        else:
+            i += 1
+    if best is None:
+        return None, None, None
+    lo_i, hi_i = best
+    lo_k, hi_k = float(dw[lo_i]), float(dw[hi_i])
+    annih = float(0.5 * (dw[lo_i] + dw[lo_i - 1])) if lo_i > 0 else None
+    return lo_k, hi_k, annih
+
+
+def _moving_average(y, w):
+    """Odd-window centred moving average (edge-replicated); display smoothing only."""
+    y = np.asarray(y, dtype=np.float64)
+    w = int(w)
+    if w <= 1 or y.size < 2:
+        return y.copy()
+    if w % 2 == 0:
+        w += 1
+    w = min(w, y.size if y.size % 2 == 1 else y.size - 1)
+    pad = w // 2
+    ypad = np.concatenate([np.full(pad, y[0]), y, np.full(pad, y[-1])])
+    kern = np.ones(w) / w
+    return np.convolve(ypad, kern, mode="valid")
+
+
+def _draw_regions(ax, soliton_region, annihilation_kappa, steps, *, label=True):
+    """Shade the single-DKS existence region, mark the soliton step, and (lightly)
+    the power-trace discontinuities.  Shared by both panels; ``label=False``
+    suppresses the legend entries (used on the secondary panel to avoid repeats)."""
+    def _lbl(text):
+        return text if label else None
+
+    if soliton_region is not None:
+        lo, hi = float(soliton_region[0]), float(soliton_region[1])
+        ax.axvspan(lo, hi, color="tab:green", alpha=0.12, zorder=0,
+                   label=_lbl("single-DKS existence"))
+    if annihilation_kappa is not None:
+        ax.axvline(float(annihilation_kappa), color="tab:red", ls="-", lw=1.6,
+                   zorder=3, label=_lbl("soliton annihilation (step)"))
+    # Power-trace discontinuities (from detect_power_steps) are a SECONDARY,
+    # honestly-labelled overlay: at this operating point they key on the
+    # near-resonance MI/CW power rise, NOT the soliton step (see the driver).
+    if steps and steps.get("step_x"):
+        for j, xs in enumerate(steps["step_x"]):
+            ax.axvline(xs, color="0.45", ls=":", lw=1.0, zorder=2,
+                       label=_lbl("power-trace discontinuity") if j == 0 else None)
+
+
+def plot_soliton_steps(detuning_kappa, power, path, *, power_std=None,
+                       transmission=None, soliton_region=None,
+                       annihilation_kappa=None, steps=None, metadata=None,
+                       observable_label=r"intracavity power  $\sum_\mu |a_\mu|^2$ "
+                                         r"(norm.)",
+                       smooth_window: int = 0, dpi: int = 300, also_pdf: bool = True):
+    """Publication figure of the single-DKS branch power vs pump-cavity detuning.
+
+    ``detuning_kappa`` is the swept detuning in units of kappa (the repo's native
+    plotting unit) and ``power`` is the per-detuning averaged cavity power -- the
+    primary trace, plotted RAW.  ``power_std`` (optional) draws the per-step
+    breathing-amplitude error bars (they are large on the breather sub-band of the
+    soliton branch and collapse when the soliton annihilates, a visual marker of
+    the step).  ``transmission`` (optional, normalised through-port power) adds a
+    second panel with the detector-matched observable.
+
+    Region markers:
+
+    * ``soliton_region`` -- an ``(lo_kappa, hi_kappa)`` span of the single-DKS
+      existence region (from the per-step state flag), lightly shaded;
+    * ``annihilation_kappa`` -- the soliton step (the branch's lower edge), drawn
+      as a solid vertical line;
+    * ``steps`` -- a :func:`detect_power_steps` result, drawn as light dotted
+      lines and labelled honestly as *power-trace discontinuities* (which, for
+      this operating point, mark the near-resonance MI/CW power rise rather than
+      the soliton annihilation -- see the driver's note).
+
+    ``smooth_window`` enables a DISPLAY-ONLY moving-average overlay (default 0 =
+    off); the raw trace always stays visible underneath and the smoothed curve is
+    never saved as data.  ``metadata`` may carry ``kappa_rad_s`` (adds a secondary
+    top axis in frequency-detuning MHz), ``caption`` and the thermal/noise
+    settings.  Saves a 300-dpi PNG and a PDF (per repo conventions); ``path`` is
+    the PNG path.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+
+    metadata = dict(metadata or {})
+    dwk = np.asarray(detuning_kappa, dtype=np.float64).ravel()
+    P = np.asarray(power, dtype=np.float64).ravel()
+    order = np.argsort(dwk)
+    dwk, P = dwk[order], P[order]
+    std = (np.asarray(power_std, dtype=np.float64).ravel()[order]
+           if power_std is not None else None)
+    T = (np.asarray(transmission, dtype=np.float64).ravel()[order]
+         if transmission is not None else None)
+
+    two_panel = T is not None
+    if two_panel:
+        fig, axes = plt.subplots(2, 1, figsize=(8.4, 6.8), sharex=True,
+                                 gridspec_kw={"height_ratios": [2.0, 1.0]})
+        ax, axt = axes
+    else:
+        fig, ax = plt.subplots(figsize=(8.4, 5.0))
+        axt = None
+
+    _draw_regions(ax, soliton_region, annihilation_kappa, steps)
+
+    # Raw primary trace (+ breathing error bars).
+    if std is not None:
+        ax.errorbar(dwk, P, yerr=std, fmt="o-", ms=3.4, lw=1.0, color="tab:blue",
+                    ecolor="tab:blue", elinewidth=0.8, capsize=1.8, alpha=0.9,
+                    zorder=4,
+                    label="per-step avg (final 25% of hold); bars = breathing std")
+    else:
+        ax.plot(dwk, P, "o-", ms=3.4, lw=1.0, color="tab:blue", zorder=4,
+                label="per-step avg (final 25% of hold)")
+
+    if smooth_window and smooth_window > 1:
+        ax.plot(dwk, _moving_average(P, smooth_window), "-", lw=1.6,
+                color="tab:orange", alpha=0.85, zorder=5,
+                label=f"display smoothing (w={int(smooth_window)}, not saved)")
+
+    if steps is not None and not steps.get("step_x"):
+        ax.annotate("no power-trace discontinuity detected", xy=(0.02, 0.04),
+                    xycoords="axes fraction", ha="left", va="bottom", fontsize=8.5,
+                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="0.5",
+                              alpha=0.85))
+
+    ax.set_ylabel(observable_label)
+    ax.grid(alpha=0.25)
+    ax.legend(fontsize=8, loc="upper right")
+
+    # Secondary top axis in frequency-detuning MHz (delta_omega / 2*pi).
+    kappa = metadata.get("kappa_rad_s")
+    if kappa:
+        def _k2mhz(v):
+            return np.asarray(v) * float(kappa) / (2.0 * math.pi) / 1e6
+
+        def _mhz2k(v):
+            return np.asarray(v) * 1e6 * 2.0 * math.pi / float(kappa)
+
+        secax = ax.secondary_xaxis("top", functions=(_k2mhz, _mhz2k))
+        secax.set_xlabel("pump-cavity detuning  $\\delta\\omega/2\\pi$  (MHz)",
+                         fontsize=9)
+
+    if two_panel:
+        _draw_regions(axt, soliton_region, annihilation_kappa, steps, label=False)
+        axt.plot(dwk, T, "s-", ms=3.0, lw=1.0, color="tab:purple", zorder=4,
+                 label="through-port power $P_\\mathrm{trans}/P_\\mathrm{in}$")
+        axt.set_ylabel("norm. transmission")
+        axt.grid(alpha=0.25)
+        axt.legend(fontsize=8, loc="lower left")
+        axt.set_xlabel(r"pump-cavity detuning  $\delta\omega/\kappa$")
+    else:
+        ax.set_xlabel(r"pump-cavity detuning  $\delta\omega/\kappa$")
+
+    caption = metadata.get("caption")
+    if caption:
+        fig.text(0.5, -0.02 if not two_panel else -0.01, caption, ha="center",
+                 va="top", fontsize=7.5, wrap=True)
+
+    fig.tight_layout()
+    path = Path(path)
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    if also_pdf:
+        fig.savefig(path.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(fig)
     return path
