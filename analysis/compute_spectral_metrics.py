@@ -40,12 +40,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
 
 from analysis.dks_access import (  # noqa: E402  (needs the sys.path insert)
     CONFIG_PATH,
+    PIN_W,
     RESULTS_DIR,
     attach_dispersion,
     load_cavity_params,
 )
 from analysis.spectral_metrics import (  # noqa: E402
+    ETA_DEFINITION,
+    ETA_INTRA_DEFINITION,
     comb_line_powers,
+    conversion_efficiency_report,
     plot_spectrum_with_span,
     sech2_core_fwhm,
     three_db_span,
@@ -73,10 +77,15 @@ def _load_spectrum(npz_path: Path) -> dict:
     """
     d = np.load(npz_path)
     mu = np.asarray(d["mu"]).astype(np.int64)
+    # Both stored fields are PUMP-NORMALISED by construction (dks_access
+    # `_spectrum_dict` divides by the peak, and `power_db` is 10*log10 of that),
+    # so the absolute intracavity power scale is not carried in the artifact.
     if "power_norm" in d.files:
         P = np.asarray(d["power_norm"], dtype=np.float64)
+        power_source = "power_norm"
     else:
         P = 10.0 ** (np.asarray(d["power_db"], dtype=np.float64) / 10.0)
+        power_source = "power_db (delinearised)"
     meta = {
         "n_rt_averaged": int(d["n_rt_averaged"]) if "n_rt_averaged" in d.files
         else None,
@@ -85,7 +94,8 @@ def _load_spectrum(npz_path: Path) -> dict:
         "breathing_relstd": float(d["breathing_relstd"])
         if "breathing_relstd" in d.files else None,
     }
-    return {"mu": mu, "P_mu": P, "meta": meta}
+    return {"mu": mu, "P_mu": P, "meta": meta,
+            "pump_normalized": True, "power_source": power_source}
 
 
 def _update_json(json_path: Path, key: str, block: dict) -> None:
@@ -141,6 +151,23 @@ def main() -> None:
                          level_db=args.level_db)
     cross = sech2_core_fwhm(mu, P, fsr_hz=fsr_hz, level_db=args.level_db)
 
+    # --- Feature 2: conversion efficiency -------------------------------------
+    # eta_intra is scale-invariant (computable from the pump-normalised comb).
+    # The absolute eta = P_comb,out/P_in needs kappa_c and P_in (both in config)
+    # AND an absolute intracavity power scale; the committed spectrum is
+    # pump-normalised, so eta is reported as null with a logged reason rather
+    # than guessed.  kappa_c = kappa_ext (external out-coupling rate); P_in is
+    # the on-chip pump power actually driven in the runs (PIN_W, == config
+    # pin_w).  All values come from config/run metadata -- nothing hardcoded.
+    eff_config = {
+        "kappa_c_rad_per_s": cav.kappa_c,
+        "pin_w": PIN_W,
+        "pump_wavelength_m": cav.pump_wavelength_m,
+        "n_tau_fft": n_tau,
+        "spectrum_pump_normalized": bool(spec.get("pump_normalized", False)),
+    }
+    eff = conversion_efficiency_report(mu, P, eff_config, pump_mu=0)
+
     provenance = {
         "input_file": str(args.spectrum.relative_to(Path(__file__).resolve().parents[1]))
         if args.spectrum.is_absolute() and str(args.spectrum).startswith(
@@ -169,14 +196,63 @@ def main() -> None:
     json_path = RESULTS_DIR / METRICS_JSON
     _update_json(json_path, "three_db_span", block)
 
+    # conversion_efficiency block (idempotent key).  Powers below are in the
+    # committed spectrum's units (pump-normalised, arbitrary), so they are only
+    # meaningful as the ratio eta_intra; eta stays null with eta_reason.
+    eff_block = {
+        "metric": "conversion_efficiency",
+        "eta_intra": eff["eta_intra"],
+        "eta": eff["eta"],
+        "eta_reason": eff["eta_reason"] or None,
+        "definitions": {
+            "eta_intra": ETA_INTRA_DEFINITION,
+            "eta": ETA_DEFINITION,
+        },
+        "params": {
+            "pump_mu": eff["pump_mu"],
+            "kappa_c_rad_per_s": eff["kappa_c_rad_per_s"],
+            "kappa_c_source": "config (kappa_c_rad_per_s = kappa_ext)",
+            "pin_w": eff["pin_w"],
+            "pin_source": "run pump power PIN_W (== config pin_w)",
+            "n_tau_fft": eff["n_tau_fft"],
+            "spectrum_pump_normalized": eff["spectrum_pump_normalized"],
+            "mean_intracavity_energy_j": eff["mean_intracavity_energy_j"],
+            "pump_power_arb": eff["pump_power"],
+            "comb_power_sum_arb": eff["comb_power_sum"],
+            "total_power_sum_arb": eff["total_power_sum"],
+        },
+        "units": {
+            "eta_intra": "dimensionless (intracavity power fraction)",
+            "eta": "dimensionless (bus-waveguide power fraction)",
+            "kappa_c_rad_per_s": "rad/s",
+            "pin_w": "W",
+            "mean_intracavity_energy_j": "J (repo LLE normalization; null if unknown)",
+            "pump_power_arb": "arbitrary (pump-normalised spectrum units)",
+            "comb_power_sum_arb": "arbitrary (pump-normalised spectrum units)",
+            "total_power_sum_arb": "arbitrary (pump-normalised spectrum units)",
+        },
+        "provenance": provenance,
+    }
+    _update_json(json_path, "conversion_efficiency", eff_block)
+
     title_extra = ""
     m = spec["meta"]
     if m["breathing_period_rt"] and np.isfinite(m["breathing_period_rt"]):
         title_extra = (f"breather T~{m['breathing_period_rt']:.0f} RT, "
                        f"dU/U={100.0 * m['breathing_relstd']:.1f}%")
+
+    # Combined metrics box: efficiency alongside the 3 dB span (no second figure).
+    eff_lines = [f"$\\eta_{{intra}}$ = {eff['eta_intra']:.3f} "
+                 f"({100.0 * eff['eta_intra']:.1f}% intracavity)"]
+    if eff["eta"] is not None:
+        eff_lines.append(f"$\\eta$ = {eff['eta']:.2e} "
+                         f"({100.0 * eff['eta']:.2f}% pump$\\to$comb)")
+    else:
+        eff_lines.append(r"$\eta$ (pump$\to$comb): n/a")
+        eff_lines.append("(pump-normalised input)")
     plot_path = plot_spectrum_with_span(
         mu, P, span, RESULTS_DIR / SPAN_PLOT_PNG, metadata=metadata,
-        title_extra=title_extra)
+        title_extra=title_extra, extra_metrics_lines=eff_lines)
 
     print(f"[metrics] input: {args.spectrum} (n_tau={n_tau})")
     print(f"[metrics] FSR = {fsr_hz:.6e} Hz ({provenance['fsr_source'].strip()})")
@@ -192,6 +268,13 @@ def main() -> None:
           f"{cross.get('fwhm_modes', float('nan')):.1f} modes "
           f"({cross.get('fwhm_thz', float('nan')):.3f} THz, "
           f"fit RMS {cross.get('fit_rms_db', float('nan')):.2f} dB)")
+    print(f"[metrics] eta_intra = {eff['eta_intra']:.4f} "
+          f"({100.0 * eff['eta_intra']:.1f}% of intracavity power in non-pump lines)")
+    if eff["eta"] is not None:
+        print(f"[metrics] eta (pump->comb) = {eff['eta']:.4e} "
+              f"({100.0 * eff['eta']:.3f}%)")
+    else:
+        print(f"[metrics] eta (pump->comb) = None ({eff['eta_reason']})")
     for w in span["warnings"]:
         print(f"[metrics] WARNING: {w}")
     print(f"[metrics] JSON  -> {json_path}")

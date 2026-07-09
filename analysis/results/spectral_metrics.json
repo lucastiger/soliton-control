@@ -60,7 +60,57 @@
       "fsr_hz": 24451641068.182365,
       "fsr_source": "measured dispersion (attach_dispersion) ",
       "n_tau": 16384,
-      "generated_utc": "2026-07-09T02:25:19.759136+00:00",
+      "generated_utc": "2026-07-09T03:37:55.207789+00:00",
+      "module": "analysis/spectral_metrics.py",
+      "script": "analysis/compute_spectral_metrics.py"
+    }
+  },
+  "conversion_efficiency": {
+    "metric": "conversion_efficiency",
+    "eta_intra": 0.20508363724623144,
+    "eta": null,
+    "eta_reason": "the input spectrum is pump-normalised (|a_0|^2 == 1), so the absolute intracavity power scale <|E|^2> was normalised away; the absolute out-coupled comb power (hence eta) cannot be recovered without an absolute-power anchor (an un-normalised spectrum, or mean_intracavity_energy_j). eta_intra is still reported.",
+    "definitions": {
+      "eta_intra": "Intracavity comb fraction eta_intra = sum_{mu != 0} P_mu / sum_mu P_mu: the fraction of the CYCLE-AVERAGED intracavity power carried by comb lines other than the pump mode (mu = 0). The pump line is identified from the simulation's mode indexing (mu = 0), never as 'the strongest line'. Input P_mu is the cycle-averaged LINEAR power spectrum <|a_mu|^2>: the average is taken on |a_mu|^2 per breather-phase snapshot BEFORE this ratio is formed, so eta_intra is a RATIO OF AVERAGES, never an average of per-snapshot ratios. The only excluded line is the pump itself -- no envelope/threshold/dB-cutoff mask is applied (numerical-floor lines contribute negligibly to the linear power sum). LIMITATIONS: single-point estimate at one detuning, breather-cycle-averaged; the entire pump line (residual pump + the soliton's own mu = 0 component) is conservatively assigned to 'pump', so the soliton's share is undercounted; eta_intra is an INTRACAVITY quantity and is NOT comparable to experimentally quoted (bus-waveguide) conversion efficiencies.",
+      "eta": "Pump-to-comb conversion efficiency eta = P_comb,out / P_in: the fraction of on-chip pump power P_in that emerges in the bus waveguide as non-pump comb light. Intracavity->bus derivation in the repo's LLE normalization (simulator/lle_solver.py): the fast-time field E(tau) has intracavity energy U_int = sum_tau |E|^2 (t_r/n_tau) [J] and mean <|E|^2> = U_int/t_r = (1/n_tau^2) sum_mu P_mu for P_mu = |fftshift(fft(E))_mu|^2 (Parseval, numpy FFT). The solver's intrinsic-loss power is P_abs = kappa_i <|E|^2>, so by the same rate*energy relation each mode radiates P_out,mu = kappa_c W_mu into the bus, with W_mu = P_mu / n_tau^2 the per-mode share of <|E|^2> and kappa_c = kappa_ext the external out-coupling rate (this device is over-coupled, kappa_c ~ 4 kappa_i). A non-pump mode has no input field to interfere with, so P_comb,out = kappa_c sum_{mu != 0} W_mu = (kappa_c/n_tau^2) sum_{mu != 0} P_mu and eta = kappa_c sum_{mu != 0} P_mu / (n_tau^2 P_in) = kappa_c eta_intra <|E|^2> / P_in. Requires an ABSOLUTE (not pump-normalized) cycle-averaged spectrum plus kappa_c and P_in from the run config; returns None with a logged explanation otherwise (never guesses). LIMITATIONS: single-point estimate at one detuning, breather-cycle-averaged; the pump line (residual pump + soliton mu = 0 component) is conservatively assigned entirely to 'pump' and excluded from P_comb,out. Unlike eta_intra, eta is (approximately) comparable to experimentally quoted conversion efficiencies."
+    },
+    "params": {
+      "pump_mu": 0,
+      "kappa_c_rad_per_s": 121500000.0,
+      "kappa_c_source": "config (kappa_c_rad_per_s = kappa_ext)",
+      "pin_w": 0.214,
+      "pin_source": "run pump power PIN_W (== config pin_w)",
+      "n_tau_fft": 16384,
+      "spectrum_pump_normalized": true,
+      "mean_intracavity_energy_j": null,
+      "pump_power_arb": 1.0,
+      "comb_power_sum_arb": 0.2579939813237404,
+      "total_power_sum_arb": 1.2579939813237404
+    },
+    "units": {
+      "eta_intra": "dimensionless (intracavity power fraction)",
+      "eta": "dimensionless (bus-waveguide power fraction)",
+      "kappa_c_rad_per_s": "rad/s",
+      "pin_w": "W",
+      "mean_intracavity_energy_j": "J (repo LLE normalization; null if unknown)",
+      "pump_power_arb": "arbitrary (pump-normalised spectrum units)",
+      "comb_power_sum_arb": "arbitrary (pump-normalised spectrum units)",
+      "total_power_sum_arb": "arbitrary (pump-normalised spectrum units)"
+    },
+    "provenance": {
+      "input_file": "analysis/results/dks_single_soliton_spectrum.npz",
+      "input_sha256": "4642784da2856257617359880a94fa3c368fe65977903d0fffa3ba6a57af9b8e",
+      "config_file": "sin_params.yaml",
+      "config_sha256": "c5adc61ccb056ce6061455586622fccb92771ddbab473701f77de0a735f04d61",
+      "run_id": {
+        "n_rt_averaged": 304,
+        "breathing_period_rt": 154.0,
+        "breathing_relstd": 0.04090545738813848
+      },
+      "fsr_hz": 24451641068.182365,
+      "fsr_source": "measured dispersion (attach_dispersion) ",
+      "n_tau": 16384,
+      "generated_utc": "2026-07-09T03:37:55.207789+00:00",
       "module": "analysis/spectral_metrics.py",
       "script": "analysis/compute_spectral_metrics.py"
     }
