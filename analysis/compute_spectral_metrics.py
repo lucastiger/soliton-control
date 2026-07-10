@@ -114,8 +114,8 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--spectrum", type=Path,
                     default=RESULTS_DIR / SPECTRUM_NPZ,
-                    help="cycle-averaged spectrum npz (default: committed run)")
-    ap.add_argument("--delta-omega-over-kappa", type=float, default=8.0,
+                    help="single-snapshot spectrum npz (default: committed run)")
+    ap.add_argument("--delta-omega-over-kappa", type=float, default=10.0,
                     help="operating detuning [kappa] (annotation only)")
     ap.add_argument("--floor-db", type=float, default=60.0)
     ap.add_argument("--interp-factor", type=int, default=10)
