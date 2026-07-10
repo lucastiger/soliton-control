@@ -728,7 +728,7 @@ def access_by_seeding(delta_omega, cav, *, t_slow=None, seed=0, n_tau=N_TAU,
 # Access protocol (a): forward tune through MI -> backward tune / pump kick
 # ---------------------------------------------------------------------------
 def access_by_forward_backward(
-    cav, *, dw_start=-1.0, dw_peak=9.0, dw_target=8.0,
+    cav, *, dw_start=-1.0, dw_peak=13.0, dw_target=10.0,
     t_forward=None, t_back=None, t_hold=None, seed=0, n_tau=N_TAU,
     pin=PIN_W, config_path=CONFIG_PATH,
 ):
