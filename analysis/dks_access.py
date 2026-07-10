@@ -1393,8 +1393,9 @@ def write_report(path: Path, cav, validated, fb, control, repro, emap,
 # ---------------------------------------------------------------------------
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--dw", type=float, default=8.0,
-                    help="validated-example detuning in units of kappa")
+    ap.add_argument("--dw", type=float, default=OPERATING_DW_KAPPA,
+                    help="production operating detuning in units of kappa "
+                         "(default 10; stationary DKS, past the ~9.3 Hopf edge)")
     ap.add_argument("--long-tau-th", type=float, default=5.0,
                     help="long-integration length in units of tau_th (>=5 for validation)")
     ap.add_argument("--map-tau-th", type=float, default=1.0,
