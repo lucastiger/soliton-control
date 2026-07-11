@@ -240,7 +240,12 @@ SOLITON_LABELS = (4, 5, LABEL_SINGLE_SOLITON)
 class SweepConfig:
     dw_start_kappa: float = 12.0     # seed / first hold (clean stationary DKS)
     dw_stop_kappa: float = 5.5       # ends just past the last annihilation edge
-    n_steps: int = 27                # detuning samples (0.25*kappa spacing)
+    # Detuning samples over the SAME range: 261 -> 0.025*kappa spacing, dense
+    # enough that the individual soliton plateaus and the N -> N-1 transitions
+    # resolve as a staircase (at the old 27-point / 0.25*kappa grid the whole
+    # annihilation cascade spanned ~3 edges and drew as one steep line). Every
+    # added point is a real warm-continued LLE hold -- no interpolation.
+    n_steps: int = 261
     settle_rt: int = 6000            # pre-settle at dw_start (seeds -> attractor)
     hold_rt: int = 2000              # round trips held per detuning step
     avg_frac: float = 0.25           # average the final fraction of each hold
@@ -767,7 +772,7 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
             "position_seed": int(cfg.position_seed),
             "position_jitter_frac": float(cfg.position_jitter_frac),
             "soliton_count_by_detuning_over_kappa": {
-                f"{float(d):.2f}": int(c) for d, c in zip(dwk, counts)},
+                f"{float(d):.3f}": int(c) for d, c in zip(dwk, counts)},
             "transitions": transitions,
             "matched_staircase_edges_over_kappa": [
                 _edge_mid(i) for i in matched],
