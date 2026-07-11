@@ -118,34 +118,38 @@
   "soliton_step": {
     "metric": "soliton_step",
     "metric_definition": "Soliton step: a discontinuity in the per-detuning averaged cavity power P(delta_omega) as the pump-cavity detuning is swept quasi-statically through the soliton existence range. For each detuning the observable is the power averaged over the FINAL avg_frac of a long constant-detuning hold (LINEAR power, never dB / never complex), which simultaneously discards the post-step transient and cycle-averages the deterministic breathing (the attractor is a limit cycle, so the instantaneous power oscillates). Step edges are the first-difference outliers of that trace: |diff(P)[i] - median(diff P)| > k * 1.4826 * MAD(diff P) (robust scale; conservative k). A step marks a soliton nucleation/annihilation boundary of the branch, at which the intracavity power (and hence the through-port transmission via P_trans = P_in - kappa_i * <|E|^2>) jumps discretely.",
-    "observable": "total intracavity power sum_mu |a_mu|^2 (normalised to the sweep maximum); transmitted power P_trans/P_in also stored in detuning_sweep.npz",
-    "sweep_direction": "decreasing detuning (delta_omega down) along the single-DKS branch to its lower-edge annihilation; the increasing direction gives no grid-converged step (the high-detuning collapse is an FFT-truncation artifact, non-convergent in n_tau)",
-    "n_detunings": 31,
-    "detuning_range_over_kappa": [
-      4.5,
-      12.0
-    ],
-    "single_dks_existence_region_over_kappa": [
-      6.25,
-      12.0
-    ],
-    "soliton_step": {
-      "annihilation_over_kappa": 6.125,
-      "note": "lower edge of the single-DKS existence region (label 6 + single temporal peak); the soliton is replaced by a comparable-energy MI comb, so the TOTAL power step here is small -- the step is primarily a state transition, also visible as the collapse of the breathing amplitude."
+    "protocol": "multi-soliton staircase: deterministic symmetry-broken N-soliton seed, warm-continuation down-sweep, sequential soliton annihilations (the transitions list records the actual per-edge count drops)",
+    "observable": {
+      "primary": "total intracavity power sum_mu |a_mu|^2 (the primary OBSERVABLE regardless of which trace is plotted first)",
+      "secondary": "pump-excluded comb power P_comb = sum_{mu != 0} |a_mu|^2, mean/std over the ~8-per-hold field snapshots inside the final-avg_frac window",
+      "note": "transmission P_trans/P_in also stored in detuning_sweep.npz"
     },
+    "sweep_direction": "decreasing detuning (delta_omega down) through the sequential annihilation cascade to the branch's lower edge; the increasing direction gives no grid-converged step (the high-detuning collapse is an FFT-truncation artifact, non-convergent in n_tau)",
+    "n_detunings": 27,
+    "detuning_range_over_kappa": [
+      5.5,
+      12.0
+    ],
+    "single_dks_existence_region_over_kappa": null,
     "power_trace_discontinuities": {
       "rule": "|diff(P)[i] - median(diff P)| > k * 1.4826 * MAD(diff P)",
+      "trace": "P_comb",
       "k": 6.0,
-      "robust_sigma": 0.012706293577352614,
+      "robust_sigma": 0.00874133253846398,
       "detected_over_kappa": [
-        4.625,
-        4.875
+        5.875,
+        6.125,
+        6.375
       ],
-      "interpretation": "at this operating point these fall on the near-resonance MI/CW power rise below the soliton branch, NOT on the soliton annihilation"
+      "coincides_with_soliton_count_transition": [
+        true,
+        false,
+        true
+      ]
     },
     "transmission_contrast": {
-      "T_min": 0.9902246178992132,
-      "T_max": 0.9982771053616016,
+      "T_min": 0.9933501200524919,
+      "T_max": 0.9958604095645225,
       "note": "near-unity: the cavity is nearly empty at these high detunings, so the through-port step is sub-percent"
     },
     "units": {
@@ -164,8 +168,8 @@
       "pin_w": 0.214,
       "sweep_config": {
         "dw_start_kappa": 12.0,
-        "dw_stop_kappa": 4.5,
-        "n_steps": 31,
+        "dw_stop_kappa": 5.5,
+        "n_steps": 27,
         "settle_rt": 6000,
         "hold_rt": 2000,
         "avg_frac": 0.25,
@@ -173,9 +177,111 @@
         "seed": 0,
         "pin_w": 0.214,
         "step_k": 6.0,
-        "smooth_display": 0
+        "smooth_display": 0,
+        "n_solitons": 5,
+        "position_seed": 1,
+        "position_jitter_frac": 0.25
       },
-      "generated_utc": "2026-07-09T06:00:37.051338+00:00"
+      "generated_utc": "2026-07-11T07:30:35.234452+00:00"
+    },
+    "staircase": {
+      "n_solitons_seeded": 5,
+      "position_seed": 1,
+      "position_jitter_frac": 0.25,
+      "soliton_count_by_detuning_over_kappa": {
+        "5.50": 0,
+        "5.75": 0,
+        "6.00": 1,
+        "6.25": 1,
+        "6.50": 2,
+        "6.75": 2,
+        "7.00": 1,
+        "7.25": 1,
+        "7.50": 3,
+        "7.75": 3,
+        "8.00": 3,
+        "8.25": 3,
+        "8.50": 5,
+        "8.75": 4,
+        "9.00": 5,
+        "9.25": 5,
+        "9.50": 5,
+        "9.75": 5,
+        "10.00": 5,
+        "10.25": 5,
+        "10.50": 5,
+        "10.75": 5,
+        "11.00": 5,
+        "11.25": 5,
+        "11.50": 5,
+        "11.75": 5,
+        "12.00": 5
+      },
+      "transitions": [
+        {
+          "edge_over_kappa": 5.875,
+          "from_count": 1,
+          "to_count": 0
+        },
+        {
+          "edge_over_kappa": 6.375,
+          "from_count": 2,
+          "to_count": 1
+        },
+        {
+          "edge_over_kappa": 7.375,
+          "from_count": 3,
+          "to_count": 1
+        },
+        {
+          "edge_over_kappa": 8.375,
+          "from_count": 5,
+          "to_count": 3
+        },
+        {
+          "edge_over_kappa": 8.875,
+          "from_count": 5,
+          "to_count": 4
+        }
+      ],
+      "matched_staircase_edges_over_kappa": [
+        6.375,
+        7.375,
+        8.375,
+        8.875
+      ],
+      "final_1_to_0_over_kappa": 5.875,
+      "honesty_note": "the final 1->0 annihilation remains power-muted (comparable-energy MI comb) and MUST NOT be forced to register as a power step; it is expected to appear as a soliton_count 1->0 transition without a matched power discontinuity. The N->N-1 transitions above it are the staircase. No smoothing, no detector changes, no re-thresholding.",
+      "soliton_count_gate": "n_peaks if (np_label in SOLITON_LABELS = (4, 5, 6)) OR (finite field AND n_peaks >= 1 AND contrast >= the labeler's soliton contrast floor contrast_high = 8) else 0. The taxonomy gate alone empirically zeroes genuine multi-soliton holds: the labeler's spectral-entropy chaos gate misroutes bright N-soliton combs to class 3 (see the driver docstring). CAVEAT: n_peaks is the end-of-hold snapshot count at 50% of the max peak, so in the deep-breathing sub-band -- where pulse amplitudes desynchronize -- soliton_count UNDERCOUNTS even though all pulses persist; P_comb and peak_positions_rad are the reliable per-hold records there. Reported, not patched."
+    },
+    "primary_observable_decision": {
+      "rule": "P_comb is adopted as the PLOTTED primary ONLY if its matched-step contrast (min matched |step_dy| / MAD of dy) is strictly higher than total intracavity power's. Steps are the unchanged detect_power_steps detections on each normalised trace; a detection is matched when its edge coincides with a soliton_count transition edge (the power-muted final ->0 annihilation is excluded); a trace with no matched detection has contrast 0. Decided from the regenerated data.",
+      "matched_step_contrast_P_intra": 0.0,
+      "matched_step_contrast_P_comb": 58.65966550043529,
+      "mad_dy_P_intra": 0.010770299344590006,
+      "mad_dy_P_comb": 0.0058959480227060435,
+      "matched_step_dy_P_intra": [],
+      "matched_step_dy_P_comb": [
+        0.34585433881988936
+      ],
+      "detected_steps_P_intra_over_kappa": [
+        6.125
+      ],
+      "detected_steps_P_comb_over_kappa": [
+        5.875,
+        6.125,
+        6.375
+      ],
+      "matched_detected_P_intra_over_kappa": [],
+      "matched_detected_P_comb_over_kappa": [
+        6.375
+      ],
+      "plotted_primary": "P_comb",
+      "second_panel": "P_intra"
+    },
+    "soliton_step": {
+      "annihilation_over_kappa": null,
+      "note": "lower edge of the single-DKS existence region (label 6 + single temporal peak). The 1->0 event here is power-muted (the last soliton is replaced by a comparable-energy MI comb) -- it registers as a soliton_count transition, not as a power step."
     }
   }
 }
