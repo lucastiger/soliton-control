@@ -524,6 +524,86 @@ def cycle_averaged_spectrum(res: dict, cav: CavityParams, *, n_rt: int = None,
     return sp
 
 
+def stationary_snapshot_spectrum(res, cav, *, n_check_rt=400, pin=PIN_W,
+                                 config_path=CONFIG_PATH, **solver_kwargs):
+    """Single-snapshot spectrum of a SETTLED STATIONARY soliton + stability
+    diagnostics. Continues res["e_final"] (warm field + thermal state) for
+    n_check_rt round trips at snapshot_interval=1, then:
+      - spectrum = optical_spectrum(final snapshot)  (phase-independent for a
+        stationary attractor);
+      - energy_rel_std = std/mean of U_int over the continuation;
+      - spectrum_max_dev_db = max over the continuation of the per-mode dB
+        deviation of each RT's snapshot spectrum from the mean, restricted to
+        modes above a -200 dB visibility floor (temporal stability of the
+        comb);
+      - v6 = breathing_metrics(U_int continuation) — must report is_breather
+        False with autocorr peak < V6_MIN_AC_PEAK;
+      - centroid_drift_modes = |mode-power centroid(last) - centroid(first)|.
+    Returns a spectrum dict (same schema as optical_spectrum) plus keys
+    n_rt_checked, energy_rel_std, spectrum_max_dev_db, is_breather,
+    breathing_relstd, centroid_drift_modes, e_final. Reuse the _run(...,
+    snapshot_interval=1) continuation exactly as cycle_averaged_spectrum does,
+    but take the FINAL snapshot's spectrum instead of the mean.
+    """
+    e0 = np.asarray(res["e_final"])
+    n_tau = int(e0.shape[0])
+    n_rt = int(n_check_rt)
+    sol = _run(res["delta_omega"], n_rt, cav, e0=e0,
+               delta_t0=res.get("delta_t_final"), seed=res.get("seed", 0),
+               n_tau=n_tau, pin=pin, snapshot_interval=1,
+               config_path=config_path, **solver_kwargs)
+    snaps = np.asarray(sol["E_snapshots"])[0]
+    assert snaps.shape == (n_rt, n_tau), snaps.shape
+    e_final = np.asarray(sol["e_final"])[0]
+
+    # Spectrum from the FINAL snapshot. For a stationary attractor the field is
+    # fixed (up to a global phase that |fft|^2 discards), so the single snapshot
+    # is representative — no cycle-averaging needed (contrast breathers, whose
+    # every snapshot spectrum is breathing-phase-dependent).
+    sp = optical_spectrum(e_final, cav)
+
+    # Per-RT snapshot power spectra for the temporal-stability diagnostics.
+    powers = np.abs(
+        np.fft.fftshift(np.fft.fft(snaps, axis=-1), axes=-1)) ** 2   # (n_rt, n_tau)
+    mean_power = powers.mean(axis=0)
+
+    # Energy stability: rel-std of U_int over the continuation.
+    u_int = np.asarray(sol["U_int_history"])[0]
+    energy_rel_std = float(np.std(u_int) / max(np.mean(u_int), 1e-300))
+
+    # Temporal stability of the comb: max per-mode dB deviation of any RT's
+    # snapshot spectrum from the mean, over modes above a -200 dB visibility
+    # floor (dim/dealiased modes have meaningless dB and are excluded).
+    mean_norm_db = 10.0 * np.log10(
+        np.maximum(mean_power / max(mean_power.max(), 1e-300), 1e-36))
+    visible = mean_norm_db > -200.0
+    rt_db = 10.0 * np.log10(np.maximum(powers, 1e-300))
+    mean_db = 10.0 * np.log10(np.maximum(mean_power, 1e-300))
+    dev_db = np.abs(rt_db - mean_db[None, :])
+    spectrum_max_dev_db = (
+        float(dev_db[:, visible].max()) if bool(visible.any()) else 0.0)
+
+    # V6 breather-vs-stationary on the U_int continuation. A settled stationary
+    # DKS has no genuine periodicity: is_breather is False and the autocorr peak
+    # stays below V6_MIN_AC_PEAK (so breathing_period_rt is NaN).
+    v6 = breathing_metrics(u_int)
+
+    # Comb centroid drift (mode-power centroid, first vs last snapshot).
+    mu = np.arange(n_tau) - n_tau // 2
+    def _centroid(pw):
+        return float(np.sum(mu * pw) / max(np.sum(pw), 1e-300))
+    centroid_drift_modes = abs(_centroid(powers[-1]) - _centroid(powers[0]))
+
+    sp["n_rt_checked"] = n_rt
+    sp["energy_rel_std"] = energy_rel_std
+    sp["spectrum_max_dev_db"] = spectrum_max_dev_db
+    sp["is_breather"] = bool(v6["is_breather"])
+    sp["breathing_relstd"] = float(v6["breathing_relstd"])
+    sp["centroid_drift_modes"] = float(centroid_drift_modes)
+    sp["e_final"] = e_final
+    return sp
+
+
 def _measured_dint_native(csv_path=None):
     """Native (mu, D_int, D1, f0) from the CSV in the soliton-rest gauge.
 
@@ -1043,9 +1123,13 @@ def plot_optical_spectrum(path: Path, e_field, cav, delta_omega, *,
     if sp is None:
         sp = optical_spectrum(e_field, cav)
         main_label = f"n_tau={e_field.shape[0]} (resolved band)"
-    else:
+    elif "n_rt_averaged" in sp:
         main_label = (f"n_tau={sp['mu'].size}, cycle-averaged over "
-                      f"{sp.get('n_rt_averaged', '?')} RT")
+                      f"{sp['n_rt_averaged']} RT")
+    else:
+        main_label = (f"n_tau={sp['mu'].size}, single snapshot "
+                      f"(stationarity-checked over "
+                      f"{sp.get('n_rt_checked', '?')} RT)")
     fig, ax = plt.subplots(figsize=(9, 5.2))
     # sort by wavelength for a clean line
     order = np.argsort(sp["wavelength_nm"])
@@ -1136,8 +1220,10 @@ def plot_soliton_summary(path: Path, res, cav, *, sp=None, title_extra=""):
     comb_note = ""
     if sp is None:
         sp = optical_spectrum(e, cav)
+    elif "n_rt_averaged" in sp:
+        comb_note = f", cycle-avg {sp['n_rt_averaged']} RT"
     else:
-        comb_note = f", cycle-avg {sp.get('n_rt_averaged', '?')} RT"
+        comb_note = f", single snapshot ({sp.get('n_rt_checked', '?')} RT check)"
     order = np.argsort(sp["mu"])
     axes[1].plot(sp["mu"][order], sp["power_db"][order], "-", lw=0.8, color="tab:blue")
     axes[1].set_xlabel("cavity mode index $\\mu$")
