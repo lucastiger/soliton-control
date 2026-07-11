@@ -1,6 +1,6 @@
 {
   "script": "scripts/regenerate_dks_artifacts.py",
-  "generated_unix_time": 1783471265,
+  "generated_unix_time": 1783737609,
   "pin_w": 0.214,
   "numerics": {
     "n_substeps": 4,
@@ -9,13 +9,10 @@
     "dispersion_validity_mask": false
   },
   "settle": {
-    "dw_kappa": 8.0,
+    "dw_kappa": 10.0,
     "n_tau": 16384,
     "t_slow_rt": 12000,
     "seed": 0
-  },
-  "cycle_average": {
-    "n_rt": 304
   },
   "scan": {
     "dw_kappa_lo": 7.0,
@@ -27,24 +24,24 @@
   },
   "measured": {
     "is_single": true,
-    "stationarity": "breather",
-    "breathing_period_rt": 154.0,
-    "breathing_relstd": 0.04090545738813848,
-    "red_tail_slope_db_per_mode": -0.041530376076792656,
-    "db_at_1800nm": -77.00294458208117,
-    "db_at_2000nm": -102.67780020256882,
+    "stationarity": "stationary",
+    "breathing_period_rt": NaN,
+    "breathing_relstd": 4.331144637478199e-06,
+    "red_tail_slope_db_per_mode": -0.048318574445598644,
+    "db_at_1800nm": -77.64858852255111,
+    "db_at_2000nm": -108.89070547349652,
     "dispersive_waves": [
       {
         "wavelength_nm": 2528.885539426114,
-        "power_db": -88.6420092355725,
-        "prominence_db": 81.68465660997303,
+        "power_db": -100.26465970043988,
+        "prominence_db": 77.81257226492615,
         "mu": -3069
       },
       {
-        "wavelength_nm": 1096.3401082025505,
-        "power_db": -91.72683028798362,
-        "prominence_db": 75.74884045808348,
-        "mu": 3266
+        "wavelength_nm": 1095.2627909111154,
+        "power_db": -102.5102196373874,
+        "prominence_db": 75.25505086084524,
+        "mu": 3277
       }
     ]
   },
@@ -215,5 +212,10 @@
         "breathing_relstd": 1.5857151413031612e-06
       }
     ]
+  },
+  "stationarity_check": {
+    "n_rt": 304,
+    "energy_rel_std": 7.806497388268648e-06,
+    "spectrum_max_dev_db": 0.003966700173037907
   }
 }

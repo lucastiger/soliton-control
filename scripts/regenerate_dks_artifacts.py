@@ -12,21 +12,24 @@ only to run cheaper debug variants; the committed artifacts use the defaults).
 
 Stages
 ------
-1. SETTLE   Seeded single-DKS run at DW_KAPPA = 8 kappa, pin = 0.214 W,
+1. SETTLE   Seeded single-DKS run at DW_KAPPA = OPERATING_DW_KAPPA, pin = 0.214 W,
             n_tau = 16384, 12000 round trips, seed 0, production numerics
             (float64, n_substeps = 4, 2/3 dealias ON, edge absorber ON,
             dispersion-validity mask OFF).
-2. V6       Stationarity check on the U_int history. At 8 kappa the attractor
-            is a deterministic BREATHER (controlled A/B: period ~152-153 RT,
-            dU/U ~4.1%), so the script aborts if V6 does NOT report a breather
-            (that would mean the committed annotation is stale).
-3. AVERAGE  Cycle-averaged spectrum: continue the settled trajectory for
-            CYCLE_AVG_RT = 304 RT (>= 2 breathing periods), accumulating
-            |fftshift(fft(E))|^2 every round trip. Regenerates
-            dks_single_soliton_spectrum.png and dks_single_soliton_summary.png
-            from the MEAN spectrum, title-annotated with the measured breather
-            period / rel-std. Snapshot spectra of a breather are
-            breathing-phase-dependent and must not be committed.
+2. V6       Stationarity check on the U_int history. At the production operating
+            point (OPERATING_DW_KAPPA) the attractor is a STATIONARY single DKS,
+            so the script aborts if V6 reports a breather or dU/U >=
+            STATIONARY_RELSTD (0.1%) — the committed spectrum artifacts require a
+            settled stationary state (if intentionally running the breather
+            point, use cycle_averaged_spectrum instead).
+3. SNAPSHOT Stationary single-snapshot spectrum: continue the settled trajectory
+            for CHECK_RT round trips at snapshot_interval = 1 and take the FINAL
+            snapshot's spectrum (phase-independent for a stationary attractor).
+            The continuation also yields the stability diagnostics
+            (energy_rel_std, spectrum_max_dev_db, V6 is_breather, centroid
+            drift); the script aborts unless energy_rel_std < STATIONARY_RELSTD
+            and V6 is non-breathing. Regenerates dks_single_soliton_spectrum.png
+            and dks_single_soliton_summary.png with a "single snapshot" label.
 4. SCAN     Breathing scan delta_omega = 7..16 kappa (0.5 steps, 4000 RT,
             n_tau = 8192, production numerics): writes
             dks_breathing_scan.csv / .png and merges the V6 breathing columns
@@ -60,16 +63,16 @@ from analysis.dks_access import (  # noqa: E402  (needs the sys.path insert)
     PIN_W,
     PRODUCTION_NUMERICS,
     RESULTS_DIR,
+    STATIONARY_RELSTD,
     access_by_seeding,
     attach_dispersion,
-    breather_title_annotation,
     breathing_scan,
-    cycle_averaged_spectrum,
     dispersive_wave_peaks,
     load_cavity_params,
     plot_breathing_scan,
     plot_optical_spectrum,
     plot_soliton_summary,
+    stationary_snapshot_spectrum,
     write_breathing_csv,
 )
 
@@ -78,7 +81,10 @@ DW_KAPPA = OPERATING_DW_KAPPA   # production operating detuning [kappa] (authori
 SETTLE_N_TAU = 16384      # resolves both DW crossings (|mu| ~ 3000-3300)
 SETTLE_RT = 12_000        # ~0.1 tau_th: seed fully relaxed onto the attractor
 SETTLE_SEED = 0
-CYCLE_AVG_RT = CYCLE_AVG_RT_8KAPPA   # 304 RT >= 2*T_b (T_b ~ 152-153 RT)
+# Stage-3 stationarity-check continuation length. 304 RT (>> the 200 RT V6 needs
+# for a reliable breather/stationary readout) is ample for a settled DKS; reuses
+# the validated CYCLE_AVG_RT_8KAPPA number of round trips.
+CHECK_RT = CYCLE_AVG_RT_8KAPPA
 
 SCAN_DW_LO, SCAN_DW_HI, SCAN_DW_STEP = 7.0, 16.0, 0.5   # [kappa]
 SCAN_RT = 4000
@@ -88,7 +94,7 @@ SCAN_SEED = 0
 # dealias_two_thirds=True, edge_absorber=True, dispersion_validity_mask=False.
 
 SPECTRUM_PNG = "dks_single_soliton_spectrum.png"
-SPECTRUM_NPZ = "dks_single_soliton_spectrum.npz"   # raw cycle-averaged data
+SPECTRUM_NPZ = "dks_single_soliton_spectrum.npz"   # raw single-snapshot data
 SUMMARY_PNG = "dks_single_soliton_summary.png"
 SCAN_CSV = "dks_breathing_scan.csv"
 SCAN_PNG = "dks_breathing_scan.png"
@@ -139,7 +145,11 @@ def main() -> None:
                     help="skip stage 4 (breathing scan + existence-map merge)")
     ap.add_argument("--n-tau", type=int, default=SETTLE_N_TAU)
     ap.add_argument("--settle-rt", type=int, default=SETTLE_RT)
-    ap.add_argument("--avg-rt", type=int, default=CYCLE_AVG_RT)
+    ap.add_argument("--check-rt", dest="check_rt", type=int, default=CHECK_RT,
+                    help="round trips for the stage-3 stationarity check")
+    # Back-compat hidden alias for --check-rt (formerly the cycle-average length).
+    ap.add_argument("--avg-rt", dest="check_rt", type=int,
+                    default=argparse.SUPPRESS, help=argparse.SUPPRESS)
     ap.add_argument("--scan-rt", type=int, default=SCAN_RT)
     ap.add_argument("--scan-n-tau", type=int, default=SCAN_N_TAU)
     args = ap.parse_args()
@@ -159,11 +169,13 @@ def main() -> None:
         "numerics": dict(PRODUCTION_NUMERICS),
         "settle": {"dw_kappa": DW_KAPPA, "n_tau": args.n_tau,
                    "t_slow_rt": args.settle_rt, "seed": SETTLE_SEED},
-        "cycle_average": {"n_rt": args.avg_rt},
         "scan": {"dw_kappa_lo": SCAN_DW_LO, "dw_kappa_hi": SCAN_DW_HI,
                  "dw_kappa_step": SCAN_DW_STEP, "t_slow_rt": args.scan_rt,
                  "n_tau": args.scan_n_tau, "seed": SCAN_SEED},
     })
+    # The forced-breather cycle-average block was renamed to "stationarity_check";
+    # drop the stale key when updating a provenance file from the old path.
+    provenance.pop("cycle_average", None)
 
     if not args.skip_settle:
         print(f"[regen] stage 1 SETTLE: dw = {DW_KAPPA} kappa, "
@@ -181,27 +193,43 @@ def main() -> None:
         print(f"[regen] stage 2 V6: stationarity = {m['stationarity']}, "
               f"T_b = {m['breathing_period_rt']:.1f} RT, "
               f"dU/U = {m['breathing_relstd']:.2%}")
-        assert m["is_breather"], (
-            "V6 no longer reports a breather at 8 kappa — the committed "
-            "breather annotations would be stale. Investigate before "
-            "regenerating."
-        )
-        title_extra = breather_title_annotation(m)
+        assert not m["is_breather"] and m["breathing_relstd"] < STATIONARY_RELSTD, (
+            f"expected a stationary DKS at {DW_KAPPA}κ but V6 reports "
+            f"is_breather={m['is_breather']}, dU/U={m['breathing_relstd']:.3%} "
+            f">= {STATIONARY_RELSTD:.1%}. If intentionally running the breather "
+            f"point, use cycle_averaged_spectrum instead.")
+        title_extra = ""   # stationary DKS: no breather annotation
 
-        print(f"[regen] stage 3 AVERAGE: {args.avg_rt} RT cycle average ...")
-        sp = cycle_averaged_spectrum(res, cav, n_rt=args.avg_rt, pin=PIN_W,
-                                     **PRODUCTION_NUMERICS)
+        print(f"[regen] stage 3 SNAPSHOT: stationary single snapshot, "
+              f"{args.check_rt} RT stationarity check ...")
+        sp = stationary_snapshot_spectrum(res, cav, n_check_rt=args.check_rt,
+                                          pin=PIN_W, **PRODUCTION_NUMERICS)
+        assert sp["energy_rel_std"] < STATIONARY_RELSTD, (
+            f"stage-3 continuation is not stationary: energy_rel_std = "
+            f"{sp['energy_rel_std']:.3%} >= {STATIONARY_RELSTD:.1%} "
+            f"(spectrum_max_dev_db = {sp['spectrum_max_dev_db']:.2f} dB).")
+        assert not sp["is_breather"], (
+            f"stage-3 continuation V6 reports a breather (dU/U = "
+            f"{sp['breathing_relstd']:.3%}); expected a stationary DKS.")
+        print(f"[regen] stationarity: energy_rel_std = {sp['energy_rel_std']:.4%}, "
+              f"spectrum_max_dev = {sp['spectrum_max_dev_db']:.2f} dB, "
+              f"centroid_drift = {sp['centroid_drift_modes']:.3f} modes")
         np.savez_compressed(
             RESULTS_DIR / SPECTRUM_NPZ, mu=sp["mu"],
             wavelength_nm=sp["wavelength_nm"], power_db=sp["power_db"],
-            power_norm=sp["power_norm"], n_rt_averaged=sp["n_rt_averaged"],
-            breathing_period_rt=m["breathing_period_rt"],
-            breathing_relstd=m["breathing_relstd"],
+            power_norm=sp["power_norm"], n_rt_checked=sp["n_rt_checked"],
+            energy_rel_std=sp["energy_rel_std"],
+            spectrum_max_dev_db=sp["spectrum_max_dev_db"],
         )
         plot_optical_spectrum(RESULTS_DIR / SPECTRUM_PNG, res["e_final"], cav,
                               dw, sp=sp, title_extra=title_extra)
         plot_soliton_summary(RESULTS_DIR / SUMMARY_PNG, res, cav, sp=sp,
                              title_extra=title_extra)
+        provenance["stationarity_check"] = {
+            "n_rt": args.check_rt,
+            "energy_rel_std": sp["energy_rel_std"],
+            "spectrum_max_dev_db": sp["spectrum_max_dev_db"],
+        }
 
         dws = dispersive_wave_peaks(sp, dw)
         lam = np.asarray(sp["wavelength_nm"])
@@ -214,7 +242,7 @@ def main() -> None:
         slope = float(np.polyfit(np.abs(mu[sel]).astype(float), db[sel], 1)[0])
         provenance["measured"] = {
             "is_single": bool(res["is_single"]),
-            "stationarity": m["stationarity"],
+            "stationarity": "stationary",
             "breathing_period_rt": m["breathing_period_rt"],
             "breathing_relstd": m["breathing_relstd"],
             "red_tail_slope_db_per_mode": slope,
