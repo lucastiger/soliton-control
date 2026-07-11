@@ -56,6 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
 
 from analysis.dks_access import (  # noqa: E402  (needs the sys.path insert)
     CYCLE_AVG_RT_8KAPPA,
+    OPERATING_DW_KAPPA,
     PIN_W,
     PRODUCTION_NUMERICS,
     RESULTS_DIR,
@@ -73,7 +74,7 @@ from analysis.dks_access import (  # noqa: E402  (needs the sys.path insert)
 )
 
 # --- Committed artifact parameters (the audit record) -----------------------
-DW_KAPPA = 8.0            # validated operating detuning [kappa]
+DW_KAPPA = OPERATING_DW_KAPPA   # production operating detuning [kappa] (authoritative)
 SETTLE_N_TAU = 16384      # resolves both DW crossings (|mu| ~ 3000-3300)
 SETTLE_RT = 12_000        # ~0.1 tau_th: seed fully relaxed onto the attractor
 SETTLE_SEED = 0

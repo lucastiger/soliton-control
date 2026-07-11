@@ -1,16 +1,21 @@
-"""Cycle-averaged spectral metrics for the validated single-DKS comb.
+"""Spectral metrics for the validated single-DKS comb.
 
-This module operates on the CYCLE-AVERAGED optical power spectrum of the
-dissipative-Kerr-soliton (DKS) state produced by ``analysis.dks_access``.  At
-the validated operating point (delta_omega = 8 kappa) the attractor is a
-deterministic BREATHER, so a single-snapshot spectrum is breathing-phase
-dependent and is NOT a reproducible observable.  The physically meaningful
-input for every metric here is therefore the spectrum obtained by averaging
-``|a_mu|**2`` (LINEAR power, one value per resonator mode ``mu``) over an
-integer number of breathing periods -- e.g. the mean produced by
-``analysis.dks_access.cycle_averaged_spectrum``.  All public metrics take such
-a precomputed averaged spectrum as their primary input; the sole convenience
-wrapper that starts from a solver trajectory
+This module operates on the optical power spectrum ``|a_mu|**2`` (LINEAR power,
+one value per resonator mode ``mu``) of the dissipative-Kerr-soliton (DKS) state
+produced by ``analysis.dks_access``.  At the PRODUCTION operating point
+(delta_omega = 10 kappa, past the ~9.3-9.4 kappa Hopf boundary) the attractor is
+a STATIONARY single soliton, so the committed spectrum artifacts are single
+snapshots -- a reproducible observable in their own right, not cycle-averages.
+
+At the historically A/B-validated point delta_omega = 8 kappa the attractor is
+instead a deterministic BREATHER (period T_b ~ 152-153 RT, dU/U ~4.1%), so there
+a single-snapshot spectrum is breathing-phase dependent and NOT a reproducible
+observable; a deliberate 8-kappa run must instead supply the breathing-cycle-
+averaged spectrum from ``analysis.dks_access.cycle_averaged_spectrum`` (that
+function, and ``breathing_metrics`` / ``breathing_scan``, remain valid for
+characterising the breather sub-band).  All public metrics take such a
+precomputed spectrum (single snapshot or cycle-average) as their primary input;
+the sole convenience wrapper that starts from a solver trajectory
 (:func:`average_power_spectrum`) performs its averaging in linear power, never
 in dB and never on complex fields.
 
