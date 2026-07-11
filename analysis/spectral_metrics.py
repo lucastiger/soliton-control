@@ -1161,16 +1161,22 @@ def plot_soliton_steps(detuning_kappa, power, path, *, power_std=None,
                        annihilation_kappa=None, steps=None, metadata=None,
                        observable_label=r"intracavity power  $\sum_\mu |a_\mu|^2$ "
                                          r"(norm.)",
+                       second_panel_ylabel="norm. transmission",
+                       second_panel_legend=("through-port power "
+                                            "$P_\\mathrm{trans}/P_\\mathrm{in}$"),
                        smooth_window: int = 0, dpi: int = 300, also_pdf: bool = True):
-    """Publication figure of the single-DKS branch power vs pump-cavity detuning.
+    """Publication figure of the soliton-branch power vs pump-cavity detuning.
 
     ``detuning_kappa`` is the swept detuning in units of kappa (the repo's native
     plotting unit) and ``power`` is the per-detuning averaged cavity power -- the
     primary trace, plotted RAW.  ``power_std`` (optional) draws the per-step
     breathing-amplitude error bars (they are large on the breather sub-band of the
     soliton branch and collapse when the soliton annihilates, a visual marker of
-    the step).  ``transmission`` (optional, normalised through-port power) adds a
-    second panel with the detector-matched observable.
+    the step).  ``transmission`` (optional) adds a second panel; by default it is
+    labelled as the normalised through-port power, but callers may relabel it via
+    ``second_panel_ylabel`` / ``second_panel_legend`` to plot any secondary
+    observable there (e.g. the pump-excluded comb power of the multi-soliton
+    staircase driver).
 
     Region markers:
 
@@ -1257,8 +1263,8 @@ def plot_soliton_steps(detuning_kappa, power, path, *, power_std=None,
     if two_panel:
         _draw_regions(axt, soliton_region, annihilation_kappa, steps, label=False)
         axt.plot(dwk, T, "s-", ms=3.0, lw=1.0, color="tab:purple", zorder=4,
-                 label="through-port power $P_\\mathrm{trans}/P_\\mathrm{in}$")
-        axt.set_ylabel("norm. transmission")
+                 label=second_panel_legend)
+        axt.set_ylabel(second_panel_ylabel)
         axt.grid(alpha=0.25)
         axt.legend(fontsize=8, loc="lower left")
         axt.set_xlabel(r"pump-cavity detuning  $\delta\omega/\kappa$")

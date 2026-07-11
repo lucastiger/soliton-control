@@ -25,6 +25,7 @@ import pytest
 
 from analysis.dks_access import (
     C_LIGHT,
+    SEED_MIN_SEPARATION_WIDTHS,
     access_by_seeding,
     count_temporal_peaks,
     existence_map,
@@ -34,6 +35,7 @@ from analysis.dks_access import (
     sech2_envelope_correlation,
     sech_soliton_seed,
     soliton_metrics,
+    temporal_peak_positions,
     _run,
 )
 
@@ -61,6 +63,102 @@ def test_seed_amplitude_and_width(cav):
     b2 = 2.0 * dw / cav.gamma
     assert abs(peak_over_bg - b2) / b2 < 0.05
     assert count_temporal_peaks(seed) == 1
+
+
+def _synthetic_multi_sech(n_tau, angles_rad, *, width_rad=0.02, bg=0.05):
+    """Synthetic |E|-like field: flat background + unit sech pulses at angles."""
+    theta = 2.0 * np.pi * np.arange(n_tau) / n_tau
+    field = np.full(n_tau, bg, dtype=np.complex128)
+    for a in angles_rad:
+        d = np.angle(np.exp(1j * (theta - a)))   # wrapped to [-pi, pi)
+        field += 1.0 / np.cosh(d / width_rad)
+    return field
+
+
+def test_temporal_peak_positions_recovers_multi_sech_angles():
+    n = 4096
+    angles = np.array([0.7, 2.9, 5.3])
+    f = _synthetic_multi_sech(n, angles)
+    pos = temporal_peak_positions(f)
+    assert pos.size == 3
+    assert count_temporal_peaks(f) == 3
+    assert np.all(np.diff(pos) > 0)             # sorted ascending
+    assert np.allclose(pos, angles, atol=1.5 * 2.0 * np.pi / n)
+
+
+def test_temporal_peak_positions_wraps_at_zero():
+    """A peak straddling theta = 0 is found once, at ~0 (circular wrap)."""
+    n = 2048
+    angles = np.array([0.0, np.pi])
+    pos = temporal_peak_positions(_synthetic_multi_sech(n, angles))
+    assert pos.size == 2
+    tol = 1.5 * 2.0 * np.pi / n
+    assert min(pos[0], 2.0 * np.pi - pos[0]) < tol      # near 0 (mod 2*pi)
+    assert abs(pos[1] - np.pi) < tol
+
+
+def test_temporal_peak_positions_dark_field_empty():
+    assert temporal_peak_positions(np.zeros(512, dtype=complex)).size == 0
+
+
+def test_temporal_peak_positions_matches_seed_positions(cav):
+    """Round trip: multi-soliton seed -> peak positions recover the placement."""
+    n = 4096
+    dw = 12.0 * cav.kappa
+    seed = sech_soliton_seed(dw, cav, n_tau=n, n_solitons=5,
+                             position_seed=1, position_jitter_frac=0.25)
+    pos = temporal_peak_positions(seed)
+    assert pos.size == 5
+    assert count_temporal_peaks(seed) == 5
+
+
+def test_multi_soliton_seed_deterministic_and_symmetry_broken(cav):
+    dw = 12.0 * cav.kappa
+    kw = dict(n_tau=4096, n_solitons=5, position_jitter_frac=0.25)
+    s1 = sech_soliton_seed(dw, cav, position_seed=1, **kw)
+    s2 = sech_soliton_seed(dw, cav, position_seed=1, **kw)
+    s3 = sech_soliton_seed(dw, cav, position_seed=2, **kw)
+    assert np.array_equal(s1, s2)               # deterministic in position_seed
+    assert not np.array_equal(s1, s3)
+    # symmetry broken: circular gaps between adjacent peaks are NOT all equal
+    pos = temporal_peak_positions(s1)
+    gaps = np.diff(np.concatenate([pos, [pos[0] + 2.0 * np.pi]]))
+    assert np.std(gaps) > 1e-3
+
+
+def test_multi_soliton_seed_zero_jitter_forbidden(cav):
+    with pytest.raises(ValueError, match="jitter"):
+        sech_soliton_seed(12.0 * cav.kappa, cav, n_tau=1024, n_solitons=3,
+                          position_jitter_frac=0.0)
+
+
+def test_multi_soliton_seed_min_separation_enforced(cav):
+    """Two pulses closer than 20 soliton widths raise, naming the pair."""
+    dw = 12.0 * cav.kappa
+    w = math.sqrt(cav.d2 / (2.0 * dw))          # no dispersion attached -> d2
+    bad = [1.0, 1.0 + 0.5 * SEED_MIN_SEPARATION_WIDTHS * w, 4.0]
+    with pytest.raises(ValueError, match=r"pulses 0 and 1"):
+        sech_soliton_seed(dw, cav, n_tau=1024, n_solitons=3, positions_rad=bad)
+
+
+def test_multi_soliton_seed_positions_rad_length_checked(cav):
+    with pytest.raises(ValueError, match="positions_rad"):
+        sech_soliton_seed(12.0 * cav.kappa, cav, n_tau=1024, n_solitons=3,
+                          positions_rad=[1.0, 4.0])
+
+
+def test_single_soliton_seed_backward_compatible(cav):
+    """N = 1 default placement reproduces the historical construction exactly."""
+    dw = DW_KAPPA * cav.kappa
+    new = sech_soliton_seed(dw, cav, n_tau=2048)
+    dt = cav.t_r / 2048
+    t = np.arange(2048) * dt
+    amp = math.sqrt(2.0 * dw / cav.gamma)
+    tau_s = math.sqrt(cav.beta2 / (2.0 * dw))
+    e_bg = math.sqrt(cav.kappa_c * 0.214) / (cav.kappa / 2.0 + 1j * dw)
+    old = (np.full(2048, e_bg, dtype=np.complex128)
+           + amp / np.cosh((t - 0.5 * cav.t_r) / tau_s)).astype(np.complex64)
+    assert np.array_equal(new, old)
 
 
 def test_seeding_yields_single_soliton(seeded):

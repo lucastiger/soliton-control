@@ -263,8 +263,70 @@ def attach_dispersion(cav: CavityParams, n_tau: int,
 
 
 # ---------------------------------------------------------------------------
-# Seed field (single-sech ansatz on the CW background)
+# Seed field (sech ansatz pulses on the CW background)
 # ---------------------------------------------------------------------------
+# Minimum pairwise angular separation between seed pulses, in units of the
+# analytic soliton width w = sqrt(d2_local / (2*delta_omega)) (rad). Closer
+# seeds overlap through their tails and can merge/interact during settling,
+# leaving an unknown soliton number on the branch.
+SEED_MIN_SEPARATION_WIDTHS = 20.0
+
+
+def _seed_positions(n_solitons, positions_rad, position_seed,
+                    position_jitter_frac) -> np.ndarray:
+    """Resolve the azimuthal peak angles (rad, in [0, 2*pi)) of the seed pulses.
+
+    Explicit ``positions_rad`` wins (length must equal ``n_solitons``).
+    Otherwise N = 1 keeps the historical single pulse at theta = pi, and N > 1
+    generates the deterministic symmetry-broken grid
+    ``theta_j = 2*pi*j/N + delta_j`` with ``delta_j`` uniform in
+    ``+/- position_jitter_frac * (2*pi/N)`` from
+    ``np.random.default_rng(position_seed)``.  Zero jitter is rejected for
+    N > 1 (see :func:`sech_soliton_seed`).
+    """
+    two_pi = 2.0 * math.pi
+    n = int(n_solitons)
+    if positions_rad is not None:
+        pos = np.asarray(positions_rad, dtype=np.float64).ravel() % two_pi
+        if pos.size != n:
+            raise ValueError(
+                f"positions_rad has {pos.size} entries but n_solitons = {n}")
+        return pos
+    if n <= 1:
+        return np.full(max(n, 0), math.pi, dtype=np.float64)
+    if not (position_jitter_frac > 0.0):
+        raise ValueError(
+            "position_jitter_frac must be > 0 for n_solitons > 1: equal "
+            "spacing with zero jitter seeds N identical solitons that "
+            "annihilate SIMULTANEOUSLY under a detuning down-sweep (no "
+            "sequential staircase); pass explicit positions_rad to override "
+            "the placement instead.")
+    rng = np.random.default_rng(int(position_seed))
+    half_range = float(position_jitter_frac) * two_pi / n
+    base = two_pi * np.arange(n, dtype=np.float64) / n
+    delta = rng.uniform(-half_range, half_range, n)
+    return (base + delta) % two_pi
+
+
+def _check_min_separation(positions: np.ndarray, w_rad: float,
+                          min_widths: float = SEED_MIN_SEPARATION_WIDTHS) -> None:
+    """Raise ValueError naming the first pulse pair closer than min_widths * w."""
+    two_pi = 2.0 * math.pi
+    min_sep = float(min_widths) * float(w_rad)
+    for i in range(positions.size):
+        for j in range(i + 1, positions.size):
+            d = abs(float(positions[i]) - float(positions[j])) % two_pi
+            sep = min(d, two_pi - d)
+            if sep < min_sep:
+                raise ValueError(
+                    f"seed pulses {i} and {j} (theta = {positions[i]:.4f} rad, "
+                    f"{positions[j]:.4f} rad) are {sep:.4e} rad apart, below "
+                    f"the minimum separation {min_sep:.4e} rad "
+                    f"(= {min_widths:g} x analytic soliton width "
+                    f"w = {w_rad:.4e} rad); spread the positions or lower "
+                    f"n_solitons.")
+
+
 def sech_soliton_seed(
     delta_omega: float,
     cav: CavityParams,
@@ -272,6 +334,9 @@ def sech_soliton_seed(
     pin: float = PIN_W,
     n_solitons: int = 1,
     phase: float = 0.0,
+    positions_rad=None,
+    position_seed: int = 0,
+    position_jitter_frac: float = 0.25,
 ) -> np.ndarray:
     """Analytic warm-start field: CW background + ``n_solitons`` bright sech pulses.
 
@@ -281,11 +346,44 @@ def sech_soliton_seed(
     LOCAL curvature (``cav.d2_local`` converted to beta2 with the measured FSR)
     when the measured dispersion is attached, so the seed matches the soliton
     that the full-dispersion solver actually supports; it falls back to the
-    config beta2 otherwise.  Pulses are placed at equal spacing around the round
-    trip.  Returned as complex64, shape (n_tau,).
+    config beta2 otherwise.  Returned as complex64, shape (n_tau,).
+
+    Placement (multi-soliton)
+    -------------------------
+    ``positions_rad`` gives the azimuthal peak angles in [0, 2*pi) explicitly
+    (length ``n_solitons``).  When it is None and ``n_solitons > 1`` the
+    positions are generated DETERMINISTICALLY with broken symmetry::
+
+        theta_j = 2*pi*j/N + delta_j,
+        delta_j ~ uniform(+/- position_jitter_frac * (2*pi/N))
+                  from np.random.default_rng(position_seed),
+
+    so a given ``position_seed`` always reproduces the same seed field.  Equal
+    spacing with zero jitter is FORBIDDEN for N > 1: N identical, exactly
+    equidistant solitons see identical environments, evolve identically, and
+    annihilate SIMULTANEOUSLY under a detuning down-sweep -- the deterministic
+    N -> N-1 -> ... -> 1 staircase of sequential single-soliton annihilations
+    requires the permutation symmetry to be broken at seeding time.  Passing
+    ``position_jitter_frac <= 0`` with generated positions and N > 1 raises
+    ValueError.
+
+    Every pulse pair must be at least ``SEED_MIN_SEPARATION_WIDTHS`` (= 20)
+    analytic soliton widths ``w = sqrt(d2_local / (2*delta_omega))`` apart in
+    circular angular separation (``cav.d2`` is the fallback when no local D2 is
+    attached); a violating pair raises ValueError naming the pair.  Pulses are
+    placed with circular wrap-around, so a pulse near theta = 0 keeps its full
+    sech tail across the wrap point.  ``n_solitons = 1`` with default placement
+    reproduces the historical single-sech seed exactly (one pulse at
+    theta = pi).
     """
     if delta_omega <= 0:
         raise ValueError("delta_omega must be > 0 (red-detuned soliton side).")
+    positions = _seed_positions(n_solitons, positions_rad, position_seed,
+                                position_jitter_frac)
+    d2_for_width = cav.d2_local if cav.d2_local is not None else cav.d2
+    w_rad = math.sqrt(d2_for_width / (2.0 * delta_omega))
+    _check_min_separation(positions, w_rad)
+
     dt = cav.t_r / n_tau
     t = np.arange(n_tau) * dt
     amp = math.sqrt(2.0 * delta_omega / cav.gamma)
@@ -297,9 +395,11 @@ def sech_soliton_seed(
     tau_s = math.sqrt(beta2_local / (2.0 * delta_omega))
     e_bg = math.sqrt(cav.kappa_c * pin) / (cav.kappa / 2.0 + 1j * delta_omega)
     field = np.full(n_tau, e_bg, dtype=np.complex128)
-    for k in range(n_solitons):
-        t0 = cav.t_r * (k + 0.5) / n_solitons
-        field += amp / np.cosh((t - t0) / tau_s) * np.exp(1j * phase)
+    for theta in positions:
+        t0 = cav.t_r * (theta / (2.0 * math.pi))
+        d = t - t0
+        d = d - cav.t_r * np.round(d / cav.t_r)   # circular (wrapped) distance
+        field += amp / np.cosh(d / tau_s) * np.exp(1j * phase)
     return field.astype(np.complex64)
 
 
@@ -386,6 +486,27 @@ def count_temporal_peaks(e_field: np.ndarray, rel_height: float = 0.5) -> int:
     peaks, _ = find_peaks(doubled, height=rel_height * p.max())
     # each real peak is counted twice in the doubled array
     return len(peaks) // 2
+
+
+def temporal_peak_positions(e_field: np.ndarray,
+                            rel_height: float = 0.5) -> np.ndarray:
+    """Sorted azimuthal angles (rad, in [0, 2*pi)) of the temporal peaks.
+
+    Uses the same doubled-array circular ``find_peaks`` method as
+    :func:`count_temporal_peaks` (peaks above ``rel_height`` * max power, with
+    the power trace doubled so wrap-straddling peaks are still found), then
+    maps the doubled-array indices back onto the ring (mod ``n_tau``) and
+    deduplicates.  Returns a float64 array of peak angles
+    ``theta = 2*pi*index/n_tau`` sorted ascending; empty for a dark field.
+    """
+    p = np.abs(e_field) ** 2
+    n = int(p.shape[0])
+    if p.max() <= 0:
+        return np.zeros(0, dtype=np.float64)
+    doubled = np.concatenate([p, p])
+    peaks, _ = find_peaks(doubled, height=rel_height * p.max())
+    idx = np.unique(peaks % n)          # unique is sorted ascending
+    return 2.0 * math.pi * idx.astype(np.float64) / n
 
 
 def numpy_label(e_field: np.ndarray, cav: CavityParams, delta_omega: float,
