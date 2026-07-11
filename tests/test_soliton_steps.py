@@ -21,8 +21,10 @@ import pytest
 from analysis.spectral_metrics import (
     detect_power_steps,
     hold_window_average,
+    match_steps_to_transitions,
     plot_soliton_steps,
     single_dks_region,
+    soliton_count_transitions,
 )
 
 
@@ -241,6 +243,169 @@ def test_single_dks_region_branch_touches_lower_edge_has_no_annihilation():
 
 
 # ---------------------------------------------------------------------------
+# soliton_count_transitions: state-transition edges of a sweep
+# ---------------------------------------------------------------------------
+def test_soliton_count_transitions_basic_fields():
+    dw = np.array([5.0, 6.0, 7.0, 8.0, 9.0])
+    c = np.array([0, 1, 1, 2, 3])
+    tr = soliton_count_transitions(dw, c)
+    assert [t["edge_index"] for t in tr] == [0, 2, 3]
+    t0 = tr[0]
+    assert t0["dw_mid"] == pytest.approx(5.5)
+    assert t0["n_low_side"] == 0 and t0["n_high_side"] == 1
+    assert t0["delta_n"] == 1                    # one soliton lost going down
+    assert tr[2] == {"edge_index": 3, "dw_mid": pytest.approx(8.5),
+                     "n_high_side": 3, "n_low_side": 2, "delta_n": 1}
+
+
+def test_soliton_count_transitions_sorts_ascending_like_single_dks_region():
+    dw = np.array([9.0, 5.0, 7.0, 8.0, 6.0])                 # scrambled order
+    c = np.array([3, 0, 1, 2, 1])
+    # ascending: (5,0) (6,1) (7,1) (8,2) (9,3) -> edges 0, 2, 3
+    assert [t["edge_index"]
+            for t in soliton_count_transitions(dw, c)] == [0, 2, 3]
+
+
+def test_soliton_count_transitions_merged_annihilation_delta_n():
+    dw = np.arange(4.0)
+    c = np.array([1, 3, 3, 3])                   # two solitons lost at one edge
+    (t,) = soliton_count_transitions(dw, c)
+    assert t["delta_n"] == 2
+
+
+def test_soliton_count_transitions_constant_and_short_input():
+    dw = np.arange(4.0)
+    assert soliton_count_transitions(dw, np.ones(4, dtype=int)) == []
+    assert soliton_count_transitions(np.array([1.0]), np.array([2])) == []
+    assert soliton_count_transitions(np.array([]), np.array([])) == []
+
+
+def test_soliton_count_transitions_validation():
+    dw = np.arange(4.0)
+    with pytest.raises(ValueError):              # shape mismatch
+        soliton_count_transitions(dw, np.ones(3, dtype=int))
+    with pytest.raises(ValueError):              # non-integral count
+        soliton_count_transitions(dw, np.array([0.0, 0.5, 1.0, 1.0]))
+    with pytest.raises(ValueError):              # negative count
+        soliton_count_transitions(dw, np.array([0, -1, 1, 1]))
+    with pytest.raises(ValueError):              # non-finite count
+        soliton_count_transitions(dw, np.array([0.0, np.nan, 1.0, 1.0]))
+
+
+# ---------------------------------------------------------------------------
+# match_steps_to_transitions: step <-> state-transition alignment
+# ---------------------------------------------------------------------------
+def _steps_dict(edges, step_dy=None):
+    """Minimal detect_power_steps-shaped dict on an integer x grid."""
+    edges = list(edges)
+    return {"edges": edges,
+            "step_x": [e + 0.5 for e in edges],
+            "step_dy": list(step_dy) if step_dy is not None
+            else [-1.0] * len(edges)}
+
+
+def test_match_exact_and_within_tolerance():
+    dw = np.arange(10.0)
+    c = np.array([0, 0, 1, 1, 1, 2, 2, 3, 3, 3])
+    tr = soliton_count_transitions(dw, c)        # edges 1, 4, 6
+    res = match_steps_to_transitions(_steps_dict([1, 5]), tr, tol_samples=1)
+    assert len(res["matched"]) == 2
+    m0 = res["matched"][0]
+    assert m0["step_edge_index"] == 1 and m0["transition_edge_index"] == 1
+    assert m0["edge_distance"] == 0 and m0["delta_n"] == 1
+    # step 5 is one sample from both edge 4 and edge 6 -- it pairs with
+    # exactly ONE of them (one-to-one matching), the other stays unmatched
+    assert res["matched"][1]["step_edge_index"] == 5
+    assert res["matched"][1]["transition_edge_index"] in (4, 6)
+    assert len(res["unmatched_transitions"]) == 1
+    assert res["unmatched_steps"] == []
+
+
+def test_match_tol_zero_requires_exact_coincidence():
+    dw = np.arange(6.0)
+    c = np.array([1, 1, 2, 2, 3, 3])             # transition edges 1, 3
+    res = match_steps_to_transitions(_steps_dict([2, 3]),
+                                     soliton_count_transitions(dw, c),
+                                     tol_samples=0)
+    assert [m["step_edge_index"] for m in res["matched"]] == [3]
+    assert [s["edge_index"] for s in res["unmatched_steps"]] == [2]
+
+
+def test_match_unmatched_step_is_mi_rise_not_soliton_step():
+    # a power discontinuity where the count never changes (the near-resonance
+    # MI/CW rise) must land in unmatched_steps, never in matched
+    dw = np.arange(8.0)
+    c = np.array([0, 0, 0, 0, 1, 1, 2, 2])       # transitions at 3, 5
+    res = match_steps_to_transitions(_steps_dict([0, 3, 5]),
+                                     soliton_count_transitions(dw, c))
+    assert [m["step_edge_index"] for m in res["matched"]] == [3, 5]
+    assert [s["edge_index"] for s in res["unmatched_steps"]] == [0]
+
+
+def test_match_muted_final_transition_stays_unmatched():
+    # the power-muted 1->0 annihilation: a count transition with NO power step
+    dw = np.arange(8.0)
+    c = np.array([0, 1, 1, 1, 2, 2, 3, 3])       # transitions at 0, 3, 5
+    res = match_steps_to_transitions(_steps_dict([3, 5]),
+                                     soliton_count_transitions(dw, c))
+    assert len(res["matched"]) == 2
+    (um,) = res["unmatched_transitions"]
+    assert um["edge_index"] == 0
+    assert um["n_high_side"] == 1 and um["n_low_side"] == 0
+
+
+def test_match_one_to_one_no_double_counting():
+    # two detected steps adjacent to ONE transition: only one may match it
+    dw = np.arange(4.0)
+    c = np.array([0, 0, 1, 1])                   # single transition at edge 1
+    res = match_steps_to_transitions(_steps_dict([0, 2]),
+                                     soliton_count_transitions(dw, c),
+                                     tol_samples=1)
+    assert len(res["matched"]) == 1
+    assert len(res["unmatched_steps"]) == 1
+
+
+def test_match_prefers_closest_pairing():
+    dw = np.arange(8.0)
+    c = np.array([0, 0, 0, 1, 1, 1, 1, 1])       # single transition at edge 2
+    res = match_steps_to_transitions(_steps_dict([2, 3]),
+                                     soliton_count_transitions(dw, c),
+                                     tol_samples=1)
+    (m,) = res["matched"]
+    assert m["step_edge_index"] == 2 and m["edge_distance"] == 0
+
+
+def test_match_validation():
+    tr = soliton_count_transitions(np.arange(4.0), np.array([0, 1, 1, 1]))
+    with pytest.raises(ValueError):              # negative tolerance
+        match_steps_to_transitions(_steps_dict([1]), tr, tol_samples=-1)
+    with pytest.raises(ValueError):              # inconsistent steps dict
+        match_steps_to_transitions(
+            {"edges": [1, 2], "step_x": [1.5], "step_dy": [-1.0]}, tr)
+
+
+def test_match_end_to_end_with_real_detector_muted_final_edge():
+    # Full pipeline on a synthetic descending-sweep staircase (ascending
+    # order here): the 0->1 edge is power-muted (MI comb of comparable
+    # energy), the 1->2 and 2->3 edges are honest power steps.
+    x = np.arange(30, dtype=float)
+    c = np.concatenate([np.zeros(8), np.ones(7), 2 * np.ones(7),
+                        3 * np.ones(8)]).astype(int)
+    y = np.concatenate([np.full(8, 0.55), np.full(7, 0.55),   # muted 0->1
+                        np.full(7, 0.75), np.full(8, 1.0)])
+    y = y + 0.001 * np.sin(x)
+    steps = detect_power_steps(x, y, k=6.0)
+    align = match_steps_to_transitions(steps, soliton_count_transitions(x, c))
+    assert len(align["matched"]) == 2
+    assert sorted(m["transition_edge_index"] for m in align["matched"]) \
+        == [14, 21]
+    assert all(m["delta_n"] == 1 for m in align["matched"])
+    (muted,) = align["unmatched_transitions"]
+    assert muted["edge_index"] == 7              # the 1->0 edge, power-muted
+    assert align["unmatched_steps"] == []
+
+
+# ---------------------------------------------------------------------------
 # plot smoke test (writes files, no solver)
 # ---------------------------------------------------------------------------
 def test_plot_soliton_steps_writes_png_and_pdf(tmp_path):
@@ -263,3 +428,39 @@ def test_plot_soliton_steps_single_panel_no_steps(tmp_path):
     plot_soliton_steps(x, y, out, steps=detect_power_steps(x, y),
                        soliton_region=(6.1, 12.0), annihilation_kappa=6.05)
     assert out.exists() and out.with_suffix(".pdf").exists()
+
+
+def test_plot_soliton_steps_state_counts_twin_axis(tmp_path):
+    # Staircase with measured counts: matched steps (state-verified), one
+    # unmatched MI-rise discontinuity, one power-muted transition, plus the
+    # any-soliton region shading.  Smoke-tests every new annotation path.
+    x = np.arange(32, dtype=float)
+    c = np.concatenate([np.zeros(8), np.ones(8), 2 * np.ones(8),
+                        3 * np.ones(8)]).astype(int)
+    y = np.concatenate([np.full(8, 0.55), np.full(8, 0.55),  # muted 0->1 edge
+                        np.full(8, 0.75), np.full(8, 1.0)])
+    y = y + 0.001 * np.sin(x)
+    y[0] = 0.9                                   # MI/CW rise, no state change
+    steps = detect_power_steps(x, y, k=6.0)
+    out = tmp_path / "steps_state_counts.png"
+    plot_soliton_steps(x, y, out, steps=steps, state_counts=c,
+                       transmission=1.0 - 0.002 * y,
+                       soliton_region=(8.0, 15.0),
+                       any_soliton_region=(8.0, 31.0),
+                       annihilation_kappa=7.5,
+                       metadata={"caption": "state-counts smoke test"})
+    assert out.exists() and out.with_suffix(".pdf").exists()
+    assert out.stat().st_size > 0
+
+
+def test_plot_soliton_steps_state_counts_unsorted_input(tmp_path):
+    # state_counts must be re-sorted with the detuning axis exactly like the
+    # power trace; descending (sweep-order) input must render identically.
+    x = np.arange(24, dtype=float)
+    c = np.concatenate([np.ones(12), 2 * np.ones(12)]).astype(int)
+    y = np.concatenate([np.full(12, 0.6), np.full(12, 1.0)])
+    steps = detect_power_steps(x, y, k=6.0)
+    out = tmp_path / "steps_desc.png"
+    plot_soliton_steps(x[::-1], y[::-1], out, steps=steps,
+                       state_counts=c[::-1])
+    assert out.exists()

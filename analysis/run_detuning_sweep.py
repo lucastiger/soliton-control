@@ -152,6 +152,22 @@ appear as a soliton_count 1->0 transition without a matched power discontinuity.
 The N->N-1 transitions above it are the staircase.  No smoothing, no detector
 changes, no re-thresholding.
 
+Validation gate (hard failure, not a warning)
+---------------------------------------------
+A detected power step is only a PROVEN soliton step when it coincides with a
+measured soliton-number transition: the driver aligns the
+``detect_power_steps`` detections on the plotted primary with the
+``soliton_count`` transitions (``analysis.spectral_metrics
+.match_steps_to_transitions``, edge tolerance 1 sample) and requires, before
+writing ANY artifact, that (a) at least TWO steps are matched (state-verified)
+and (b) ``soliton_count`` is monotonically non-increasing along the descending
+sweep (solitons only annihilate, never appear, going down).  If either check
+fails the driver writes nothing -- no npz, no figure, no JSON -- prints the
+escalation ladder (:data:`ESCALATION_LADDER`) and exits nonzero.  Unmatched
+power discontinuities keep their honest "power-trace discontinuity" label (at
+this device: the near-resonance MI/CW rise); unmatched transitions are state
+changes without a power step, where the muted final 1->0 edge is expected.
+
 Thermal / noise configuration
 -----------------------------
 The thermo-optic model is run ON, matching the validated operating configuration
@@ -165,14 +181,20 @@ parameter untouched (``T_k`` does not enter ``_thermal_params``).
 
 Outputs (all under ``analysis/results/``)
 -----------------------------------------
-* ``detuning_sweep.npz`` -- detuning grid, averaged powers, per-step std
-  (breathing-amplitude indicator), comb power, transmission, soliton counts,
-  peak positions, breathing fields, labels and the full sweep config, so the
-  figure regenerates without re-running the sweep.
-* ``soliton_steps.{png,pdf}`` -- the publication figure.
+* ``detuning_sweep.npz`` (schema v3) -- detuning grid, averaged powers,
+  per-step std (breathing-amplitude indicator), comb power, transmission,
+  soliton counts, peak positions, breathing fields, labels, the seeding
+  provenance (``n_solitons_seeded``, ``position_seed``,
+  ``position_jitter_frac``, the settled ``seed_positions_rad``) and the full
+  sweep config, so the figure regenerates without re-running the sweep.
+* ``soliton_steps.{png,pdf}`` -- the publication figure (with the measured
+  soliton count on a twin axis and the state-verified steps marked).
 * ``spectral_metrics.json`` gains a ``soliton_step`` block (staircase
-  transitions, primary-observable decision, the power-discontinuity detection
-  result, and full provenance).
+  transitions, step-transition alignment, primary-observable decision, the
+  power-discontinuity detection result, and full provenance).
+
+Artifacts are only written when the staircase passes the validation gate
+above.
 """
 
 from __future__ import annotations
@@ -215,8 +237,10 @@ from analysis.spectral_metrics import (  # noqa: E402
     SOLITON_STEP_DEFINITION,
     detect_power_steps,
     hold_window_average,
+    match_steps_to_transitions,
     plot_soliton_steps,
     single_dks_region,
+    soliton_count_transitions,
 )
 from simulator.state_labeler import make_threshold_params  # noqa: E402
 
@@ -545,6 +569,86 @@ def matched_step_contrast(y, steps, matched_edges) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Validation gate: a power step is only a soliton step once PROVEN
+# ---------------------------------------------------------------------------
+class StaircaseValidationError(RuntimeError):
+    """The staircase failed the hard validation gate; no artifacts may be written."""
+
+
+# Escalation ladder (Prompt 5): the ordered remedies for a failed staircase
+# validation, printed verbatim by the driver before it exits nonzero.  Work
+# top to bottom, re-run, re-validate -- and never buy a pass by weakening the
+# gate, the detector, or the labeler thresholds.
+ESCALATION_LADDER = """\
+[sweep] escalation ladder (Prompt 5) -- work top to bottom, re-run, re-validate:
+  1. Wrong data before wrong physics: confirm the npz under validation is the
+     intended run (--render-only re-validates whatever detuning_sweep.npz is
+     committed; a stale or legacy file cannot pass the staircase gate).
+  2. Harden the per-hold soliton count, never the thresholds: the end-of-hold
+     single-snapshot count undercounts in the deep-breathing sub-band (pulses
+     transiently dip below 50% of the momentary max while all of them persist).
+     Count temporal peaks on ALL ~8 in-window snapshots and take the median --
+     peak_positions_rad and P_comb are the reliable per-hold records there.
+     Do NOT lower the labeler's contrast floor or the peak threshold to force
+     a count.
+  3. Lengthen the holds (raise --hold-rt): breathing-mediated switching must
+     COMPLETE within a hold so the end-of-hold state is settled; a hold that
+     ends mid-switch records a transient count and breaks monotonicity.
+  4. Densify the grid where it fails (raise --n-steps, or narrow the range
+     around the annihilation cascade) so every N -> N-1 edge is straddled by a
+     clean plateau on each side and the detector can match it.
+  5. Re-break the seeding symmetry (--position-seed / --position-jitter-frac):
+     near-degenerate seed spacings let two solitons annihilate within one grid
+     step, merging staircase steps and starving the matched count.
+  6. If the staircase still fails, STOP and report it honestly (counts,
+     transitions, alignment). Never relabel an unmatched power discontinuity
+     as a soliton step, never smooth the trace, never re-threshold the
+     detector to manufacture a match -- an unvalidated staircase figure does
+     not ship."""
+
+
+def validate_staircase_alignment(counts_ascending, align) -> list:
+    """Hard validation gate for the staircase; returns the violations (empty = pass).
+
+    Two requirements, both non-negotiable before any artifact is written:
+
+    * at least TWO matched (state-verified) soliton steps -- one coincidence
+      could be luck; two independent power-drop/count-drop coincidences are a
+      staircase;
+    * ``soliton_count`` monotonically non-increasing along the DESCENDING
+      sweep (equivalently non-decreasing in ascending detuning): on a
+      warm-continued down-sweep solitons only annihilate, so any count
+      increase going down is a measurement artifact (the documented
+      deep-breathing undercount) or an upstream bug -- either way the counts
+      cannot certify the staircase.
+
+    ``counts_ascending`` is the per-step soliton count in ascending-detuning
+    order; ``align`` a :func:`analysis.spectral_metrics
+    .match_steps_to_transitions` result on the same grid.
+    """
+    c = np.asarray(counts_ascending).ravel().astype(np.int64)
+    problems = []
+    n_matched = len(align["matched"])
+    if n_matched < 2:
+        problems.append(
+            f"only {n_matched} detected power step(s) coincide with a "
+            f"soliton_count transition (tol = {align['tol_samples']} sample); "
+            f">= 2 state-verified steps are required to certify a staircase")
+    # ascending-detuning order: non-decreasing <=> non-increasing going down
+    dips = np.nonzero(np.diff(c) < 0)[0]
+    if dips.size:
+        shown = ", ".join(
+            f"edge {int(i)} ({int(c[i])} -> {int(c[i + 1])})"
+            for i in dips[:8])
+        more = f" (+{dips.size - 8} more)" if dips.size > 8 else ""
+        problems.append(
+            f"soliton_count is not monotonically non-increasing along the "
+            f"descending sweep: {dips.size} count increase(s) going down in "
+            f"detuning, at ascending-order {shown}{more}")
+    return problems
+
+
+# ---------------------------------------------------------------------------
 # Outputs
 # ---------------------------------------------------------------------------
 def _sha256(path: Path) -> str:
@@ -574,15 +678,41 @@ _NPZ_BASE_KEYS = ("dw_over_kappa", "dw_rad_s", "dw_eff_over_kappa", "P_intra",
 _NPZ_V2_KEYS = ("P_comb", "P_comb_std", "soliton_count", "peak_positions_rad",
                 "contrast", "is_breather", "is_stationary", "breathing_relstd",
                 "breathing_period_rt")
+# Schema v3: an explicit version stamp plus the seeding provenance, so a
+# consumer can verify the staircase claim (N seeded, where the seeds settled)
+# from the npz alone.  All v1/v2 keys are kept unchanged.
+NPZ_SCHEMA_VERSION = 3
+_NPZ_V3_INT_KEYS = ("schema_version", "n_solitons_seeded", "position_seed")
 
 
 def save_sweep_npz(path: Path, sweep: dict, cfg: SweepConfig) -> None:
-    """Persist the sweep so the figure regenerates without re-running the solver."""
+    """Persist the sweep (schema v3) so the figure regenerates without the solver.
+
+    Writes every v1/v2 key unchanged plus ``schema_version``,
+    ``n_solitons_seeded`` / ``position_seed`` / ``position_jitter_frac`` (the
+    seeding provenance, duplicated out of the config JSON for schema-level
+    consumers) and ``seed_positions_rad`` -- the settled seed peak angles,
+    shape ``(N,)``, taken from the fresh run's ``seed_metrics`` or from a
+    previously loaded v3 npz (NaN of shape ``(N,)`` for pre-v3 data that never
+    recorded them).
+    """
     arrays = {k: sweep[k] for k in _NPZ_BASE_KEYS + _NPZ_V2_KEYS}
+    if "seed_positions_rad" in sweep:                     # loaded v3 npz
+        seed_pos = np.asarray(sweep["seed_positions_rad"], dtype=np.float64)
+    elif "seed_metrics" in sweep:                         # fresh solver run
+        seed_pos = np.asarray(sweep["seed_metrics"]["peak_positions_rad"],
+                              dtype=np.float64)
+    else:                                                 # pre-v3 data
+        seed_pos = np.full(int(cfg.n_solitons), np.nan)
     np.savez_compressed(
         path,
         pin_w=float(cfg.pin_w),
         sweep_config_json=json.dumps(cfg.as_dict()),
+        schema_version=int(NPZ_SCHEMA_VERSION),
+        n_solitons_seeded=int(cfg.n_solitons),
+        position_seed=int(cfg.position_seed),
+        position_jitter_frac=float(cfg.position_jitter_frac),
+        seed_positions_rad=seed_pos,
         **arrays,
     )
 
@@ -592,8 +722,10 @@ def load_sweep_npz(path: Path):
 
     Lets the figure + JSON be regenerated from the saved data alone (no solver
     re-run), per the deliverable convention that outputs are regenerable.  The
-    schema-v2 staircase arrays are loaded when present, so a legacy
-    (single-soliton) npz still renders with the legacy layout.
+    schema-v2 staircase arrays and the schema-v3 seeding-provenance keys are
+    loaded when present, so a legacy (single-soliton v1 or staircase v2) npz
+    still loads; dtypes round-trip unchanged (``soliton_count`` int, the flag
+    columns bool, the ``peak_positions_rad`` NaN padding intact).
     """
     d = np.load(path, allow_pickle=False)
     cfg = SweepConfig(**json.loads(str(d["sweep_config_json"])))
@@ -601,6 +733,13 @@ def load_sweep_npz(path: Path):
     for k in _NPZ_V2_KEYS:
         if k in d.files:
             sweep[k] = d[k]
+    for k in _NPZ_V3_INT_KEYS:
+        if k in d.files:
+            sweep[k] = int(d[k])
+    if "position_jitter_frac" in d.files:
+        sweep["position_jitter_frac"] = float(d["position_jitter_frac"])
+    if "seed_positions_rad" in d.files:
+        sweep["seed_positions_rad"] = d["seed_positions_rad"]
     sweep["is_single"] = sweep["is_single"].astype(bool)
     for k in ("is_breather", "is_stationary"):
         if k in sweep:
@@ -615,11 +754,16 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
     (soliton_count transitions) and the single-DKS existence region, makes the
     data-driven primary-observable decision (P_intra vs P_comb by matched-step
     contrast; see the module docstring), runs the power-discontinuity detector
-    on the plotted primary, writes the figure and the ``soliton_step`` block,
-    and returns the figure path.  Pure post-processing -- no solver -- so it
-    also serves ``--render-only`` (including on a legacy npz without the
-    staircase arrays, which falls back to the legacy P_intra/transmission
-    layout).
+    on the plotted primary, aligns the detections with the soliton_count
+    transitions, writes the figure and the ``soliton_step`` block, and returns
+    the figure path.  The hard validation gate
+    (:func:`validate_staircase_alignment`) runs BEFORE anything is written:
+    on failure a :class:`StaircaseValidationError` is raised and no artifact
+    exists.  Pure post-processing -- no solver -- so it also serves
+    ``--render-only`` (including on a legacy npz without the staircase
+    arrays, which falls back to the legacy P_intra/transmission layout; the
+    gate applies only when the staircase arrays are present, since a legacy
+    single-soliton npz has no soliton_count to prove anything with).
     """
     order = np.argsort(sweep["dw_over_kappa"])
     dwk = np.asarray(sweep["dw_over_kappa"])[order]
@@ -687,6 +831,22 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
     steps_matched_flags = ([bool(i in all_edges) for i in steps["edges"]]
                            if has_staircase else [])
 
+    # Step <-> transition alignment on the plotted primary: only the matched
+    # detections are PROVEN soliton steps.  The hard validation gate runs here,
+    # BEFORE any artifact is written -- on failure nothing is rendered and the
+    # caller prints the escalation ladder and exits nonzero.
+    transitions, align, any_region = [], None, None
+    if has_staircase:
+        transitions = soliton_count_transitions(dwk, counts)
+        align = match_steps_to_transitions(steps, transitions)
+        any_lo, any_hi, _ = single_dks_region(dwk, counts >= 1)
+        any_region = (any_lo, any_hi) if any_lo is not None else None
+        problems = validate_staircase_alignment(counts, align)
+        if problems:
+            raise StaircaseValidationError(
+                "staircase validation failed (no artifacts written):\n  - "
+                + "\n  - ".join(problems))
+
     caption = (
         f"{cfg.n_solitons}-soliton staircase, pin = {cfg.pin_w} W, n_tau = "
         f"{cfg.n_tau}. Deterministic symmetry-broken seed "
@@ -699,8 +859,12 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
         f"staircase; the final 1->0 annihilation is power-muted in the TOTAL "
         f"power and must not be forced to register as a power step. "
         + ("Green = single-DKS existence region. " if lo_k is not None else "")
-        + f"Dotted lines mark first-difference discontinuities of the plotted "
-        f"primary trace. Raw data, no smoothing."
+        + ("Olive = any-soliton (N >= 1) region. " if any_region else "")
+        + f"Solid black lines mark STATE-VERIFIED soliton steps (power "
+        f"discontinuity coinciding with a measured soliton_count transition); "
+        f"dotted lines mark power discontinuities without a state change. "
+        f"Thin gray staircase = measured soliton count N (twin axis). "
+        f"Raw data, no smoothing."
         if has_staircase else
         f"Single-DKS branch, pin = {cfg.pin_w} W, n_tau = {cfg.n_tau} (legacy "
         f"npz render).")
@@ -710,7 +874,9 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
         dwk, y1_norm, RESULTS_DIR / STEPS_PNG, power_std=y1_norm_std,
         transmission=y2_norm,
         soliton_region=(lo_k, hi_k) if lo_k is not None else None,
+        any_soliton_region=any_region,
         annihilation_kappa=annih_k, steps=steps, metadata=metadata,
+        state_counts=(counts if has_staircase else None),
         observable_label=label1,
         second_panel_ylabel=(label2 if has_staircase else "norm. transmission"),
         second_panel_legend=(label2 if has_staircase else
@@ -786,22 +952,64 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
     }
 
     if has_staircase:
-        transitions = [{"edge_over_kappa": _edge_mid(i),
-                        "from_count": int(counts[i + 1]),
-                        "to_count": int(counts[i])} for i in all_edges]
         final_1_to_0 = [t for t in transitions
-                        if t["from_count"] >= 1 and t["to_count"] == 0]
+                        if t["n_high_side"] >= 1 and t["n_low_side"] == 0]
+        block["any_soliton_region_over_kappa"] = (
+            [float(any_region[0]), float(any_region[1])] if any_region
+            else None)
         block["staircase"] = {
+            "n_seeded": int(cfg.n_solitons),
             "n_solitons_seeded": int(cfg.n_solitons),
             "position_seed": int(cfg.position_seed),
             "position_jitter_frac": float(cfg.position_jitter_frac),
             "soliton_count_by_detuning_over_kappa": {
                 f"{float(d):.3f}": int(c) for d, c in zip(dwk, counts)},
             "transitions": transitions,
+            "matched_steps": [
+                {"dw_mid": m["dw_mid"], "delta_n": m["delta_n"],
+                 "step_dy": m["step_dy"],
+                 "step_edge_index": m["step_edge_index"],
+                 "transition_edge_index": m["transition_edge_index"],
+                 "n_high_side": m["n_high_side"],
+                 "n_low_side": m["n_low_side"]}
+                for m in align["matched"]],
+            "unmatched_steps": [
+                {"dw_mid": s["step_x"], "step_dy": s["step_dy"],
+                 "edge_index": s["edge_index"],
+                 "label": "power-trace discontinuity (no soliton_count "
+                          "change; at this device the near-resonance MI/CW "
+                          "power rise -- NOT a soliton step)"}
+                for s in align["unmatched_steps"]],
+            "unmatched_transitions": align["unmatched_transitions"],
+            "final_edge_note": (
+                "the final 1->0 annihilation is power-muted (the last soliton "
+                "is replaced by a comparable-energy MI comb), so it is "
+                "EXPECTED to appear under unmatched_transitions -- a "
+                "soliton_count transition without a matched power step -- and "
+                "must never be forced to register as one"),
+            "match_tol_samples": int(align["tol_samples"]),
+            "validation": {
+                "rule": ">= 2 matched (state-verified) soliton steps AND "
+                        "soliton_count monotonically non-increasing along the "
+                        "descending sweep; enforced as a hard failure BEFORE "
+                        "any artifact is written, so this block only exists "
+                        "for validated staircases",
+                "n_matched_steps": len(align["matched"]),
+                "monotone_non_increasing_descending": True,
+            },
+            "primary_observable": {
+                "chosen": name1,
+                "matched_step_contrast_P_intra": contrast_intra["contrast"],
+                "matched_step_contrast_P_comb": contrast_comb["contrast"],
+                "rule": "P_comb is plotted as primary ONLY if its "
+                        "matched-step contrast (min matched |step_dy| / MAD "
+                        "of dy) strictly exceeds P_intra's; see "
+                        "primary_observable_decision for the full inputs",
+            },
             "matched_staircase_edges_over_kappa": [
                 _edge_mid(i) for i in matched],
             "final_1_to_0_over_kappa": (
-                final_1_to_0[0]["edge_over_kappa"] if final_1_to_0 else None),
+                final_1_to_0[0]["dw_mid"] if final_1_to_0 else None),
             "honesty_note": (
                 "the final 1->0 annihilation remains power-muted "
                 "(comparable-energy MI comb) and MUST NOT be forced to "
@@ -870,9 +1078,16 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
         print(f"[sweep] soliton counts (ascending dw): "
               f"{[int(c) for c in counts]}")
         print(f"[sweep] staircase transitions at: "
-              + (", ".join(f"{_edge_mid(i):.2f}k "
-                           f"({counts[i + 1]}->{counts[i]})"
-                           for i in all_edges) or "none"))
+              + (", ".join(f"{t['dw_mid']:.2f}k "
+                           f"({t['n_high_side']}->{t['n_low_side']})"
+                           for t in transitions) or "none"))
+        print(f"[sweep] step<->transition alignment: "
+              f"{len(align['matched'])} state-verified soliton step(s) at "
+              + (", ".join(f"{m['dw_mid']:.2f}k" for m in align["matched"])
+                 or "none")
+              + f"; {len(align['unmatched_steps'])} unmatched power "
+              f"discontinuity(ies); {len(align['unmatched_transitions'])} "
+              f"unmatched transition(s) (muted 1->0 expected here)")
         print(f"[sweep] matched-step contrast: P_intra="
               f"{contrast_intra['contrast']:.2f}  P_comb="
               f"{contrast_comb['contrast']:.2f}  -> plotted primary: {name1}")
@@ -885,6 +1100,14 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
     print(f"[sweep] plot -> {plot_path} (+ .pdf)")
     print(f"[sweep] json -> {RESULTS_DIR / METRICS_JSON} (soliton_step)")
     return plot_path
+
+
+def _abort_on_failed_validation(exc: StaircaseValidationError) -> None:
+    """Print the failure + the Prompt-5 escalation ladder and exit nonzero."""
+    print("[sweep] STAIRCASE VALIDATION FAILED -- no artifacts written.")
+    print(f"[sweep] {exc}")
+    print(ESCALATION_LADDER)
+    sys.exit(1)
 
 
 def main() -> None:
@@ -921,7 +1144,10 @@ def main() -> None:
 
     if args.render_only:
         sweep, cfg = load_sweep_npz(RESULTS_DIR / SWEEP_NPZ)
-        render_and_report(sweep, cfg)
+        try:
+            render_and_report(sweep, cfg)
+        except StaircaseValidationError as exc:
+            _abort_on_failed_validation(exc)
         print(f"[sweep] re-rendered from {SWEEP_NPZ} in "
               f"{time.time() - t_start:.1f}s")
         return
@@ -945,9 +1171,15 @@ def main() -> None:
         except OSError:
             pass
 
+    # Validate-and-render FIRST: the gate inside render_and_report runs before
+    # it writes the figure/JSON, and the npz is only persisted afterwards, so a
+    # failed validation leaves NO artifact of any kind.
+    try:
+        render_and_report(sweep, cfg)
+    except StaircaseValidationError as exc:
+        _abort_on_failed_validation(exc)
     save_sweep_npz(RESULTS_DIR / SWEEP_NPZ, sweep, cfg)
     print(f"[sweep] data -> {RESULTS_DIR / SWEEP_NPZ}")
-    render_and_report(sweep, cfg)
     print(f"[sweep] total wall time {time.time() - t_start:.1f}s")
 
 
