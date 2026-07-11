@@ -65,12 +65,19 @@ averaging is done in LINEAR power
 the complex field.
 
 SECONDARY observable: the pump-excluded comb power
-``P_comb = sum_{mu != 0} |a_mu|^2``, computed from the ~8 field snapshots per
-hold (``snapshot_interval = max(hold_rt // 8, 1)``) that fall inside the same
-final-``avg_frac`` window, and recorded as its mean/std.  Justification: comb
-power is the standard experimental staircase observable and removes the
+``P_comb = sum_{mu != 0} |a_mu|^2``, computed from the ~32 field snapshots per
+hold (``snapshot_interval = max(hold_rt // 32, 1)``, i.e. ~8 snapshots inside
+the final-``avg_frac`` window) and recorded as its mean/std.  Justification:
+comb power is the standard experimental staircase observable and removes the
 CW-background near-resonance rise that dominated the old trace's first
-differences.  The PRIMARY observable remains total intracavity power; P_comb is
+differences.  Snapshot density: the in-window snapshots must sample the
+breathing cycle (period ~150-180 RT) densely enough that their mean is the
+cycle average -- 2 snapshots 250 RT apart alias the breathing phase and
+scatter the per-hold P_comb by up to the ~9% breathing amplitude, burying the
+staircase plateaus, while ~8 snapshots ~62 RT apart across the ~3-period
+window reproduce the true (every-RT) window mean to < 0.1% (measured at the
+8-kappa deep-breathing point).  Snapshots are passive reads of the trajectory,
+so this changes ONLY the estimator, never the dynamics.  The PRIMARY observable remains total intracavity power; P_comb is
 adopted as the PLOTTED primary ONLY if its matched-step contrast is strictly
 higher.  Matched-step contrast of a trace = min matched |step_dy| / MAD of dy,
 where the steps are the UNCHANGED ``detect_power_steps`` detections on that
@@ -312,10 +319,11 @@ def run_detuning_sweep(cav, cfg: SweepConfig, *, config_path) -> dict:
     records the final-``avg_frac`` LINEAR-power average (and std) of the total
     intracavity power ``sum_mu |a_mu|^2`` and of the through-port power
     ``P_trans``; the pump-excluded comb power ``P_comb`` (mean/std over the
-    ~8-per-hold field snapshots inside the same window); the mean effective
-    detuning; the state label / peak count / peak positions; the labeler-gated
-    ``soliton_count``; and the schema-v2 breathing fields from
-    ``breathing_metrics`` on the hold's per-RT ``U_int_history``.
+    ~8 field snapshots inside the same window; see the module docstring for
+    the snapshot-density requirement); the mean effective detuning; the state
+    label / peak count / peak positions; the labeler-gated ``soliton_count``;
+    and the schema-v2 breathing fields from ``breathing_metrics`` on the
+    hold's per-RT ``U_int_history``.
 
     ``config_path`` is the (deterministic, noise-off) solver config.  Returns a
     dict of per-step arrays (``peak_positions_rad`` is NaN-padded to the widest
@@ -379,7 +387,10 @@ def run_detuning_sweep(cav, cfg: SweepConfig, *, config_path) -> dict:
     # and dies of OOM); it frees only dead compilations -- numerics unchanged.
     clear_caches_every = 10
 
-    snap_int = max(int(cfg.hold_rt) // 8, 1)
+    # ~32 snapshots per hold -> ~8 inside the final-avg_frac window, spaced
+    # well below the ~150-180 RT breathing period so the P_comb window mean is
+    # the breathing-cycle average, not a 2-sample phase alias (module docstring).
+    snap_int = max(int(cfg.hold_rt) // 32, 1)
     rows = []
     for i, dwk in enumerate(dws_k):
         t0 = time.time()
@@ -736,8 +747,9 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
             "primary": "total intracavity power sum_mu |a_mu|^2 (the primary "
                        "OBSERVABLE regardless of which trace is plotted first)",
             "secondary": "pump-excluded comb power P_comb = sum_{mu != 0} "
-                         "|a_mu|^2, mean/std over the ~8-per-hold field "
-                         "snapshots inside the final-avg_frac window",
+                         "|a_mu|^2, mean/std over the ~8 field snapshots "
+                         "inside the final-avg_frac window (~62 RT apart, "
+                         "densely sampling the ~150-180 RT breathing cycle)",
             "note": "transmission P_trans/P_in also stored in "
                     "detuning_sweep.npz",
         },
