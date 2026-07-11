@@ -181,6 +181,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import jax
 import numpy as np
 import yaml
 
@@ -369,6 +370,15 @@ def run_detuning_sweep(cav, cfg: SweepConfig, *, config_path) -> dict:
         cav.kappa, cav.kappa_c, cfg.pin_w,
         abs(cfg.dw_start_kappa * kappa))["contrast_high"])
 
+    # Every hold detunes to a new delta_omega, so the solver builds a new
+    # physically-scaled scan-time labeler (its OFF floor is keyed on the hold's
+    # max |delta_omega|); that labeler is a STATIC jit argument, so each hold
+    # compiles a fresh XLA executable that can never be reused by later holds.
+    # Dropping the compilation cache periodically keeps the sweep's memory flat
+    # (a dense sweep otherwise accumulates one ~O(100 MB) executable per hold
+    # and dies of OOM); it frees only dead compilations -- numerics unchanged.
+    clear_caches_every = 10
+
     snap_int = max(int(cfg.hold_rt) // 8, 1)
     rows = []
     for i, dwk in enumerate(dws_k):
@@ -444,6 +454,8 @@ def run_detuning_sweep(cav, cfg: SweepConfig, *, config_path) -> dict:
             "breathing_period_rt": float(v6["breathing_period_rt"]),
         })
         e_prev, dt_prev = e_final, dt_final
+        if (i + 1) % clear_caches_every == 0:
+            jax.clear_caches()
         print(f"[sweep] {i + 1:2d}/{len(dws_k)}  dw={dwk:6.2f}k  "
               f"P_intra={rows[-1]['P_intra']:.4e}  "
               f"P_comb={rows[-1]['P_comb']:.4e}  "
