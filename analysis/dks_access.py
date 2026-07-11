@@ -50,19 +50,27 @@ at n_tau = 2048 to show the fully-resolved envelope (identical central shape,
 wings rolling off to <-55 dB).  The sech^2 *envelope* correlation is >0.99 at both
 resolutions.
 
-Breather note (V6 / cycle-averaged spectrum)
---------------------------------------------
+Operating point (10*kappa, stationary) and breather note (8*kappa)
+-----------------------------------------------------------------
+The PRODUCTION operating point is delta_omega = ``OPERATING_DW_KAPPA`` =
+10*kappa: past the ~9.3-9.4*kappa Hopf boundary the attractor is a STATIONARY
+single soliton, so V6 reports ``is_breather = False`` and the committed spectrum
+artifacts are single snapshots, not cycle-averages.
+
 Controlled A/B testing (numpy vs jax bit-match over 1 RT, thermal/noise off,
-parabolic-dispersion control) established that at delta_omega = 8*kappa with
-the measured D_int grid the attractor is a deterministic BREATHER: the soliton
-energy U_int oscillates with period T_b ~ 152-153 RT and rel-std ~4.1%, so any
-single-snapshot spectrum is breathing-phase-dependent. ``breathing_metrics``
-(check V6, part of ``soliton_metrics``) detects this from the U_int
-autocorrelation and rel-std over the last >= 2*T_b; when it flags a breather
+parabolic-dispersion control) separately established that at delta_omega =
+8*kappa (the historically A/B-validated point) with the measured D_int grid the
+attractor is a deterministic BREATHER: the soliton energy U_int oscillates with
+period T_b ~ 152-153 RT and rel-std ~4.1%, so any single-snapshot spectrum
+*there* is breathing-phase-dependent. ``breathing_metrics`` (check V6, part of
+``soliton_metrics``) detects this from the U_int autocorrelation and rel-std
+over the last >= 2*T_b; when it flags a breather (e.g. a deliberate 8*kappa run)
 the spectrum artifacts must come from ``cycle_averaged_spectrum`` (per-RT
-accumulation of |fftshift(fft(E))|^2 over >= 2*T_b), which is deterministic
-and phase-independent. ``breathing_scan`` maps the breathing sub-band vs
-detuning across the existence band.
+accumulation of |fftshift(fft(E))|^2 over >= 2*T_b), which is deterministic and
+phase-independent. ``cycle_averaged_spectrum``, ``breathing_metrics`` and
+``breathing_scan`` remain in the library for characterising the breather
+sub-band and any deliberate breather run; ``breathing_scan`` maps the breathing
+sub-band vs detuning across the existence band.
 
 Labeler note
 ------------
@@ -115,11 +123,15 @@ DINT_CSV_PATH = REPO_ROOT / "config" / "pyLLE_dispersion_w4400_h800.csv"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
 PIN_W = 0.214
+OPERATING_DW_KAPPA = 10.0   # production operating detuning [kappa]:
+# stationary single DKS. 8κ (the historically A/B-validated point) is a
+# deterministic breather; ≥9.5κ is past the ~9.3–9.4κ Hopf boundary.
 # Full-dispersion default: the measured D_int grid spreads the single-DKS comb
 # across thousands of cavity modes (phase-matched dispersive waves near mu ~
-# +3269 / -3051, i.e. ~1096 / 2520 nm at delta_omega = 8 kappa), so the display
-# window needs a large FFT grid. A CLI/kwarg override keeps smaller, faster runs
-# possible.
+# +3269 / -3051, i.e. ~1096 / 2520 nm; positions quoted at the 8*kappa
+# characterisation point, the production operating point being 10*kappa), so
+# the display window needs a large FFT grid. A CLI/kwarg override keeps
+# smaller, faster runs possible.
 N_TAU = 8192
 LABEL_SINGLE_SOLITON = 6
 
@@ -298,10 +310,13 @@ def sech_soliton_seed(
 # (numpy vs jax bit-match, thermal/noise off, parabola control): at
 # delta_omega = 8*kappa with the measured D_int grid the attractor is a
 # deterministic BREATHER (period ~152-153 RT, U rel-std ~4.1%), so a "stable
-# single soliton" readout from one snapshot is phase-dependent. V6 measures the
-# breathing period T_b from the U_int autocorrelation peak (search lag
-# V6_LAG_SEARCH round trips) and the relative std over the last >= 2*T_b; a
-# rel-std above V6_BREATHER_RELSTD classifies the state as a breather.
+# single soliton" readout from one snapshot is phase-dependent there. The
+# production operating point (OPERATING_DW_KAPPA = 10*kappa, past the ~9.3-9.4
+# kappa Hopf edge) is instead a STATIONARY single soliton, where V6 returns
+# is_breather = False. V6 measures the breathing period T_b from the U_int
+# autocorrelation peak (search lag V6_LAG_SEARCH round trips) and the relative
+# std over the last >= 2*T_b; a rel-std above V6_BREATHER_RELSTD classifies the
+# state as a breather.
 V6_BREATHER_RELSTD = 0.005      # rel-std > 0.5% => breathing, not stationary
 V6_LAG_SEARCH = (50, 1000)      # autocorrelation lag window [RT] for T_b
 V6_MIN_AC_PEAK = 0.2            # min autocorr peak to accept a period readout
@@ -461,8 +476,10 @@ def optical_spectrum(e_field: np.ndarray, cav: CavityParams) -> dict:
     return _spectrum_dict(spec, cav)
 
 
-# >= 2*T_b at the validated delta_omega = 8*kappa operating point, where the
-# breathing period is T_b ~ 152-153 RT (see V6 / breathing_metrics).
+# >= 2*T_b at the delta_omega = 8*kappa breather point, where the breathing
+# period is T_b ~ 152-153 RT (see V6 / breathing_metrics). This averaging length
+# is for a deliberate 8*kappa breather run; the production operating point
+# (OPERATING_DW_KAPPA = 10*kappa) is stationary and needs no cycle-averaging.
 CYCLE_AVG_RT_8KAPPA = 304
 
 
