@@ -219,6 +219,30 @@ Outputs (all under ``analysis/results/``)
 The figure and the JSON staircase block are only written when the staircase
 passes the validation gate above; the npz is always written (flagged with
 ``staircase_validated``).
+
+Robustness mode (``--robustness``)
+----------------------------------
+Re-runs the ACCEPTED configuration (read VERBATIM from the committed
+``detuning_sweep.npz`` ``sweep_config_json``, never retyped) under three
+one-at-a-time perturbations -- (i) ``position_seed + 1``, (ii) ``hold_rt``
+2000 -> 1600, (iii) ``n_steps`` doubled (detuning spacing halved) -- and proves
+the staircase STRUCTURE survives each.  Step LOCATIONS may move (annihilation
+detunings are interaction-dependent); the STRUCTURE must persist: for every
+variant, using the hardened windowed counter throughout,
+:func:`validate_staircase_alignment` passes (>= 2 state-verified steps + a
+monotone descent), the per-hold ``count_agreement`` stays physics-driven
+(median >= 0.5 and no soliton-bearing hold at 0 -- else the persistence
+machinery, not the physics, is making the count), every hold at
+``dw >= 9.5*kappa`` is stationary, and the muted 1->0 annihilation persists in
+``[5.75, 6.5]*kappa`` (its matched-vs-unmatched status is data-decided per the
+honesty constraint and recorded, never gated).  Each variant's raw sweep is
+persisted to ``results/robustness/variant_{i}.npz`` (schema v4, NO figure --
+data only) and the primary artifacts are never touched; the per-variant results
+go to the ``staircase_robustness`` block of ``spectral_metrics.json`` and are
+mirrored into ``dks_artifact_provenance.json``.  On any variant failure the
+canonical :data:`ESCALATION_LADDER` and the failing diagnostics are printed and
+the driver exits nonzero -- a robustness failure is a finding, never a reason to
+tune ``min_persistence`` or any threshold.
 """
 
 from __future__ import annotations
@@ -1221,6 +1245,405 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
     return plot_path
 
 
+# ---------------------------------------------------------------------------
+# Robustness harness (data-only): re-run the ACCEPTED configuration under
+# one-at-a-time perturbations and prove the staircase STRUCTURE survives.  Step
+# LOCATIONS may move between variants -- annihilation detunings are
+# interaction-dependent -- but the STRUCTURE (>= 2 state-verified steps,
+# monotone descent, a stationary upper branch, physics-driven counts and the
+# muted 1->0 lower edge) must persist.  Variants write their own npz under
+# ``results/robustness/`` and NEVER touch the primary artifacts; no figure is
+# rendered.  The hardened windowed counter (count_solitons_windowed via
+# run_detuning_sweep) is used throughout, unchanged.
+# ---------------------------------------------------------------------------
+PROVENANCE_JSON = "dks_artifact_provenance.json"
+ROBUSTNESS_DIRNAME = "robustness"
+ROBUSTNESS_JSON_KEY = "staircase_robustness"
+
+# The ADDITIONAL structural invariants a perturbed sweep must satisfy.  These
+# are NOT the staircase validation thresholds -- detect_power_steps' k, the
+# 1-sample alignment tolerance and the monotonicity gate are all unchanged and
+# still enforced verbatim through validate_staircase_alignment below.  Per the
+# task, these floors are FIXED and must never be tuned to make a variant pass;
+# a violation is a finding, escalated via the canonical ESCALATION_LADDER.
+ROBUSTNESS_COUNT_AGREEMENT_MEDIAN_FLOOR = 0.5      # median per-hold agreement
+ROBUSTNESS_STATIONARY_EDGE_KAPPA = 9.5             # every hold >= here stationary
+ROBUSTNESS_MUTED_EDGE_WINDOW_KAPPA = (5.75, 6.5)   # the 1->0 annihilation lives here
+
+
+def load_accepted_config(npz_path: Path) -> SweepConfig:
+    """Read the ACCEPTED sweep configuration from a committed sweep npz.
+
+    The perturbation baseline is taken VERBATIM from the committed
+    ``detuning_sweep.npz`` (its ``sweep_config_json``), never retyped, so the
+    variants perturb exactly the configuration that produced the validated
+    staircase.
+    """
+    d = np.load(npz_path, allow_pickle=False)
+    return SweepConfig(**json.loads(str(d["sweep_config_json"])))
+
+
+def robustness_variant_specs(base: SweepConfig) -> list:
+    """The three one-at-a-time perturbations of the accepted configuration.
+
+    (i) ``position_seed + 1`` -- a different deterministic symmetry-breaking
+    jitter (new soliton placement, so the annihilation ORDER/locations may
+    move); (ii) ``hold_rt`` 2000 -> 1600 -- shorter holds (fewer in-window
+    snapshots, fewer breathing periods cycle-averaged); (iii) ``n_steps``
+    doubled -- halved detuning spacing.  Each perturbs a SINGLE field of
+    ``base`` via :func:`dataclasses.replace` so the rest of the accepted
+    configuration is carried verbatim.  Returns a list of
+    ``(index, key, description, variant_cfg)``.
+    """
+    return [
+        (1, "position_seed+1",
+         f"position_seed {base.position_seed} -> {base.position_seed + 1}",
+         dataclasses.replace(base, position_seed=base.position_seed + 1)),
+        (2, "hold_rt_2000_to_1600",
+         f"hold_rt {base.hold_rt} -> 1600",
+         dataclasses.replace(base, hold_rt=1600)),
+        (3, "n_steps_doubled",
+         f"n_steps {base.n_steps} -> {2 * base.n_steps} "
+         f"(detuning spacing halved)",
+         dataclasses.replace(base, n_steps=2 * base.n_steps)),
+    ]
+
+
+def analyze_sweep_staircase(sweep: dict, cfg: SweepConfig) -> dict:
+    """Post-process a sweep into the staircase alignment WITHOUT rendering.
+
+    Mirrors the ``has_staircase`` analysis of :func:`render_and_report`
+    exactly -- the same primary-observable decision (P_intra vs P_comb by
+    matched-step contrast), the same UNCHANGED :func:`detect_power_steps`
+    detections, and the same :func:`soliton_count_transitions` /
+    :func:`match_steps_to_transitions` alignment on the plotted primary -- but
+    returns the pieces instead of drawing a figure.  Used by the robustness
+    harness (which renders no figure) and pinned to the committed JSON staircase
+    block by ``tests/test_detuning_sweep.py`` so it cannot silently diverge from
+    the primary path.
+    """
+    order = np.argsort(sweep["dw_over_kappa"])
+    dwk = np.asarray(sweep["dw_over_kappa"])[order]
+    P = np.asarray(sweep["P_intra"])[order]
+    Pc = np.asarray(sweep["P_comb"])[order]
+    counts = np.asarray(sweep["soliton_count"], dtype=int)[order]
+
+    all_edges, matched = staircase_transition_edges(counts)
+    P_norm_t = P / float(np.max(P))
+    Pc_norm_t = Pc / float(np.max(Pc))
+    steps_intra = detect_power_steps(dwk, P_norm_t, k=cfg.step_k)
+    steps_comb = detect_power_steps(dwk, Pc_norm_t, k=cfg.step_k)
+    contrast_intra = matched_step_contrast(P_norm_t, steps_intra, matched)
+    contrast_comb = matched_step_contrast(Pc_norm_t, steps_comb, matched)
+    use_comb = contrast_comb["contrast"] > contrast_intra["contrast"]
+    steps = steps_comb if use_comb else steps_intra
+    name1 = "P_comb" if use_comb else "P_intra"
+
+    transitions = soliton_count_transitions(dwk, counts)
+    align = match_steps_to_transitions(steps, transitions)
+    return {
+        "dwk": dwk, "counts": counts, "steps": steps, "name1": name1,
+        "use_comb": use_comb, "transitions": transitions, "align": align,
+        "matched_edges": matched, "all_edges": all_edges,
+        "contrast_intra": contrast_intra["contrast"],
+        "contrast_comb": contrast_comb["contrast"],
+    }
+
+
+def assess_robustness_variant(index, key, description, sweep, cfg, analysis,
+                              npz_rel) -> dict:
+    """Score one perturbed sweep against the four robustness invariants.
+
+    Using the hardened windowed counts already in ``sweep`` and the alignment
+    from :func:`analyze_sweep_staircase`, checks (all hard, none tunable):
+
+    1. **Structure** -- :func:`validate_staircase_alignment` passes: >= 2
+       matched (state-verified) power steps AND ``soliton_count`` monotone
+       non-increasing along the descending sweep.
+    2. **Physics-driven counts** -- median per-hold ``count_agreement`` >=
+       ``ROBUSTNESS_COUNT_AGREEMENT_MEDIAN_FLOOR`` AND no soliton-bearing hold
+       (``soliton_count >= 1``) has ``count_agreement == 0``.  Rationale: if
+       the raw per-snapshot counts stop agreeing with the persistent-cluster
+       count, the persistence machinery is doing ALL the work and the
+       "robustness" is an artifact of the counter, not the physics -- an
+       ``agreement == 0`` hold is one where the count is counter-made, not
+       physics-made.
+    3. **Stationary upper branch** -- every hold at ``dw >=
+       ROBUSTNESS_STATIONARY_EDGE_KAPPA`` is ``is_stationary``.
+    4. **Muted lower edge** -- the muted 1->0 annihilation transition is
+       present within ``ROBUSTNESS_MUTED_EDGE_WINDOW_KAPPA``.  Its matched-vs-
+       unmatched STATUS is recorded, not gated: per the driver's honesty
+       constraint (see the module docstring and ``match_steps_to_transitions``)
+       whether the 1->0 registers as a power step is DATA-decided on the
+       plotted primary -- on the accepted sweep it resolves naturally on the
+       pump-excluded comb power (matched), which is a STRONGER outcome than an
+       unmatched (power-muted) edge, never a failure.  The invariant is that
+       the edge's STRUCTURE persists in the window; forcing it to be unmatched
+       would require tampering with the detector, which is forbidden.
+
+    Returns the per-variant record (the JSON-block fields plus diagnostics and
+    the ``violations`` list); ``pass`` is True iff there are no violations.
+    """
+    order = np.argsort(sweep["dw_over_kappa"])
+    dwk = np.asarray(sweep["dw_over_kappa"])[order]
+    counts = np.asarray(sweep["soliton_count"], dtype=int)[order]
+    agree = np.asarray(sweep["count_agreement"], dtype=float)[order]
+    is_stat = np.asarray(sweep["is_stationary"]).astype(bool)[order]
+    align = analysis["align"]
+    violations = []
+
+    # (1) hard validation gate (thresholds UNCHANGED).
+    problems = validate_staircase_alignment(counts, align)
+    violations += [f"structure: {p}" for p in problems]
+
+    # (2) count_agreement: median floor + no soliton-bearing zero.
+    med_agree = float(np.median(agree))
+    if med_agree < ROBUSTNESS_COUNT_AGREEMENT_MEDIAN_FLOOR:
+        violations.append(
+            f"count_agreement: median {med_agree:.3f} < "
+            f"{ROBUSTNESS_COUNT_AGREEMENT_MEDIAN_FLOOR} floor (the persistent "
+            f"counts no longer track the raw per-snapshot counts across the "
+            f"sweep)")
+    soliton_bearing = counts >= 1
+    sb_zero_idx = np.nonzero(soliton_bearing & (agree == 0.0))[0]
+    sb_zero = [{"dw_over_kappa": float(dwk[i]), "soliton_count": int(counts[i])}
+               for i in sb_zero_idx]
+    if sb_zero:
+        shown = ", ".join(f"{z['dw_over_kappa']:.3f}k (N={z['soliton_count']})"
+                          for z in sb_zero[:8])
+        more = f" (+{len(sb_zero) - 8} more)" if len(sb_zero) > 8 else ""
+        violations.append(
+            f"count_agreement: {len(sb_zero)} soliton-bearing hold(s) with "
+            f"count_agreement == 0 -- the persistence machinery is load-bearing "
+            f"there, not the physics: {shown}{more}")
+
+    # (3) stationary for every hold dw >= edge.
+    hi = dwk >= ROBUSTNESS_STATIONARY_EDGE_KAPPA
+    nonstat_idx = np.nonzero(hi & ~is_stat)[0]
+    nonstat = [float(dwk[i]) for i in nonstat_idx]
+    if nonstat:
+        shown = ", ".join(f"{d:.3f}k" for d in nonstat[:8])
+        more = f" (+{len(nonstat) - 8} more)" if len(nonstat) > 8 else ""
+        violations.append(
+            f"stationarity: {len(nonstat)} hold(s) at dw >= "
+            f"{ROBUSTNESS_STATIONARY_EDGE_KAPPA}k are not is_stationary: "
+            f"{shown}{more}")
+
+    # (4) muted 1->0 annihilation edge present in the window.
+    lo_w, hi_w = ROBUSTNESS_MUTED_EDGE_WINDOW_KAPPA
+    one_to_zero = [t for t in analysis["transitions"]
+                   if t["n_low_side"] == 0 and t["n_high_side"] >= 1
+                   and lo_w <= t["dw_mid"] <= hi_w]
+    if not one_to_zero:
+        violations.append(
+            f"muted edge: no 1->0 annihilation transition in "
+            f"[{lo_w}, {hi_w}]k -- the staircase's lower-edge structure is "
+            f"absent")
+        muted = {"dw_mid_over_kappa": None, "status": "absent"}
+    else:
+        edge = one_to_zero[0]
+        matched_tr = {m["transition_edge_index"] for m in align["matched"]}
+        unmatched_tr = {t["edge_index"] for t in align["unmatched_transitions"]}
+        if edge["edge_index"] in matched_tr:
+            status = "matched"        # resolved naturally on the plotted primary
+        elif edge["edge_index"] in unmatched_tr:
+            status = "unmatched"      # power-muted: a state change w/o a power step
+        else:
+            status = "present"
+        muted = {"dw_mid_over_kappa": float(edge["dw_mid"]), "status": status}
+    muted["window_over_kappa"] = [lo_w, hi_w]
+    muted["note"] = (
+        "structural persistence of the 1->0 edge in the window is the gate; "
+        "matched-vs-unmatched is data-decided per the honesty constraint (the "
+        "detector is never forced). On the accepted sweep the edge resolves "
+        "naturally on P_comb (matched) -- a stronger result than an unmatched "
+        "power-muted edge, not a failure.")
+
+    sb_agree = agree[soliton_bearing]
+    return {
+        "index": int(index),
+        "key": key,
+        "perturbation": description,
+        "config": {"position_seed": int(cfg.position_seed),
+                   "hold_rt": int(cfg.hold_rt),
+                   "n_steps": int(cfg.n_steps),
+                   "n_solitons": int(cfg.n_solitons)},
+        "n_detunings": int(dwk.size),
+        "plotted_primary": analysis["name1"],
+        "matched_step_count": int(len(align["matched"])),
+        "matched_dw_mid_over_kappa": [float(m["dw_mid"])
+                                      for m in align["matched"]],
+        "median_count_agreement": med_agree,
+        "min_count_agreement_soliton_bearing": (
+            float(sb_agree.min()) if sb_agree.size else None),
+        "soliton_bearing_zero_agreement_holds": sb_zero,
+        "nonstationary_holds_ge_edge_over_kappa": nonstat,
+        "muted_1to0_edge": muted,
+        "npz": npz_rel,
+        "violations": violations,
+        "pass": len(violations) == 0,
+    }
+
+
+def run_robustness(base_cfg: SweepConfig, *, config_path) -> dict:
+    """Run the three perturbation variants and assemble the robustness block.
+
+    Each variant re-seeds and re-sweeps with the hardened windowed counter,
+    persists its raw npz to ``results/robustness/variant_{i}.npz`` (schema v4,
+    NO figure -- data only), and is scored by
+    :func:`assess_robustness_variant`.  The primary artifacts
+    (``detuning_sweep.npz``, ``soliton_steps.*``, the ``soliton_step`` JSON
+    block) are never touched.  Returns the ``staircase_robustness`` block
+    (per-variant records + ``all_pass`` + ``generated_utc``); the caller writes
+    it to the metrics JSON and mirrors it into the provenance, then escalates on
+    any failure.
+    """
+    rob_dir = RESULTS_DIR / ROBUSTNESS_DIRNAME
+    rob_dir.mkdir(parents=True, exist_ok=True)
+    variants = []
+    for index, key, desc, vcfg in robustness_variant_specs(base_cfg):
+        print(f"\n[robustness] variant {index}/3 -- {desc}")
+        npz_rel = f"{ROBUSTNESS_DIRNAME}/variant_{index}.npz"
+        npz_path = rob_dir / f"variant_{index}.npz"
+        cav = attach_dispersion(load_cavity_params(), vcfg.n_tau)
+        try:
+            sweep = run_detuning_sweep(cav, vcfg, config_path=config_path)
+        except RuntimeError as exc:
+            # e.g. the perturbed seed merged/died during the pre-settle -- a
+            # legitimate robustness finding (the seeding is not robust to this
+            # perturbation), recorded, never silently retried.
+            variants.append({
+                "index": int(index), "key": key, "perturbation": desc,
+                "config": {"position_seed": int(vcfg.position_seed),
+                           "hold_rt": int(vcfg.hold_rt),
+                           "n_steps": int(vcfg.n_steps),
+                           "n_solitons": int(vcfg.n_solitons)},
+                "matched_step_count": 0, "matched_dw_mid_over_kappa": [],
+                "median_count_agreement": None, "muted_1to0_edge": None,
+                "npz": None,
+                "violations": [f"sweep aborted before completion: {exc}"],
+                "pass": False,
+            })
+            print(f"[robustness] variant {index} ABORTED: {exc}")
+            continue
+        analysis = analyze_sweep_staircase(sweep, vcfg)
+        problems = validate_staircase_alignment(analysis["counts"],
+                                                analysis["align"])
+        # The raw npz is ALWAYS persisted (diagnostic record), flagged with
+        # whether it passed the staircase validation gate -- exactly the primary
+        # driver's persistence contract, but into the robustness/ sidecar dir.
+        save_sweep_npz(npz_path, sweep, vcfg,
+                       staircase_validated=(not problems))
+        result = assess_robustness_variant(index, key, desc, sweep, vcfg,
+                                            analysis, npz_rel)
+        variants.append(result)
+        verdict = "PASS" if result["pass"] else "FAIL"
+        print(f"[robustness] variant {index} {verdict}: "
+              f"{result['matched_step_count']} matched step(s) at "
+              + (", ".join(f"{m:.3f}k"
+                           for m in result["matched_dw_mid_over_kappa"]) or "-")
+              + f"; median count_agreement "
+              f"{result['median_count_agreement']:.3f}; muted 1->0 "
+              f"{result['muted_1to0_edge']['status']} at "
+              + (f"{result['muted_1to0_edge']['dw_mid_over_kappa']:.3f}k"
+                 if result['muted_1to0_edge']['dw_mid_over_kappa'] is not None
+                 else "n/a"))
+        for viol in result["violations"]:
+            print(f"[robustness]   - {viol}")
+
+    all_pass = all(v["pass"] for v in variants)
+    return {
+        "metric": "staircase_robustness",
+        "baseline": ("ACCEPTED configuration read verbatim from "
+                     f"{SWEEP_NPZ} sweep_config_json"),
+        "perturbations": ("one-at-a-time: (i) position_seed+1, "
+                          "(ii) hold_rt 2000->1600, (iii) n_steps doubled "
+                          "(detuning spacing halved)"),
+        "counter": ("hardened position-persistence windowed counter "
+                    "(count_solitons_windowed) throughout; detect_power_steps, "
+                    "the 1-sample alignment tolerance and the monotonicity gate "
+                    "are unchanged"),
+        "invariants": {
+            "structure": (">= 2 matched (state-verified) steps AND soliton_count "
+                          "monotone non-increasing along the descending sweep "
+                          "(validate_staircase_alignment)"),
+            "physics_driven_counts": (
+                f"median count_agreement >= "
+                f"{ROBUSTNESS_COUNT_AGREEMENT_MEDIAN_FLOOR} AND no "
+                f"soliton-bearing (N>=1) hold with count_agreement == 0"),
+            "stationary_upper_branch": (
+                f"every hold at dw >= {ROBUSTNESS_STATIONARY_EDGE_KAPPA}k is "
+                f"is_stationary"),
+            "muted_lower_edge": (
+                f"a 1->0 annihilation transition persists within "
+                f"{list(ROBUSTNESS_MUTED_EDGE_WINDOW_KAPPA)}k (matched-vs-"
+                f"unmatched recorded, not gated -- data-decided per the "
+                f"honesty constraint)"),
+        },
+        "note": ("step LOCATIONS may move between variants (annihilation "
+                 "detunings are interaction-dependent); STRUCTURE must persist. "
+                 "The invariant floors are FIXED -- a violation is a finding, "
+                 "escalated via the canonical ESCALATION_LADDER; min_persistence "
+                 "and the thresholds are never tuned to make a variant pass."),
+        "variants": variants,
+        "all_pass": bool(all_pass),
+        "generated_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+
+
+def _append_provenance_robustness(block: dict) -> None:
+    """Mirror the robustness block into dks_artifact_provenance.json (Task D).
+
+    Appends a ``staircase_robustness`` key (variants with perturbation +
+    pass/fail + matched-step count/dw_mids + median agreement, the overall
+    ``all_pass`` and ``generated_utc``), leaving every existing provenance key
+    intact.
+    """
+    path = RESULTS_DIR / PROVENANCE_JSON
+    data = {}
+    if path.exists():
+        with open(path) as f:
+            data = json.load(f)
+    data[ROBUSTNESS_JSON_KEY] = {
+        "all_pass": block["all_pass"],
+        "generated_utc": block["generated_utc"],
+        "perturbations": block["perturbations"],
+        "variants": [
+            {"perturbation": v["perturbation"],
+             "pass": v["pass"],
+             "matched_step_count": v.get("matched_step_count"),
+             "matched_dw_mid_over_kappa": v.get("matched_dw_mid_over_kappa"),
+             "median_count_agreement": v.get("median_count_agreement"),
+             "muted_1to0_edge_status": (
+                 v["muted_1to0_edge"]["status"]
+                 if v.get("muted_1to0_edge") else None),
+             "npz": v.get("npz")}
+            for v in block["variants"]],
+    }
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2, default=float)
+
+
+def _abort_on_failed_robustness(block: dict) -> None:
+    """Print the failing variants' diagnostics + the ladder and exit nonzero.
+
+    The primary artifacts are already untouched by the robustness mode (it only
+    writes the ``robustness/`` npzs and the ``staircase_robustness`` JSON /
+    provenance keys); this just surfaces the finding and escalates.
+    """
+    print("\n[robustness] STAIRCASE ROBUSTNESS FAILED -- primary artifacts "
+          "untouched (detuning_sweep.npz, soliton_steps.*, the soliton_step "
+          "JSON block are all unchanged).")
+    for v in block["variants"]:
+        if not v["pass"]:
+            print(f"[robustness] variant {v['index']} ({v['perturbation']}) "
+                  f"FAILED:")
+            for viol in v["violations"]:
+                print(f"[robustness]     - {viol}")
+    print(ESCALATION_LADDER)
+    sys.exit(1)
+
+
 def _abort_on_failed_validation(exc: StaircaseValidationError,
                                 npz_note: str) -> None:
     """Print the failure + the canonical escalation ladder and exit nonzero.
@@ -1263,10 +1686,49 @@ def main() -> None:
     ap.add_argument("--render-only", action="store_true",
                     help="regenerate the figure + JSON from the committed "
                          "detuning_sweep.npz without re-running the solver")
+    ap.add_argument("--robustness", action="store_true",
+                    help="re-run the ACCEPTED configuration (read verbatim from "
+                         "the committed detuning_sweep.npz) under three "
+                         "one-at-a-time perturbations and prove the staircase "
+                         "STRUCTURE persists; writes results/robustness/"
+                         "variant_{i}.npz (data only, no figure) and the "
+                         "staircase_robustness JSON/provenance blocks, never "
+                         "touching the primary artifacts")
     args = ap.parse_args()
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     t_start = time.time()
+
+    if args.robustness:
+        base_cfg = load_accepted_config(RESULTS_DIR / SWEEP_NPZ)
+        print(f"[robustness] accepted config (verbatim from {SWEEP_NPZ}): "
+              f"n_solitons={base_cfg.n_solitons}, position_seed="
+              f"{base_cfg.position_seed}, hold_rt={base_cfg.hold_rt}, "
+              f"n_steps={base_cfg.n_steps}, n_tau={base_cfg.n_tau}")
+        noise_cfg = write_noise_off_config(CONFIG_PATH)
+        try:
+            print(f"[robustness] deterministic (noise-off) config -> {noise_cfg}")
+            block = run_robustness(base_cfg, config_path=noise_cfg)
+        finally:
+            try:
+                noise_cfg.unlink()
+            except OSError:
+                pass
+        # Record the full result (JSON block + provenance mirror) BEFORE any
+        # escalation, so the pass/fail record is complete even on failure; these
+        # are separate keys and never modify the primary soliton_step block.
+        _update_json(RESULTS_DIR / METRICS_JSON, ROBUSTNESS_JSON_KEY, block)
+        _append_provenance_robustness(block)
+        print(f"\n[robustness] json  -> {RESULTS_DIR / METRICS_JSON} "
+              f"({ROBUSTNESS_JSON_KEY})")
+        print(f"[robustness] prov  -> {RESULTS_DIR / PROVENANCE_JSON} "
+              f"({ROBUSTNESS_JSON_KEY})")
+        if not block["all_pass"]:
+            _abort_on_failed_robustness(block)
+        print(f"[robustness] ALL {len(block['variants'])} VARIANTS PASS -- "
+              f"staircase structure is robust to the perturbations "
+              f"({time.time() - t_start:.1f}s)")
+        return
 
     if args.render_only:
         sweep, cfg = load_sweep_npz(RESULTS_DIR / SWEEP_NPZ)

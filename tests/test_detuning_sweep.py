@@ -21,11 +21,17 @@ from analysis.dks_access import attach_dispersion, load_cavity_params
 from analysis.run_detuning_sweep import (
     ESCALATION_LADDER,
     NPZ_SCHEMA_VERSION,
+    ROBUSTNESS_COUNT_AGREEMENT_MEDIAN_FLOOR,
+    ROBUSTNESS_MUTED_EDGE_WINDOW_KAPPA,
+    ROBUSTNESS_STATIONARY_EDGE_KAPPA,
     SOLITON_LABELS,
     StaircaseValidationError,
     SweepConfig,
+    analyze_sweep_staircase,
+    assess_robustness_variant,
     load_sweep_npz,
     matched_step_contrast,
+    robustness_variant_specs,
     run_detuning_sweep,
     save_sweep_npz,
     staircase_transition_edges,
@@ -425,3 +431,126 @@ def test_escalation_ladder_is_canonical():
         assert rung in ESCALATION_LADDER
     assert "Never weaken detect_power_steps" in ESCALATION_LADDER
     assert ESCALATION_LADDER.index("M1") < ESCALATION_LADDER.index("P1")
+
+
+# ---------------------------------------------------------------------------
+# Robustness harness (--robustness): perturbation specs, the standalone
+# analyzer (pinned to the primary render path) and the variant assessment
+# ---------------------------------------------------------------------------
+def test_robustness_variant_specs_are_one_at_a_time():
+    """The three perturbations each change exactly ONE field of the base cfg."""
+    base = SweepConfig(position_seed=1, hold_rt=2000, n_steps=261)
+    specs = robustness_variant_specs(base)
+    assert [i for i, *_ in specs] == [1, 2, 3]
+    by_key = {key: cfg for _, key, _, cfg in specs}
+    # (i) position_seed + 1, nothing else moves
+    v1 = by_key["position_seed+1"]
+    assert v1.position_seed == base.position_seed + 1
+    assert (v1.hold_rt, v1.n_steps) == (base.hold_rt, base.n_steps)
+    # (ii) hold_rt -> 1600, nothing else moves
+    v2 = by_key["hold_rt_2000_to_1600"]
+    assert v2.hold_rt == 1600
+    assert (v2.position_seed, v2.n_steps) == (base.position_seed, base.n_steps)
+    # (iii) n_steps doubled, nothing else moves
+    v3 = by_key["n_steps_doubled"]
+    assert v3.n_steps == 2 * base.n_steps
+    assert (v3.position_seed, v3.hold_rt) == (base.position_seed, base.hold_rt)
+
+
+def test_analyze_sweep_staircase_matches_render_path():
+    """The robustness analyzer reproduces render_and_report's decision exactly.
+
+    Pins :func:`analyze_sweep_staircase` to the primary path on the SAME
+    synthetic sweep the render/validation tests use, so it can never silently
+    diverge (same primary-observable choice, same matched dw_mids).
+    """
+    sweep, cfg = _synthetic_staircase_sweep()
+    a = analyze_sweep_staircase(sweep, cfg)
+    # ascending order, monotone non-decreasing counts, >= 2 matched steps
+    assert list(a["counts"]) == sorted(a["counts"])
+    assert not validate_staircase_alignment(a["counts"], a["align"])
+    assert a["name1"] in ("P_intra", "P_comb")
+    # the matched set equals match_steps_to_transitions on the plotted primary
+    matched_here = match_steps_to_transitions(
+        a["steps"], soliton_count_transitions(a["dwk"], a["counts"]))
+    assert ([m["dw_mid"] for m in a["align"]["matched"]]
+            == [m["dw_mid"] for m in matched_here["matched"]])
+
+
+def test_assess_robustness_flags_soliton_bearing_zero_agreement():
+    """A soliton-bearing hold with count_agreement == 0 is a hard violation.
+
+    Rationale under test: an ``agreement == 0`` hold is one where NO single
+    snapshot's raw count matched the persistent count, so the count there is
+    counter-made, not physics-made -- the exact failure mode the invariant
+    guards.  A clean sweep passes; injecting one zero at a soliton-bearing hold
+    (and nothing else) flips only that check.
+    """
+    sweep, cfg = _synthetic_staircase_sweep()
+    # This synthetic sweep breathes nowhere and its muted 0->1 (== the 1->0
+    # of a real run) sits outside the [5.75, 6.5] window, so restrict the test
+    # to the count_agreement invariant by patching the sweep into that window
+    # is unnecessary: assess records every check independently.
+    a = analyze_sweep_staircase(sweep, cfg)
+    clean = dict(sweep)
+    clean["count_agreement"] = np.ones_like(np.asarray(sweep["count_agreement"],
+                                                       dtype=float))
+    res_clean = assess_robustness_variant(1, "k", "desc", clean, cfg, a, "x.npz")
+    assert res_clean["min_count_agreement_soliton_bearing"] == 1.0
+    assert not any("count_agreement" in v for v in res_clean["violations"])
+
+    # inject a single zero at a soliton-bearing hold -> one agreement violation
+    order = np.argsort(sweep["dw_over_kappa"])
+    counts_asc = np.asarray(sweep["soliton_count"])[order]
+    sb_idx_asc = int(np.nonzero(counts_asc >= 1)[0][0])
+    ag = np.ones_like(counts_asc, dtype=float)
+    ag[sb_idx_asc] = 0.0
+    dirty = dict(sweep)
+    dirty["count_agreement"] = ag[np.argsort(order)]     # back to sweep order
+    res_dirty = assess_robustness_variant(1, "k", "desc", dirty, cfg, a, "x.npz")
+    assert res_dirty["min_count_agreement_soliton_bearing"] == 0.0
+    assert res_dirty["soliton_bearing_zero_agreement_holds"]
+    assert any("count_agreement == 0" in v for v in res_dirty["violations"])
+
+
+def test_assess_robustness_muted_edge_matched_is_not_a_failure():
+    """A 1->0 edge that resolves as a power step (matched) is recorded, not failed.
+
+    Per the honesty constraint the matched-vs-unmatched status of the muted
+    1->0 edge is DATA-decided; a matched edge (resolved naturally on the
+    plotted primary) is a stronger outcome than an unmatched one and must never
+    count as a robustness violation.  The invariant is only that the edge's
+    STRUCTURE persists in the window.
+    """
+    # A sweep whose 1->0 annihilation lands inside the [5.75, 6.5] window and
+    # carries a clear power step, so the detector matches it.
+    n = 40
+    dw = np.linspace(5.0, 11.0, n)                       # ascending
+    counts = np.where(dw < 6.2, 0, np.where(dw < 6.6, 1, 2)).astype(np.int64)
+    y = np.where(counts == 0, 0.20, np.where(counts == 1, 0.60, 1.0))
+    y = y + 1e-4 * np.sin(np.arange(n))
+    sweep = {
+        "dw_over_kappa": dw, "P_intra": y.copy(), "P_intra_std": np.full(n, 1e-3),
+        "P_comb": y.copy(), "P_comb_std": np.full(n, 1e-3),
+        "soliton_count": counts,
+        "count_agreement": np.ones(n),
+        "is_stationary": np.ones(n, dtype=bool),
+        "is_breather": (counts >= 1),
+    }
+    cfg = SweepConfig(dw_start_kappa=11.0, dw_stop_kappa=5.0, n_steps=n,
+                      n_solitons=2)
+    a = analyze_sweep_staircase(sweep, cfg)
+    res = assess_robustness_variant(1, "k", "desc", sweep, cfg, a, "x.npz")
+    edge = res["muted_1to0_edge"]
+    lo_w, hi_w = ROBUSTNESS_MUTED_EDGE_WINDOW_KAPPA
+    assert lo_w <= edge["dw_mid_over_kappa"] <= hi_w
+    assert edge["status"] in ("matched", "unmatched")     # data-decided
+    # a matched 1->0 edge is NOT a violation
+    assert not any("muted edge" in v for v in res["violations"])
+
+
+def test_robustness_thresholds_are_the_documented_fixed_floors():
+    """The robustness floors are the fixed values in the task spec (not tuned)."""
+    assert ROBUSTNESS_COUNT_AGREEMENT_MEDIAN_FLOOR == 0.5
+    assert ROBUSTNESS_STATIONARY_EDGE_KAPPA == 9.5
+    assert tuple(ROBUSTNESS_MUTED_EDGE_WINDOW_KAPPA) == (5.75, 6.5)
