@@ -376,7 +376,238 @@ def test_c_breathing(dw, c, env, under, events, sweep):
     }
 
 
+# ---------------------------------------------------------------------------
+# --starvation mode: is the robustness failure SNAPSHOT STARVATION?
+# ---------------------------------------------------------------------------
+# The driver takes a field snapshot every ``snap_int = max(hold_rt // 32, 1)``
+# round trips (analysis/run_detuning_sweep.py) and the windowed counter votes
+# only over the snapshots inside the final-``avg_frac`` power-averaging window.
+# The starvation hypothesis: that window holds only ~2 snapshots, so with the
+# breather period T_b ~ 150-180 RT the persistence vote is phase-aliased and
+# rests on too few samples.  This mode PROVES OR DISPROVES that offline, from
+# the committed npzs alone -- it never runs the solver.
+SNAP_DIVISOR_ACTUAL = 32     # mirrors the driver: snap_int = max(hold_rt//32, 1)
+SNAP_DIVISOR_HYPOTHESIS = 8  # the hypothesis in the brief: interval = hold_rt//8
+STARVATION_N_IN_MAX = 3      # "few samples" ceiling for the CONFIRMED verdict
+
+
+def _n_in_window(hold_rt: int, avg_frac: float, interval: int) -> int:
+    """In-window snapshot count, matching the solver + driver EXACTLY.
+
+    The solver stores ``n_snap = ceil(hold_rt / interval)`` snapshots at round
+    trips ``0, interval, 2*interval, ...`` (``simulator/lle_solver.py``:
+    ``n_snapshots = (t_slow + interval - 1)//interval`` with
+    ``do_snapshot = step_idx % interval == 0``); the driver keeps those with
+    ``snap_rt >= floor(hold_rt*(1-avg_frac))``
+    (``analysis/run_detuning_sweep.py``).  Returns that count (>= 1: a
+    degenerate window falls back to the last snapshot, as the driver does).
+    """
+    n_snap = (int(hold_rt) + int(interval) - 1) // int(interval)
+    snap_rt = np.arange(n_snap) * int(interval)
+    i_start = int(np.floor(hold_rt * (1.0 - avg_frac)))
+    n_in = int((snap_rt >= i_start).sum())
+    return n_in if n_in > 0 else 1
+
+
+def _on_grid(values, n_in, tol=1e-6) -> bool:
+    """True iff every value lies on the grid {0, 1/n_in, 2/n_in, ..., 1}."""
+    v = np.asarray(values, dtype=float)
+    return bool(np.all(np.abs(v * n_in - np.round(v * n_in)) <= tol * n_in))
+
+
+def _empirical_denominator(values, max_den=64) -> int:
+    """Finest common grid the observed values lie on (their agreement n_in)."""
+    from fractions import Fraction
+    import math
+    N = 1
+    for v in sorted(set(np.round(np.asarray(values, dtype=float), 9).tolist())):
+        N = N * Fraction(v).limit_denominator(max_den).denominator \
+            // math.gcd(N, Fraction(v).limit_denominator(max_den).denominator)
+    return int(N)
+
+
+def starvation_forensics() -> int:
+    """Part A: prove/disprove snapshot starvation from the committed npzs only.
+
+    For the primary sweep and each ``robustness/variant_*.npz``: computes the
+    in-window snapshot count ``n_in`` (both the driver's actual ``hold_rt//32``
+    cadence and the brief's hypothesised ``hold_rt//8``), tests the count_
+    agreement quantization signature (every stored value must lie on the
+    ``{k/n_in}`` grid), and tabulates every monotonicity-violating and every
+    ``count_agreement == 0`` hold with the aliasing indicator
+    ``snapshot_spacing / breathing_period_rt``.  Appends a ``Snapshot
+    starvation`` section to the forensics report with a one-line verdict:
+    CONFIRMED iff ``n_in <= STARVATION_N_IN_MAX`` for ALL files AND the
+    quantization signature holds.  Returns 0 (report written); the GATE
+    decision (proceed vs stop) is the caller's, keyed on the printed verdict.
+    """
+    files = [("primary", RESULTS_DIR / SWEEP_NPZ)]
+    rob = sorted((RESULTS_DIR / "robustness").glob("variant_*.npz"))
+    files += [(p.stem, p) for p in rob]
+
+    md = ["", "## Snapshot starvation (Part A: offline hypothesis test)", "",
+          f"Generated {_dt.datetime.now(_dt.timezone.utc).isoformat()} by "
+          f"`analysis/staircase_forensics.py --starvation` (offline; no solver "
+          f"run). Hypothesis under test: the robustness count failures are "
+          f"SNAPSHOT STARVATION -- the windowed counter votes over too few, "
+          f"phase-aliased in-window snapshots.", "",
+          "Driver cadence: `snap_int = max(hold_rt // "
+          f"{SNAP_DIVISOR_ACTUAL}, 1)` "
+          "(`analysis/run_detuning_sweep.py`); the counter votes over the "
+          "snapshots inside the final-`avg_frac` window. The brief hypothesised "
+          f"`interval = hold_rt // {SNAP_DIVISOR_HYPOTHESIS}`.", ""]
+
+    all_n_in, all_sig_ok, per_file = [], [], []
+    print(f"[starvation] auditing {len(files)} file(s)")
+    for name, path in files:
+        if not path.exists():
+            print(f"[starvation] SKIP {name}: {path} missing")
+            continue
+        sweep, cfg = load_sweep_npz(path)
+        hold_rt, avg_frac = int(cfg.hold_rt), float(cfg.avg_frac)
+        iv_act = max(hold_rt // SNAP_DIVISOR_ACTUAL, 1)
+        iv_hyp = max(hold_rt // SNAP_DIVISOR_HYPOTHESIS, 1)
+        n_in_act = _n_in_window(hold_rt, avg_frac, iv_act)
+        n_in_hyp = _n_in_window(hold_rt, avg_frac, iv_hyp)
+
+        order = np.argsort(np.asarray(sweep["dw_over_kappa"]))
+        dw = np.asarray(sweep["dw_over_kappa"], float)[order]
+        c = np.asarray(sweep["soliton_count"], int)[order]
+        ca = np.asarray(sweep["count_agreement"], float)[order]
+        ce = (np.asarray(sweep["soliton_count_end_snapshot"], int)[order]
+              if "soliton_count_end_snapshot" in sweep else np.full(c.size, -1))
+        brel = np.asarray(sweep["breathing_relstd"], float)[order]
+        bper = np.asarray(sweep["breathing_period_rt"], float)[order]
+
+        emp_den = _empirical_denominator(ca)
+        sig_ok = _on_grid(ca, n_in_act)          # signature for the ACTUAL n_in
+        all_n_in.append(n_in_act)
+        all_sig_ok.append(sig_ok)
+
+        # monotonicity-violating holds (ascending: the lower side of a diff<0
+        # edge -- the undercounted hold) + soliton-bearing agreement==0 holds
+        mono = np.nonzero(np.diff(c) < 0)[0] + 1
+        agree0 = np.nonzero((c >= 1) & (ca == 0.0))[0]
+        problem = sorted(set(mono.tolist()) | set(agree0.tolist()))
+
+        per_file.append(dict(
+            name=name, hold_rt=hold_rt, avg_frac=avg_frac, iv_act=iv_act,
+            iv_hyp=iv_hyp, n_in_act=n_in_act, n_in_hyp=n_in_hyp,
+            emp_den=emp_den, sig_ok=sig_ok, n_mono=int(mono.size),
+            n_agree0=int(agree0.size),
+            rows=[dict(dw=float(dw[i]), N=int(c[i]), Nend=int(ce[i]),
+                       agree=float(ca[i]), brel=float(brel[i]),
+                       bper=float(bper[i]),
+                       ratio=(float(iv_act) / float(bper[i])
+                              if np.isfinite(bper[i]) and bper[i] > 0
+                              else float("nan")),
+                       kind=("mono" if i in set(mono.tolist()) else "")
+                            + ("+agree0" if i in set(agree0.tolist()) else ""))
+                  for i in problem]))
+        print(f"[starvation] {name}: hold_rt={hold_rt} avg_frac={avg_frac} "
+              f"| n_in(actual //{SNAP_DIVISOR_ACTUAL})={n_in_act}  "
+              f"n_in(hyp //{SNAP_DIVISOR_HYPOTHESIS})={n_in_hyp}  "
+              f"| count_agreement grid=1/{emp_den} (signature on {{k/{n_in_act}}}: "
+              f"{sig_ok}) | mono-violating={int(mono.size)} agree0={int(agree0.size)}")
+
+    # ---- Verdict (the brief's rule) ----------------------------------------
+    n_in_ok = bool(all_n_in) and all(n <= STARVATION_N_IN_MAX for n in all_n_in)
+    sig_all = all(all_sig_ok)
+    confirmed = n_in_ok and sig_all
+    verdict = "CONFIRMED" if confirmed else "NOT CONFIRMED"
+
+    # ---- Report body -------------------------------------------------------
+    md.append("### Per-file snapshot budget and quantization signature")
+    md.append("")
+    md.append("| file | hold_rt | snap_int (//%d) | **n_in (actual)** | "
+              "n_in (//%d hyp) | count_agreement grid | signature {k/n_in} | "
+              "mono-viol | agree==0 |"
+              % (SNAP_DIVISOR_ACTUAL, SNAP_DIVISOR_HYPOTHESIS))
+    md.append("|---|---|---|---|---|---|---|---|---|")
+    for f in per_file:
+        md.append(f"| {f['name']} | {f['hold_rt']} | {f['iv_act']} | "
+                  f"**{f['n_in_act']}** | {f['n_in_hyp']} | 1/{f['emp_den']} | "
+                  f"{f['sig_ok']} | {f['n_mono']} | {f['n_agree0']} |")
+    md.append("")
+    md.append("### Failing holds (monotonicity dips + soliton-bearing "
+              "agreement==0)")
+    md.append("")
+    md.append("`ratio = snap_int / breathing_period_rt` is the aliasing "
+              "indicator: **>> 1 would mean the snapshots undersample the "
+              "breathing cycle (starvation); < 1 means they oversample it.**")
+    md.append("")
+    md.append("| file | dw/k | N | N_end-snap | count_agreement | "
+              "breathing_relstd | T_b (RT) | snap_int/T_b | kind |")
+    md.append("|---|---|---|---|---|---|---|---|---|")
+    for f in per_file:
+        for r in f["rows"]:
+            md.append(f"| {f['name']} | {r['dw']:.3f} | {r['N']} | "
+                      f"{r['Nend']} | {r['agree']:.3f} | {r['brel']:.4f} | "
+                      f"{r['bper']:.0f} | {r['ratio']:.2f} | {r['kind']} |")
+    md.append("")
+    md.append("### Verdict")
+    md.append("")
+    md.append(f"**STARVATION: {verdict}** "
+              f"(rule: CONFIRMED iff n_in <= {STARVATION_N_IN_MAX} for ALL "
+              f"files AND every count_agreement lies on the {{k/n_in}} grid).")
+    md.append("")
+    if confirmed:
+        md.append(f"- n_in <= {STARVATION_N_IN_MAX} for every file and the "
+                  f"quantization signature holds: the counter is sample-starved "
+                  f"and phase-aliased. Densification (Part B) is warranted.")
+    else:
+        n_in_set = sorted(set(all_n_in))
+        md.append(f"- n_in = {n_in_set} (actual `hold_rt//{SNAP_DIVISOR_ACTUAL}` "
+                  f"cadence), which is **> {STARVATION_N_IN_MAX}** -- the "
+                  f"counter already votes over ~8 in-window snapshots, not ~2. "
+                  f"The brief's `hold_rt//{SNAP_DIVISOR_HYPOTHESIS}` interval "
+                  f"(giving n_in={sorted(set(f['n_in_hyp'] for f in per_file))}) "
+                  f"is NOT what the driver uses.")
+        md.append(f"- The count_agreement quantization confirms it: every value "
+                  f"lies on an **eighths** grid (1/{per_file[0]['emp_den']}), "
+                  f"i.e. n_in = {per_file[0]['emp_den']}, not the halves "
+                  f"({{0, 0.5, 1}}) the starvation hypothesis predicts.")
+        md.append(f"- The aliasing indicator `snap_int/T_b` is < 1 at every "
+                  f"failing hold (snapshots OVERSAMPLE the breathing cycle by "
+                  f"~3x), so phase-aliasing is not the mechanism.")
+        md.append(f"- **GATE (per the brief): STOP.** The counter had many "
+                  f"(~8) phase-spread samples and still failed at isolated "
+                  f"deep-breather holds, so the failure mechanism is NOT "
+                  f"starvation. Densification / threshold / protocol work must "
+                  f"not proceed on the falsified hypothesis; the residual "
+                  f"(individual solitons dipping below the rel-height floor "
+                  f"during their breathing troughs at these specific holds) "
+                  f"needs its own verification before any fix.")
+    md.append("")
+
+    out = RESULTS_DIR / REPORT_MD
+    prior = out.read_text(encoding="utf-8") if out.exists() else ""
+    marker = "\n## Snapshot starvation (Part A"
+    if marker in prior:                       # idempotent: replace prior section
+        prior = prior[:prior.index(marker)].rstrip() + "\n"
+    out.write_text(prior.rstrip() + "\n" + "\n".join(md) + "\n", encoding="utf-8")
+    print(f"[starvation] VERDICT: {verdict} "
+          f"(n_in={sorted(set(all_n_in))}, signature_holds={sig_all})")
+    if not confirmed:
+        print("[starvation] GATE: NOT CONFIRMED -> STOP. The counter already "
+              "had ~8 in-window snapshots; starvation is falsified. Do not "
+              "densify or touch thresholds blind.")
+    print(f"[starvation] report -> {out}")
+    return 0
+
+
 def main() -> None:
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--starvation", action="store_true",
+                    help="offline snapshot-starvation hypothesis test over the "
+                         "primary + robustness variant npzs (Part A); appends a "
+                         "section to staircase_forensics.md and prints a "
+                         "CONFIRMED / NOT CONFIRMED verdict")
+    args = ap.parse_args()
+    if args.starvation:
+        sys.exit(starvation_forensics())
+
     sweep, cfg, audit_lines, missing = load_and_audit()
     for ln in audit_lines:
         print("[forensics]", ln.replace("**", ""))

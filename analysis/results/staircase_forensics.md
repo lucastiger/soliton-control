@@ -91,3 +91,43 @@ Generated 2026-07-12T03:12:49.970611+00:00 by `analysis/staircase_forensics.py` 
 Rule applied: 'counting artifact' iff TEST A shows > 0.9 position persistence AND TEST B shows sub-quantum energy changes; TEST A is evaluated on the rotation-controlled statistic against its measured ceiling because the raw fixed-frame number is invalidated by the coherent pattern drift quantified above (with the raw prescription taken literally, the drift alone would fake a 'new positions' reading for every dip longer than one hold).
 
 Consequences for the schema-4 counter hardening (next step, NOT done here): the flicker is an estimator artifact of the end-of-hold single-snapshot 50%-of-max peak count in the deep-breathing sub-band; the per-hold snapshot-median count proposed in the escalation ladder should remove it. The energy-silent 5 -> 4 envelope drop at 7.65 k means the hardened counter must be validated against P_comb steps, not against the current envelope alone.
+
+## Snapshot starvation (Part A: offline hypothesis test)
+
+Generated 2026-07-12T23:31:51.089818+00:00 by `analysis/staircase_forensics.py --starvation` (offline; no solver run). Hypothesis under test: the robustness count failures are SNAPSHOT STARVATION -- the windowed counter votes over too few, phase-aliased in-window snapshots.
+
+Driver cadence: `snap_int = max(hold_rt // 32, 1)` (`analysis/run_detuning_sweep.py`); the counter votes over the snapshots inside the final-`avg_frac` window. The brief hypothesised `interval = hold_rt // 8`.
+
+### Per-file snapshot budget and quantization signature
+
+| file | hold_rt | snap_int (//32) | **n_in (actual)** | n_in (//8 hyp) | count_agreement grid | signature {k/n_in} | mono-viol | agree==0 |
+|---|---|---|---|---|---|---|---|---|
+| primary | 2000 | 62 | **8** | 2 | 1/8 | True | 0 | 2 |
+| variant_1 | 2000 | 62 | **8** | 2 | 1/8 | True | 1 | 1 |
+| variant_2 | 1600 | 50 | **8** | 2 | 1/8 | True | 0 | 0 |
+| variant_3 | 2000 | 62 | **8** | 2 | 1/8 | True | 1 | 3 |
+
+### Failing holds (monotonicity dips + soliton-bearing agreement==0)
+
+`ratio = snap_int / breathing_period_rt` is the aliasing indicator: **>> 1 would mean the snapshots undersample the breathing cycle (starvation); < 1 means they oversample it.**
+
+| file | dw/k | N | N_end-snap | count_agreement | breathing_relstd | T_b (RT) | snap_int/T_b | kind |
+|---|---|---|---|---|---|---|---|---|
+| primary | 7.050 | 5 | 2 | 0.000 | 0.0318 | 184 | 0.34 | +agree0 |
+| primary | 7.075 | 5 | 3 | 0.000 | 0.0338 | 181 | 0.34 | +agree0 |
+| variant_1 | 6.500 | 5 | 2 | 0.000 | 0.0331 | 393 | 0.16 | +agree0 |
+| variant_1 | 6.750 | 4 | 1 | 0.250 | 0.0587 | 188 | 0.33 | mono |
+| variant_3 | 6.785 | 5 | 3 | 0.000 | 0.0465 | 193 | 0.32 | +agree0 |
+| variant_3 | 6.810 | 5 | 4 | 0.000 | 0.0378 | 192 | 0.32 | +agree0 |
+| variant_3 | 6.960 | 5 | 1 | 0.000 | 0.0531 | 186 | 0.33 | +agree0 |
+| variant_3 | 6.997 | 4 | 2 | 0.375 | 0.0435 | 187 | 0.33 | mono |
+
+### Verdict
+
+**STARVATION: NOT CONFIRMED** (rule: CONFIRMED iff n_in <= 3 for ALL files AND every count_agreement lies on the {k/n_in} grid).
+
+- n_in = [8] (actual `hold_rt//32` cadence), which is **> 3** -- the counter already votes over ~8 in-window snapshots, not ~2. The brief's `hold_rt//8` interval (giving n_in=[2]) is NOT what the driver uses.
+- The count_agreement quantization confirms it: every value lies on an **eighths** grid (1/8), i.e. n_in = 8, not the halves ({0, 0.5, 1}) the starvation hypothesis predicts.
+- The aliasing indicator `snap_int/T_b` is < 1 at every failing hold (snapshots OVERSAMPLE the breathing cycle by ~3x), so phase-aliasing is not the mechanism.
+- **GATE (per the brief): STOP.** The counter had many (~8) phase-spread samples and still failed at isolated deep-breather holds, so the failure mechanism is NOT starvation. Densification / threshold / protocol work must not proceed on the falsified hypothesis; the residual (individual solitons dipping below the rel-height floor during their breathing troughs at these specific holds) needs its own verification before any fix.
+

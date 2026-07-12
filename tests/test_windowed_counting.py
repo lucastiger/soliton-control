@@ -173,3 +173,27 @@ def test_cluster_tolerance_from_cavity_parameters():
     snaps, _ = _breathing_snapshots()
     res = count_solitons_windowed(snaps, delta_omega=1.5e9, cav=_Cav())
     assert res["count"] == 5
+
+
+# ---------------------------------------------------------------------------
+# Snapshot-budget arithmetic behind the offline starvation test.  The driver's
+# actual cadence (hold_rt // 32) puts EIGHT snapshots in the counting window,
+# not the two the starvation hypothesis (hold_rt // 8) assumed -- so
+# count_agreement is quantized in eighths, and that is the empirical proof the
+# failures are NOT sample starvation.
+# ---------------------------------------------------------------------------
+def test_in_window_snapshot_budget_actual_vs_hypothesis():
+    from analysis.staircase_forensics import _n_in_window
+    # actual driver cadence: snap_int = hold_rt // 32 -> 8 in-window snapshots
+    assert _n_in_window(2000, 0.25, max(2000 // 32, 1)) == 8
+    assert _n_in_window(1600, 0.25, max(1600 // 32, 1)) == 8
+    # the brief's hypothesised cadence: hold_rt // 8 -> only 2 in-window
+    assert _n_in_window(2000, 0.25, max(2000 // 8, 1)) == 2
+
+
+def test_count_agreement_quantization_signature():
+    from analysis.staircase_forensics import _empirical_denominator, _on_grid
+    eighths = [0.0, 0.125, 0.375, 0.625, 0.875, 1.0]   # observed in the npzs
+    assert _empirical_denominator(eighths) == 8         # => n_in = 8, not 2
+    assert _on_grid(eighths, 8) is True
+    assert _on_grid(eighths, 2) is False                # not halves {0,0.5,1}
