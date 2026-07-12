@@ -132,44 +132,89 @@
     ],
     "single_dks_existence_region_over_kappa": [
       6.199999999999999,
-      6.199999999999999
+      6.225
     ],
     "power_trace_discontinuities": {
       "rule": "|diff(P)[i] - median(diff P)| > k * 1.4826 * MAD(diff P)",
-      "trace": "P_intra",
+      "trace": "P_comb",
       "k": 6.0,
-      "robust_sigma": 0.0014011127629429791,
+      "robust_sigma": 0.0007880231242993441,
       "detected_over_kappa": [
-        5.512499999999999,
-        5.5375,
         6.1875,
-        6.2124999999999995,
         6.2375,
         6.262499999999999,
+        6.2875,
         6.3125,
         6.3374999999999995,
         6.387499999999999,
         6.4125,
         6.4375,
+        6.4624999999999995,
+        6.4875,
         6.512499999999999,
-        6.5874999999999995,
+        6.5375,
+        6.5625,
+        6.6125,
         6.637499999999999,
+        6.6625,
+        6.6875,
         6.7375,
+        6.762499999999999,
+        6.7875,
         6.8125,
+        6.8374999999999995,
         6.8625,
+        6.9375,
+        6.9624999999999995,
+        6.9875,
+        7.0375,
+        7.0625,
+        7.0874999999999995,
+        7.2124999999999995,
+        7.2375,
+        7.2875,
+        7.3125,
+        7.3375,
+        7.3625,
+        7.387499999999999,
+        7.4875,
+        7.512499999999999,
+        7.8125,
+        7.8375,
+        7.8625,
+        7.887499999999999,
+        7.9125,
+        7.9375,
+        8.2375,
+        8.2625,
+        8.287500000000001,
+        8.3125,
+        8.337499999999999,
+        8.3625,
         8.3875,
-        8.412500000000001
+        8.412500000000001,
+        8.5125,
+        8.537500000000001,
+        8.5625,
+        8.6125,
+        8.662500000000001,
+        8.6875,
+        8.8625,
+        8.8875,
+        8.912500000000001,
+        8.9375,
+        8.962499999999999,
+        8.9875,
+        9.0125,
+        9.037500000000001,
+        9.0625
       ],
       "coincides_with_soliton_count_transition": [
-        false,
-        false,
-        true,
-        false,
-        true,
-        false,
-        false,
         true,
         true,
+        false,
+        false,
+        false,
         true,
         false,
         false,
@@ -177,7 +222,60 @@
         false,
         false,
         true,
-        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
         false,
         false
       ]
@@ -217,9 +315,14 @@
         "position_seed": 1,
         "position_jitter_frac": 0.25
       },
-      "generated_utc": "2026-07-11T09:43:32.259321+00:00"
+      "generated_utc": "2026-07-12T04:48:12.380396+00:00"
     },
+    "any_soliton_region_over_kappa": [
+      6.199999999999999,
+      12.0
+    ],
     "staircase": {
+      "n_seeded": 5,
       "n_solitons_seeded": 5,
       "position_seed": 1,
       "position_jitter_frac": 0.25,
@@ -255,113 +358,113 @@
         "6.200": 1,
         "6.225": 1,
         "6.250": 3,
-        "6.275": 1,
-        "6.300": 1,
-        "6.325": 1,
+        "6.275": 3,
+        "6.300": 3,
+        "6.325": 3,
         "6.350": 4,
-        "6.375": 1,
-        "6.400": 3,
+        "6.375": 4,
+        "6.400": 4,
         "6.425": 4,
         "6.450": 4,
-        "6.475": 1,
-        "6.500": 3,
-        "6.525": 2,
-        "6.550": 3,
-        "6.575": 3,
-        "6.600": 2,
-        "6.625": 4,
-        "6.650": 1,
-        "6.675": 1,
-        "6.700": 3,
-        "6.725": 1,
-        "6.750": 1,
-        "6.775": 2,
-        "6.800": 1,
-        "6.825": 2,
-        "6.850": 1,
-        "6.875": 3,
-        "6.900": 2,
-        "6.925": 2,
-        "6.950": 1,
-        "6.975": 4,
-        "7.000": 3,
-        "7.025": 2,
-        "7.050": 2,
-        "7.075": 3,
-        "7.100": 2,
-        "7.125": 3,
-        "7.150": 4,
-        "7.175": 3,
-        "7.200": 1,
-        "7.225": 4,
-        "7.250": 2,
-        "7.275": 3,
-        "7.300": 2,
-        "7.325": 1,
-        "7.350": 2,
-        "7.375": 2,
-        "7.400": 2,
-        "7.425": 2,
-        "7.450": 1,
-        "7.475": 3,
-        "7.500": 4,
-        "7.525": 2,
-        "7.550": 3,
-        "7.575": 2,
-        "7.600": 1,
-        "7.625": 1,
-        "7.650": 2,
+        "6.475": 4,
+        "6.500": 4,
+        "6.525": 5,
+        "6.550": 5,
+        "6.575": 5,
+        "6.600": 5,
+        "6.625": 5,
+        "6.650": 5,
+        "6.675": 5,
+        "6.700": 5,
+        "6.725": 5,
+        "6.750": 5,
+        "6.775": 5,
+        "6.800": 5,
+        "6.825": 5,
+        "6.850": 5,
+        "6.875": 5,
+        "6.900": 5,
+        "6.925": 5,
+        "6.950": 5,
+        "6.975": 5,
+        "7.000": 5,
+        "7.025": 5,
+        "7.050": 5,
+        "7.075": 5,
+        "7.100": 5,
+        "7.125": 5,
+        "7.150": 5,
+        "7.175": 5,
+        "7.200": 5,
+        "7.225": 5,
+        "7.250": 5,
+        "7.275": 5,
+        "7.300": 5,
+        "7.325": 5,
+        "7.350": 5,
+        "7.375": 5,
+        "7.400": 5,
+        "7.425": 5,
+        "7.450": 5,
+        "7.475": 5,
+        "7.500": 5,
+        "7.525": 5,
+        "7.550": 5,
+        "7.575": 5,
+        "7.600": 5,
+        "7.625": 5,
+        "7.650": 5,
         "7.675": 5,
-        "7.700": 3,
-        "7.725": 3,
+        "7.700": 5,
+        "7.725": 5,
         "7.750": 5,
-        "7.775": 2,
-        "7.800": 3,
-        "7.825": 4,
+        "7.775": 5,
+        "7.800": 5,
+        "7.825": 5,
         "7.850": 5,
-        "7.875": 3,
-        "7.900": 3,
-        "7.925": 4,
-        "7.950": 4,
-        "7.975": 2,
-        "8.000": 2,
-        "8.025": 2,
-        "8.050": 2,
-        "8.075": 1,
-        "8.100": 3,
-        "8.125": 4,
-        "8.150": 4,
-        "8.175": 4,
-        "8.200": 4,
-        "8.225": 3,
-        "8.250": 3,
+        "7.875": 5,
+        "7.900": 5,
+        "7.925": 5,
+        "7.950": 5,
+        "7.975": 5,
+        "8.000": 5,
+        "8.025": 5,
+        "8.050": 5,
+        "8.075": 5,
+        "8.100": 5,
+        "8.125": 5,
+        "8.150": 5,
+        "8.175": 5,
+        "8.200": 5,
+        "8.225": 5,
+        "8.250": 5,
         "8.275": 5,
         "8.300": 5,
-        "8.325": 3,
-        "8.350": 3,
+        "8.325": 5,
+        "8.350": 5,
         "8.375": 5,
-        "8.400": 3,
-        "8.425": 3,
-        "8.450": 2,
-        "8.475": 3,
-        "8.500": 2,
-        "8.525": 3,
-        "8.550": 4,
+        "8.400": 5,
+        "8.425": 5,
+        "8.450": 5,
+        "8.475": 5,
+        "8.500": 5,
+        "8.525": 5,
+        "8.550": 5,
         "8.575": 5,
-        "8.600": 3,
+        "8.600": 5,
         "8.625": 5,
-        "8.650": 4,
-        "8.675": 2,
+        "8.650": 5,
+        "8.675": 5,
         "8.700": 5,
         "8.725": 5,
         "8.750": 5,
         "8.775": 5,
         "8.800": 5,
-        "8.825": 3,
+        "8.825": 5,
         "8.850": 5,
         "8.875": 5,
         "8.900": 5,
-        "8.925": 4,
+        "8.925": 5,
         "8.950": 5,
         "8.975": 5,
         "9.000": 5,
@@ -488,299 +591,514 @@
       },
       "transitions": [
         {
-          "edge_over_kappa": 6.1875,
-          "from_count": 1,
-          "to_count": 0
+          "edge_index": 27,
+          "dw_mid": 6.1875,
+          "n_high_side": 1,
+          "n_low_side": 0,
+          "delta_n": 1
         },
         {
-          "edge_over_kappa": 6.2375,
-          "from_count": 3,
-          "to_count": 1
+          "edge_index": 29,
+          "dw_mid": 6.2375,
+          "n_high_side": 3,
+          "n_low_side": 1,
+          "delta_n": 2
         },
         {
-          "edge_over_kappa": 6.3374999999999995,
-          "from_count": 4,
-          "to_count": 1
+          "edge_index": 33,
+          "dw_mid": 6.3374999999999995,
+          "n_high_side": 4,
+          "n_low_side": 3,
+          "delta_n": 1
         },
         {
-          "edge_over_kappa": 6.387499999999999,
-          "from_count": 3,
-          "to_count": 1
-        },
-        {
-          "edge_over_kappa": 6.4125,
-          "from_count": 4,
-          "to_count": 3
-        },
-        {
-          "edge_over_kappa": 6.4875,
-          "from_count": 3,
-          "to_count": 1
-        },
-        {
-          "edge_over_kappa": 6.5375,
-          "from_count": 3,
-          "to_count": 2
-        },
-        {
-          "edge_over_kappa": 6.6125,
-          "from_count": 4,
-          "to_count": 2
-        },
-        {
-          "edge_over_kappa": 6.6875,
-          "from_count": 3,
-          "to_count": 1
-        },
-        {
-          "edge_over_kappa": 6.762499999999999,
-          "from_count": 2,
-          "to_count": 1
-        },
-        {
-          "edge_over_kappa": 6.8125,
-          "from_count": 2,
-          "to_count": 1
-        },
-        {
-          "edge_over_kappa": 6.8625,
-          "from_count": 3,
-          "to_count": 1
-        },
-        {
-          "edge_over_kappa": 6.9624999999999995,
-          "from_count": 4,
-          "to_count": 1
-        },
-        {
-          "edge_over_kappa": 7.0625,
-          "from_count": 3,
-          "to_count": 2
-        },
-        {
-          "edge_over_kappa": 7.1125,
-          "from_count": 3,
-          "to_count": 2
-        },
-        {
-          "edge_over_kappa": 7.137499999999999,
-          "from_count": 4,
-          "to_count": 3
-        },
-        {
-          "edge_over_kappa": 7.2124999999999995,
-          "from_count": 4,
-          "to_count": 1
-        },
-        {
-          "edge_over_kappa": 7.262499999999999,
-          "from_count": 3,
-          "to_count": 2
-        },
-        {
-          "edge_over_kappa": 7.3375,
-          "from_count": 2,
-          "to_count": 1
-        },
-        {
-          "edge_over_kappa": 7.4625,
-          "from_count": 3,
-          "to_count": 1
-        },
-        {
-          "edge_over_kappa": 7.4875,
-          "from_count": 4,
-          "to_count": 3
-        },
-        {
-          "edge_over_kappa": 7.5375,
-          "from_count": 3,
-          "to_count": 2
-        },
-        {
-          "edge_over_kappa": 7.637499999999999,
-          "from_count": 2,
-          "to_count": 1
-        },
-        {
-          "edge_over_kappa": 7.6625,
-          "from_count": 5,
-          "to_count": 2
-        },
-        {
-          "edge_over_kappa": 7.7375,
-          "from_count": 5,
-          "to_count": 3
-        },
-        {
-          "edge_over_kappa": 7.7875,
-          "from_count": 3,
-          "to_count": 2
-        },
-        {
-          "edge_over_kappa": 7.8125,
-          "from_count": 4,
-          "to_count": 3
-        },
-        {
-          "edge_over_kappa": 7.8375,
-          "from_count": 5,
-          "to_count": 4
-        },
-        {
-          "edge_over_kappa": 7.9125,
-          "from_count": 4,
-          "to_count": 3
-        },
-        {
-          "edge_over_kappa": 8.087499999999999,
-          "from_count": 3,
-          "to_count": 1
-        },
-        {
-          "edge_over_kappa": 8.1125,
-          "from_count": 4,
-          "to_count": 3
-        },
-        {
-          "edge_over_kappa": 8.2625,
-          "from_count": 5,
-          "to_count": 3
-        },
-        {
-          "edge_over_kappa": 8.3625,
-          "from_count": 5,
-          "to_count": 3
-        },
-        {
-          "edge_over_kappa": 8.462499999999999,
-          "from_count": 3,
-          "to_count": 2
-        },
-        {
-          "edge_over_kappa": 8.5125,
-          "from_count": 3,
-          "to_count": 2
-        },
-        {
-          "edge_over_kappa": 8.537500000000001,
-          "from_count": 4,
-          "to_count": 3
-        },
-        {
-          "edge_over_kappa": 8.5625,
-          "from_count": 5,
-          "to_count": 4
-        },
-        {
-          "edge_over_kappa": 8.6125,
-          "from_count": 5,
-          "to_count": 3
-        },
-        {
-          "edge_over_kappa": 8.6875,
-          "from_count": 5,
-          "to_count": 2
-        },
-        {
-          "edge_over_kappa": 8.837499999999999,
-          "from_count": 5,
-          "to_count": 3
-        },
-        {
-          "edge_over_kappa": 8.9375,
-          "from_count": 5,
-          "to_count": 4
+          "edge_index": 40,
+          "dw_mid": 6.512499999999999,
+          "n_high_side": 5,
+          "n_low_side": 4,
+          "delta_n": 1
         }
       ],
+      "matched_steps": [
+        {
+          "dw_mid": 6.1875,
+          "delta_n": 1,
+          "step_dy": 0.16170731265336788,
+          "step_edge_index": 27,
+          "transition_edge_index": 27,
+          "n_high_side": 1,
+          "n_low_side": 0
+        },
+        {
+          "dw_mid": 6.2375,
+          "delta_n": 2,
+          "step_dy": 0.3460425335669497,
+          "step_edge_index": 29,
+          "transition_edge_index": 29,
+          "n_high_side": 3,
+          "n_low_side": 1
+        },
+        {
+          "dw_mid": 6.3374999999999995,
+          "delta_n": 1,
+          "step_dy": 0.10271525567412021,
+          "step_edge_index": 33,
+          "transition_edge_index": 33,
+          "n_high_side": 4,
+          "n_low_side": 3
+        },
+        {
+          "dw_mid": 6.512499999999999,
+          "delta_n": 1,
+          "step_dy": 0.1692940003481147,
+          "step_edge_index": 40,
+          "transition_edge_index": 40,
+          "n_high_side": 5,
+          "n_low_side": 4
+        }
+      ],
+      "unmatched_steps": [
+        {
+          "dw_mid": 6.262499999999999,
+          "step_dy": -0.012987654693689177,
+          "edge_index": 30,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.2875,
+          "step_dy": 0.011191234879602663,
+          "edge_index": 31,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.3125,
+          "step_dy": 0.056834704834087924,
+          "edge_index": 32,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.387499999999999,
+          "step_dy": 0.03402729844649521,
+          "edge_index": 35,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.4125,
+          "step_dy": -0.00874360538462271,
+          "edge_index": 36,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.4375,
+          "step_dy": -0.033838675915253025,
+          "edge_index": 37,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.4624999999999995,
+          "step_dy": 0.03492392634916108,
+          "edge_index": 38,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.4875,
+          "step_dy": -0.03235479451691947,
+          "edge_index": 39,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.5375,
+          "step_dy": 0.06141828466102894,
+          "edge_index": 41,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.5625,
+          "step_dy": -0.027163806666225754,
+          "edge_index": 42,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.6125,
+          "step_dy": -0.00842213290470406,
+          "edge_index": 44,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.637499999999999,
+          "step_dy": -0.008793225631375967,
+          "edge_index": 45,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.6625,
+          "step_dy": 0.03519625329648146,
+          "edge_index": 46,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.6875,
+          "step_dy": 0.005850804076942606,
+          "edge_index": 47,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.7375,
+          "step_dy": -0.015257927474631727,
+          "edge_index": 49,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.762499999999999,
+          "step_dy": 0.02068256539106994,
+          "edge_index": 50,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.7875,
+          "step_dy": -0.01496294344543625,
+          "edge_index": 51,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.8125,
+          "step_dy": 0.03280634266687066,
+          "edge_index": 52,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.8374999999999995,
+          "step_dy": -0.02729383363852267,
+          "edge_index": 53,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.8625,
+          "step_dy": 0.022989097222866794,
+          "edge_index": 54,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.9375,
+          "step_dy": -0.019368554564247797,
+          "edge_index": 57,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.9624999999999995,
+          "step_dy": -0.006988137409282391,
+          "edge_index": 58,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 6.9875,
+          "step_dy": 0.011087210409008064,
+          "edge_index": 59,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 7.0375,
+          "step_dy": 0.023530822748120905,
+          "edge_index": 61,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 7.0625,
+          "step_dy": 0.012034968428354054,
+          "edge_index": 62,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 7.0874999999999995,
+          "step_dy": -0.01922369972711513,
+          "edge_index": 63,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 7.2124999999999995,
+          "step_dy": 0.011947728227674204,
+          "edge_index": 68,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 7.2375,
+          "step_dy": -0.010964166141918974,
+          "edge_index": 69,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 7.2875,
+          "step_dy": -0.0070488975255261765,
+          "edge_index": 71,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 7.3125,
+          "step_dy": 0.009972519904615562,
+          "edge_index": 72,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 7.3375,
+          "step_dy": -0.011707052994521905,
+          "edge_index": 73,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 7.3625,
+          "step_dy": 0.017864847087242453,
+          "edge_index": 74,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 7.387499999999999,
+          "step_dy": -0.008066590179277466,
+          "edge_index": 75,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 7.4875,
+          "step_dy": -0.0059911475812225445,
+          "edge_index": 79,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 7.512499999999999,
+          "step_dy": 0.005709349427232335,
+          "edge_index": 80,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 7.8125,
+          "step_dy": 0.007221065304441443,
+          "edge_index": 92,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 7.8375,
+          "step_dy": -0.009123524856007426,
+          "edge_index": 93,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 7.8625,
+          "step_dy": 0.009392001807241424,
+          "edge_index": 94,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 7.887499999999999,
+          "step_dy": -0.0050040948872837054,
+          "edge_index": 95,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 7.9125,
+          "step_dy": 0.008782600093576232,
+          "edge_index": 96,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 7.9375,
+          "step_dy": -0.004950339078213295,
+          "edge_index": 97,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.2375,
+          "step_dy": -0.006287830055904053,
+          "edge_index": 109,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.2625,
+          "step_dy": -0.0057316075045308335,
+          "edge_index": 110,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.287500000000001,
+          "step_dy": 0.008457804659456447,
+          "edge_index": 111,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.3125,
+          "step_dy": 0.013294314899149007,
+          "edge_index": 112,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.337499999999999,
+          "step_dy": -0.00472459704327477,
+          "edge_index": 113,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.3625,
+          "step_dy": -0.01513287664860552,
+          "edge_index": 114,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.3875,
+          "step_dy": 0.01870268041906975,
+          "edge_index": 115,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.412500000000001,
+          "step_dy": -0.009515214374016256,
+          "edge_index": 116,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.5125,
+          "step_dy": -0.009055530554585856,
+          "edge_index": 120,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.537500000000001,
+          "step_dy": 0.01741677759379756,
+          "edge_index": 121,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.5625,
+          "step_dy": -0.013246539434688565,
+          "edge_index": 122,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.6125,
+          "step_dy": 0.016443643907607886,
+          "edge_index": 124,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.662500000000001,
+          "step_dy": -0.004293434171449784,
+          "edge_index": 126,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.6875,
+          "step_dy": -0.004717157240400893,
+          "edge_index": 127,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.8625,
+          "step_dy": -0.00829805442868592,
+          "edge_index": 134,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.8875,
+          "step_dy": -0.004466865834497291,
+          "edge_index": 135,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.912500000000001,
+          "step_dy": 0.011691840501524053,
+          "edge_index": 136,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.9375,
+          "step_dy": -0.005072722314152012,
+          "edge_index": 137,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.962499999999999,
+          "step_dy": -0.004446442732640055,
+          "edge_index": 138,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 8.9875,
+          "step_dy": 0.008830516054173843,
+          "edge_index": 139,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 9.0125,
+          "step_dy": -0.00925677996366503,
+          "edge_index": 140,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 9.037500000000001,
+          "step_dy": 0.008771105250898414,
+          "edge_index": 141,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        },
+        {
+          "dw_mid": 9.0625,
+          "step_dy": -0.006019370939755908,
+          "edge_index": 142,
+          "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
+        }
+      ],
+      "unmatched_transitions": [],
+      "final_edge_note": "the final 1->0 annihilation must never be FORCED to register as a power step. If it is power-muted on the plotted primary it appears under unmatched_transitions (a state change without a power step); if the untouched detector resolves it naturally it appears under matched_steps. Both are honest, data-decided outcomes -- on the hardened counts the edge resolves naturally on the pump-excluded comb power, which collapses at the last annihilation, while remaining weak in the TOTAL intracavity power (comparable-energy background replaces the soliton there)",
+      "match_tol_samples": 1,
+      "validation": {
+        "rule": ">= 2 matched (state-verified) soliton steps AND soliton_count monotonically non-increasing along the descending sweep; enforced as a hard failure BEFORE any artifact is written, so this block only exists for validated staircases",
+        "n_matched_steps": 4,
+        "monotone_non_increasing_descending": true
+      },
+      "primary_observable": {
+        "chosen": "P_comb",
+        "matched_step_contrast_P_intra": 30.091990674212298,
+        "matched_step_contrast_P_comb": 193.2502148307545,
+        "rule": "P_comb is plotted as primary ONLY if its matched-step contrast (min matched |step_dy| / MAD of dy) strictly exceeds P_intra's; see primary_observable_decision for the full inputs"
+      },
       "matched_staircase_edges_over_kappa": [
         6.2375,
         6.3374999999999995,
-        6.387499999999999,
-        6.4125,
-        6.4875,
-        6.5375,
-        6.6125,
-        6.6875,
-        6.762499999999999,
-        6.8125,
-        6.8625,
-        6.9624999999999995,
-        7.0625,
-        7.1125,
-        7.137499999999999,
-        7.2124999999999995,
-        7.262499999999999,
-        7.3375,
-        7.4625,
-        7.4875,
-        7.5375,
-        7.637499999999999,
-        7.6625,
-        7.7375,
-        7.7875,
-        7.8125,
-        7.8375,
-        7.9125,
-        8.087499999999999,
-        8.1125,
-        8.2625,
-        8.3625,
-        8.462499999999999,
-        8.5125,
-        8.537500000000001,
-        8.5625,
-        8.6125,
-        8.6875,
-        8.837499999999999,
-        8.9375
+        6.512499999999999
       ],
       "final_1_to_0_over_kappa": 6.1875,
-      "honesty_note": "the final 1->0 annihilation remains power-muted (comparable-energy MI comb) and MUST NOT be forced to register as a power step; it is expected to appear as a soliton_count 1->0 transition without a matched power discontinuity. The N->N-1 transitions above it are the staircase. No smoothing, no detector changes, no re-thresholding.",
-      "soliton_count_gate": "n_peaks if (np_label in SOLITON_LABELS = (4, 5, 6)) OR (finite field AND n_peaks >= 1 AND contrast >= the labeler's soliton contrast floor contrast_high = 8) else 0. The taxonomy gate alone empirically zeroes genuine multi-soliton holds: the labeler's spectral-entropy chaos gate misroutes bright N-soliton combs to class 3 (see the driver docstring). CAVEAT: n_peaks is the end-of-hold snapshot count at 50% of the max peak, so in the deep-breathing sub-band -- where pulse amplitudes desynchronize -- soliton_count UNDERCOUNTS even though all pulses persist; P_comb and peak_positions_rad are the reliable per-hold records there. Reported, not patched."
+      "honesty_note": "the final 1->0 annihilation MUST NOT be forced to register as a power step; whether it is matched is decided by the untouched detector on the plotted primary (see final_edge_note). The N->N-1 transitions above it are the staircase. No smoothing, no detector changes, no re-thresholding.",
+      "soliton_count_gate": "windowed position-persistence count if (mode of the solver's per-snapshot label_history over the in-window snapshots is in SOLITON_LABELS = (4, 5, 6)) OR (finite field AND windowed count >= 1 AND contrast >= the labeler's soliton contrast floor contrast_high = 8) else 0. The taxonomy gate alone empirically zeroes genuine multi-soliton holds: the labeler's spectral-entropy chaos gate misroutes bright N-soliton combs to class 3 (see the driver docstring); MI/Turing states are position-persistent too, so the label gate (not the counter) keeps them at 0.",
+      "counting": {
+        "method": "position_persistence",
+        "parameters": {
+          "min_persistence": 0.5,
+          "rel_height_candidate": 0.25,
+          "bg_floor_multiple": 5.0,
+          "cluster_tol_rad": "per hold: max(10 * sqrt(d2_local / (2*delta_omega)), 8 * 2*pi / n_tau)",
+          "label_gate": "mode of solver label_history over the in-window snapshots (+ documented contrast-floor fallback)"
+        },
+        "count_agreement": {
+          "median": 1.0,
+          "min": 0.0,
+          "fraction_below_1": 0.23371647509578544,
+          "note": "fraction of holds where a single-snapshot count would have disagreed with the persistent count -- the artifact the windowed counter absorbs"
+        },
+        "legacy_diagnostic": "soliton_count_end_snapshot column (old end-of-hold single-snapshot count, old gate) kept in the npz",
+        "forensics": "analysis/results/staircase_forensics.md -- VERDICT: counting artifact (positions persist at the measurement ceiling; comb energy continuous to << 1 quantum through every count dip)"
+      }
     },
     "primary_observable_decision": {
       "rule": "P_comb is adopted as the PLOTTED primary ONLY if its matched-step contrast (min matched |step_dy| / MAD of dy) is strictly higher than total intracavity power's. Steps are the unchanged detect_power_steps detections on each normalised trace; a detection is matched when its edge coincides with a soliton_count transition edge (the power-muted final ->0 annihilation is excluded); a trace with no matched detection has contrast 0. Decided from the regenerated data.",
-      "matched_step_contrast_P_intra": 11.119481736493068,
-      "matched_step_contrast_P_comb": 8.874939210491624,
+      "matched_step_contrast_P_intra": 30.091990674212298,
+      "matched_step_contrast_P_comb": 193.2502148307545,
       "mad_dy_P_intra": 0.0009450376115897607,
       "mad_dy_P_comb": 0.000531514315593784,
       "matched_step_dy_P_intra": [
         0.15636485035291636,
         0.028438062994738944,
-        0.011187025635367442,
-        -0.021699414014790697,
-        -0.010508328462371375,
-        -0.012151328443371745
+        0.08420343710934897
       ],
       "matched_step_dy_P_comb": [
         0.3460425335669497,
         0.10271525567412021,
-        0.03402729844649521,
-        -0.00874360538462271,
-        -0.03235479451691947,
-        0.06141828466102894,
-        -0.00842213290470406,
-        0.005850804076942606,
-        0.02068256539106994,
-        0.03280634266687066,
-        0.022989097222866794,
-        -0.006988137409282391,
-        0.012034968428354054,
-        0.011947728227674204,
-        -0.011707052994521905,
-        -0.0059911475812225445,
-        0.007221065304441443,
-        -0.009123524856007426,
-        0.008782600093576232,
-        -0.0057316075045308335,
-        -0.01513287664860552,
-        -0.009055530554585856,
-        0.01741677759379756,
-        -0.013246539434688565,
-        0.016443643907607886,
-        -0.004717157240400893,
-        -0.005072722314152012
+        0.1692940003481147
       ],
       "detected_steps_P_intra_over_kappa": [
         5.512499999999999,
@@ -876,46 +1194,19 @@
       "matched_detected_P_intra_over_kappa": [
         6.2375,
         6.3374999999999995,
-        6.387499999999999,
-        6.4125,
-        6.8125,
-        6.8625
+        6.512499999999999
       ],
       "matched_detected_P_comb_over_kappa": [
         6.2375,
         6.3374999999999995,
-        6.387499999999999,
-        6.4125,
-        6.4875,
-        6.5375,
-        6.6125,
-        6.6875,
-        6.762499999999999,
-        6.8125,
-        6.8625,
-        6.9624999999999995,
-        7.0625,
-        7.2124999999999995,
-        7.3375,
-        7.4875,
-        7.8125,
-        7.8375,
-        7.9125,
-        8.2625,
-        8.3625,
-        8.5125,
-        8.537500000000001,
-        8.5625,
-        8.6125,
-        8.6875,
-        8.9375
+        6.512499999999999
       ],
-      "plotted_primary": "P_intra",
-      "second_panel": "P_comb"
+      "plotted_primary": "P_comb",
+      "second_panel": "P_intra"
     },
     "soliton_step": {
       "annihilation_over_kappa": 6.1875,
-      "note": "lower edge of the single-DKS existence region (label 6 + single temporal peak). The 1->0 event here is power-muted (the last soliton is replaced by a comparable-energy MI comb) -- it registers as a soliton_count transition, not as a power step."
+      "note": "lower edge of the single-DKS existence region (from the hardened count). Whether the 1->0 event registers as a matched power step is decided by the untouched detector on the plotted primary (see staircase.final_edge_note)."
     }
   }
 }

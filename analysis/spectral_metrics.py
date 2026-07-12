@@ -1202,10 +1202,14 @@ def match_steps_to_transitions(steps, transitions, tol_samples: int = 1):
       this device these are the near-resonance MI/CW power rise, and they must
       keep their existing "power-trace discontinuity" label; they are never
       soliton steps.
-    * ``unmatched_transitions`` -- state changes with NO power step.  The
-      power-muted final 1 -> 0 annihilation (the last soliton is replaced by a
-      comparable-energy MI comb) is EXPECTED to appear here; forcing it to
-      register as a power step is forbidden.
+    * ``unmatched_transitions`` -- state changes with NO power step.  A
+      power-muted transition (e.g. a final 1 -> 0 annihilation whose soliton
+      is replaced by a comparable-energy background) lands here; forcing such
+      an edge to register as a power step is forbidden.  Whether the final
+      edge is matched or unmatched is DECIDED BY THE DATA on the trace the
+      detector ran on -- on the 2026 regenerated staircase the 1 -> 0 edge
+      resolves naturally on the pump-excluded comb power (which collapses
+      there), so it is matched; on a total-power trace it may not be.
 
     Returns ``{"matched": [...], "unmatched_steps": [...],
     "unmatched_transitions": [...], "tol_samples": tol}``.  Each ``matched``

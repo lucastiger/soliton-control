@@ -161,11 +161,16 @@ branch; ``hold_rt`` is exposed for callers that want to push toward that regime.
 
 Honesty constraints
 -------------------
-The final 1->0 annihilation at ~6.1κ remains power-muted (comparable-energy MI
-comb) and MUST NOT be forced to register as a power step; it is expected to
-appear as a soliton_count 1->0 transition without a matched power discontinuity.
-The N->N-1 transitions above it are the staircase.  No smoothing, no detector
-changes, no re-thresholding.
+The final 1->0 annihilation MUST NOT be forced to register as a power step: if
+it is power-muted on the plotted primary it appears as a soliton_count
+transition without a matched power discontinuity, and only if the UNTOUCHED
+detector resolves it naturally does it count as matched.  (On the hardened
+2026 re-run it does resolve naturally: the pump-excluded comb power collapses
+by ~100% at the 1->0 edge near 6.19*kappa and even the total power steps
+~-10%, so with correctly placed transitions the edge is state-verified -- the
+earlier "expected unmatched" reading traced to the flickering legacy counts
+placing transitions at wrong detunings.)  The N->N-1 transitions above it are
+the staircase.  No smoothing, no detector changes, no re-thresholding.
 
 Validation gate (hard failure, not a warning)
 ---------------------------------------------
@@ -935,8 +940,9 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
         f"over the final {int(100 * cfg.avg_frac)}% (cycle-averages the "
         f"breather). Thermo-optic model ON (deterministic, noise off). The "
         f"solitons annihilate sequentially at the branch's lower edge -- the "
-        f"staircase; the final 1->0 annihilation is power-muted in the TOTAL "
-        f"power and must not be forced to register as a power step. "
+        f"staircase; the final 1->0 annihilation must never be FORCED to "
+        f"register as a power step (matched only if the untouched detector "
+        f"resolves it naturally on the plotted trace). "
         + ("Green = single-DKS existence region. " if lo_k is not None else "")
         + ("Olive = any-soliton (N >= 1) region. " if any_region else "")
         + f"Solid black lines mark STATE-VERIFIED soliton steps (power "
@@ -1061,11 +1067,16 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
                 for s in align["unmatched_steps"]],
             "unmatched_transitions": align["unmatched_transitions"],
             "final_edge_note": (
-                "the final 1->0 annihilation is power-muted (the last soliton "
-                "is replaced by a comparable-energy MI comb), so it is "
-                "EXPECTED to appear under unmatched_transitions -- a "
-                "soliton_count transition without a matched power step -- and "
-                "must never be forced to register as one"),
+                "the final 1->0 annihilation must never be FORCED to register "
+                "as a power step. If it is power-muted on the plotted primary "
+                "it appears under unmatched_transitions (a state change "
+                "without a power step); if the untouched detector resolves it "
+                "naturally it appears under matched_steps. Both are honest, "
+                "data-decided outcomes -- on the hardened counts the edge "
+                "resolves naturally on the pump-excluded comb power, which "
+                "collapses at the last annihilation, while remaining weak in "
+                "the TOTAL intracavity power (comparable-energy background "
+                "replaces the soliton there)"),
             "match_tol_samples": int(align["tol_samples"]),
             "validation": {
                 "rule": ">= 2 matched (state-verified) soliton steps AND "
@@ -1090,11 +1101,10 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
             "final_1_to_0_over_kappa": (
                 final_1_to_0[0]["dw_mid"] if final_1_to_0 else None),
             "honesty_note": (
-                "the final 1->0 annihilation remains power-muted "
-                "(comparable-energy MI comb) and MUST NOT be forced to "
-                "register as a power step; it is expected to appear as a "
-                "soliton_count 1->0 transition without a matched power "
-                "discontinuity. The N->N-1 transitions above it are the "
+                "the final 1->0 annihilation MUST NOT be forced to register "
+                "as a power step; whether it is matched is decided by the "
+                "untouched detector on the plotted primary (see "
+                "final_edge_note). The N->N-1 transitions above it are the "
                 "staircase. No smoothing, no detector changes, no "
                 "re-thresholding."),
             "soliton_count_gate": (
@@ -1168,11 +1178,11 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
         }
         block["soliton_step"] = {
             "annihilation_over_kappa": annih_k,
-            "note": "lower edge of the single-DKS existence region (label 6 + "
-                    "single temporal peak). The 1->0 event here is power-muted "
-                    "(the last soliton is replaced by a comparable-energy MI "
-                    "comb) -- it registers as a soliton_count transition, not "
-                    "as a power step.",
+            "note": "lower edge of the single-DKS existence region (from "
+                    "the hardened count). Whether the 1->0 event registers as "
+                    "a matched power step is decided by the untouched "
+                    "detector on the plotted primary (see "
+                    "staircase.final_edge_note).",
         }
     else:
         block["soliton_step"] = {
@@ -1196,7 +1206,7 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
                  or "none")
               + f"; {len(align['unmatched_steps'])} unmatched power "
               f"discontinuity(ies); {len(align['unmatched_transitions'])} "
-              f"unmatched transition(s) (muted 1->0 expected here)")
+              f"unmatched transition(s) (a power-muted edge lands here)")
         print(f"[sweep] matched-step contrast: P_intra="
               f"{contrast_intra['contrast']:.2f}  P_comb="
               f"{contrast_comb['contrast']:.2f}  -> plotted primary: {name1}")
