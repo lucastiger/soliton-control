@@ -2,21 +2,21 @@
   "three_db_span": {
     "metric": "three_db_span",
     "metric_definition": "Full width, in relative cavity-mode number Delta_mu, of the pump-excluded, numerical-floor-masked, dB-domain median-smoothed, PCHIP-interpolated comb-line power envelope, measured between the OUTERMOST points where the envelope falls level_db below its maximum (level_db = 3.0 dB, i.e. the -3 dB / half-power level). Converted to frequency via Delta_mu * FSR.",
-    "span_modes": 189.60000393168784,
-    "span_hz": 4636031242663.597,
-    "span_thz": 4.636031242663597,
-    "span_ghz": 4636.0312426635965,
-    "left_crossing_mu": -95.03101593851902,
-    "right_crossing_mu": 94.56898799316882,
-    "envelope_peak_mu": 52.999999998774,
-    "reference_level_db": -5.112382462991054,
+    "span_modes": 285.7291060929655,
+    "span_hz": 6986545544917.791,
+    "span_thz": 6.986545544917791,
+    "span_ghz": 6986.545544917791,
+    "left_crossing_mu": -138.11186815589704,
+    "right_crossing_mu": 147.61723793706847,
+    "envelope_peak_mu": -23.000000001164153,
+    "reference_level_db": -1.4568658644487806,
     "n_crossings": 2,
     "one_sided": false,
     "fsr_hz": 24451641068.182365,
     "params": {
       "exclude_pump": true,
       "smooth_modes_requested": "auto",
-      "smooth_modes_used": 13,
+      "smooth_modes_used": 17,
       "floor_db": 60.0,
       "interp_factor": 10,
       "level_db": 3.0,
@@ -37,37 +37,37 @@
       "level_db": "dB"
     },
     "sech2_core_fwhm_crosscheck": {
-      "fwhm_modes": 251.38768257441978,
-      "fwhm_hz": 6146841383271.875,
-      "fwhm_thz": 6.146841383271875,
-      "width_w_modes": 142.88333860132636,
-      "center_mu": 0.6940317898187397,
-      "peak_db": -6.062866384962848,
-      "fit_rms_db": 1.2326874692776866,
+      "fwhm_modes": 300.63157172758514,
+      "fwhm_hz": 7350935285646.434,
+      "fwhm_thz": 7.350935285646433,
+      "width_w_modes": 170.8725034476786,
+      "center_mu": 3.5126660106201246,
+      "peak_db": -1.7394569766647625,
+      "fit_rms_db": 0.6304146848265808,
       "core_mu": 200,
       "note": "cross-check only (dB-domain sech^2 core fit); not the primary 3 dB span metric"
     },
     "provenance": {
       "input_file": "analysis/results/dks_single_soliton_spectrum.npz",
-      "input_sha256": "4642784da2856257617359880a94fa3c368fe65977903d0fffa3ba6a57af9b8e",
+      "input_sha256": "794d8c6f0592a79dc1f86b351824455acf157b35940d3620c2f04fb910601b46",
       "config_file": "sin_params.yaml",
       "config_sha256": "c5adc61ccb056ce6061455586622fccb92771ddbab473701f77de0a735f04d61",
       "run_id": {
-        "n_rt_averaged": 304,
-        "breathing_period_rt": 154.0,
-        "breathing_relstd": 0.04090545738813848
+        "n_rt_averaged": null,
+        "breathing_period_rt": null,
+        "breathing_relstd": null
       },
       "fsr_hz": 24451641068.182365,
       "fsr_source": "measured dispersion (attach_dispersion) ",
       "n_tau": 16384,
-      "generated_utc": "2026-07-09T03:37:55.207789+00:00",
+      "generated_utc": "2026-07-12T08:39:40.771593+00:00",
       "module": "analysis/spectral_metrics.py",
       "script": "analysis/compute_spectral_metrics.py"
     }
   },
   "conversion_efficiency": {
     "metric": "conversion_efficiency",
-    "eta_intra": 0.20508363724623144,
+    "eta_intra": 0.3019231819075336,
     "eta": null,
     "eta_reason": "the input spectrum is pump-normalised (|a_0|^2 == 1), so the absolute intracavity power scale <|E|^2> was normalised away; the absolute out-coupled comb power (hence eta) cannot be recovered without an absolute-power anchor (an un-normalised spectrum, or mean_intracavity_energy_j). eta_intra is still reported.",
     "definitions": {
@@ -84,8 +84,8 @@
       "spectrum_pump_normalized": true,
       "mean_intracavity_energy_j": null,
       "pump_power_arb": 1.0,
-      "comb_power_sum_arb": 0.2579939813237404,
-      "total_power_sum_arb": 1.2579939813237404
+      "comb_power_sum_arb": 0.4325071024884559,
+      "total_power_sum_arb": 1.432507102488456
     },
     "units": {
       "eta_intra": "dimensionless (intracavity power fraction)",
@@ -99,18 +99,18 @@
     },
     "provenance": {
       "input_file": "analysis/results/dks_single_soliton_spectrum.npz",
-      "input_sha256": "4642784da2856257617359880a94fa3c368fe65977903d0fffa3ba6a57af9b8e",
+      "input_sha256": "794d8c6f0592a79dc1f86b351824455acf157b35940d3620c2f04fb910601b46",
       "config_file": "sin_params.yaml",
       "config_sha256": "c5adc61ccb056ce6061455586622fccb92771ddbab473701f77de0a735f04d61",
       "run_id": {
-        "n_rt_averaged": 304,
-        "breathing_period_rt": 154.0,
-        "breathing_relstd": 0.04090545738813848
+        "n_rt_averaged": null,
+        "breathing_period_rt": null,
+        "breathing_relstd": null
       },
       "fsr_hz": 24451641068.182365,
       "fsr_source": "measured dispersion (attach_dispersion) ",
       "n_tau": 16384,
-      "generated_utc": "2026-07-09T03:37:55.207789+00:00",
+      "generated_utc": "2026-07-12T08:39:40.771593+00:00",
       "module": "analysis/spectral_metrics.py",
       "script": "analysis/compute_spectral_metrics.py"
     }
