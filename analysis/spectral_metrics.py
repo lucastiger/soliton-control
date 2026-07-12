@@ -51,7 +51,12 @@ of the hold in LINEAR power (discarding the re-settling transient and cycle-
 averaging the breather).  :func:`detect_power_steps` finds the soliton-step
 discontinuities in the assembled power-vs-detuning trace via a robust MAD test on
 its first differences, and :func:`plot_soliton_steps` renders the publication
-staircase figure.  The solver-driving sweep lives in the analysis-layer driver
+staircase figure.  :func:`soliton_count_transitions` lists every edge where the
+MEASURED soliton number changes, and :func:`match_steps_to_transitions` aligns
+the detected power steps with those transitions -- a matched step is a
+VALIDATED soliton step (a power discontinuity proven to coincide with a
+soliton-number change), and only matched steps may be labelled as soliton steps
+downstream.  The solver-driving sweep lives in the analysis-layer driver
 ``analysis/run_detuning_sweep.py``; these functions consume its output and never
 import the solver.
 
@@ -1118,6 +1123,153 @@ def single_dks_region(detuning, is_single):
     return lo_k, hi_k, annih
 
 
+def soliton_count_transitions(detuning, soliton_count):
+    """Every soliton-number transition edge of a sweep, in ascending detuning.
+
+    ``detuning`` and ``soliton_count`` are the per-step detuning and measured
+    soliton count of a sweep (any order; sorting/validation mirrors
+    :func:`single_dks_region`).  An edge ``i`` joins the adjacent ascending-
+    detuning samples ``i`` and ``i + 1`` (the :func:`detect_power_steps` edge
+    convention), and a transition is any edge where the count changes.  Returns
+    a list of dicts, one per transition, in ascending edge order::
+
+        {"edge_index":  i,
+         "dw_mid":      0.5 * (x[i] + x[i + 1]),   # edge midpoint (detuning)
+         "n_high_side": count[i + 1],              # high-detuning side
+         "n_low_side":  count[i],                  # low-detuning side
+         "delta_n":     count[i + 1] - count[i]}
+
+    ``delta_n`` is the number of solitons LOST crossing the edge downward in
+    detuning (the sweep direction): ``+1`` is a single N -> N-1 annihilation
+    (one staircase step), larger values are merged annihilations, and a
+    NEGATIVE value means the count rose going down -- on a clean staircase that
+    never happens (it is what the driver's monotonicity gate rejects).
+
+    Counts must be integer-valued and non-negative (a fractional or negative
+    soliton number is always an upstream bug, never data).  Fewer than two
+    samples yield no transitions.
+    """
+    dw = np.asarray(detuning, dtype=np.float64).ravel()
+    c_raw = np.asarray(soliton_count).ravel()
+    if dw.shape != c_raw.shape:
+        raise ValueError("detuning and soliton_count must have the same shape")
+    if np.iscomplexobj(c_raw):
+        raise ValueError("soliton_count must be integer-valued, got complex")
+    c_f = c_raw.astype(np.float64)
+    if not np.all(np.isfinite(c_f)):
+        raise ValueError("soliton_count contains non-finite values")
+    if np.any(c_f != np.round(c_f)):
+        raise ValueError("soliton_count must be integer-valued")
+    if np.any(c_f < 0):
+        raise ValueError("soliton_count must be non-negative")
+    c = c_f.astype(np.int64)
+
+    order = np.argsort(dw)
+    dw, c = dw[order], c[order]
+    return [
+        {
+            "edge_index": int(i),
+            "dw_mid": float(0.5 * (dw[i] + dw[i + 1])),
+            "n_high_side": int(c[i + 1]),
+            "n_low_side": int(c[i]),
+            "delta_n": int(c[i + 1] - c[i]),
+        }
+        for i in range(c.size - 1)
+        if c[i + 1] != c[i]
+    ]
+
+
+def match_steps_to_transitions(steps, transitions, tol_samples: int = 1):
+    """Align detected power steps with measured soliton-number transitions.
+
+    ``steps`` is a :func:`detect_power_steps` result (uses its ``edges``,
+    ``step_x`` and ``step_dy``) and ``transitions`` a
+    :func:`soliton_count_transitions` list, both on the SAME ascending-detuning
+    sample grid so their edge indices are comparable.  A detected power step and
+    a soliton-count transition match when their edge indices differ by at most
+    ``tol_samples`` (default 1: the hold that straddles a switching event may
+    register the power drop one sample away from where the end-of-hold count
+    flips).  Matching is one-to-one: candidate pairs are taken closest-first,
+    and each step / transition is used at most once.
+
+    A matched step is a VALIDATED soliton step -- a power discontinuity PROVEN
+    to coincide with a change in the measured soliton number.  Only matched
+    steps may be labelled as soliton steps anywhere downstream (figure legends,
+    JSON blocks, prose).  The two unmatched populations carry their own honest
+    physics:
+
+    * ``unmatched_steps`` -- power discontinuities with NO state change.  At
+      this device these are the near-resonance MI/CW power rise, and they must
+      keep their existing "power-trace discontinuity" label; they are never
+      soliton steps.
+    * ``unmatched_transitions`` -- state changes with NO power step.  A
+      power-muted transition (e.g. a final 1 -> 0 annihilation whose soliton
+      is replaced by a comparable-energy background) lands here; forcing such
+      an edge to register as a power step is forbidden.  Whether the final
+      edge is matched or unmatched is DECIDED BY THE DATA on the trace the
+      detector ran on -- on the 2026 regenerated staircase the 1 -> 0 edge
+      resolves naturally on the pump-excluded comb power (which collapses
+      there), so it is matched; on a total-power trace it may not be.
+
+    Returns ``{"matched": [...], "unmatched_steps": [...],
+    "unmatched_transitions": [...], "tol_samples": tol}``.  Each ``matched``
+    entry combines both sides: ``step_edge_index``, ``transition_edge_index``,
+    ``edge_distance``, ``step_x``, ``step_dy``, ``dw_mid``, ``n_high_side``,
+    ``n_low_side``, ``delta_n``.  Each ``unmatched_steps`` entry has
+    ``edge_index``, ``step_x``, ``step_dy``; ``unmatched_transitions`` entries
+    are the transition dicts unchanged.  Pure bookkeeping -- no thresholds, no
+    smoothing, no re-detection.
+    """
+    edges = [int(e) for e in steps["edges"]]
+    step_x = [float(v) for v in steps["step_x"]]
+    step_dy = [float(v) for v in steps["step_dy"]]
+    if not (len(edges) == len(step_x) == len(step_dy)):
+        raise ValueError("steps dict has inconsistent edges/step_x/step_dy")
+    tol = int(tol_samples)
+    if tol < 0:
+        raise ValueError(f"tol_samples must be >= 0, got {tol_samples}")
+
+    candidates = sorted(
+        (abs(e - int(tr["edge_index"])), si, ti)
+        for si, e in enumerate(edges)
+        for ti, tr in enumerate(transitions)
+        if abs(e - int(tr["edge_index"])) <= tol
+    )
+    used_steps, used_transitions = set(), set()
+    matched = []
+    for dist, si, ti in candidates:
+        if si in used_steps or ti in used_transitions:
+            continue
+        used_steps.add(si)
+        used_transitions.add(ti)
+        tr = transitions[ti]
+        matched.append({
+            "step_edge_index": edges[si],
+            "transition_edge_index": int(tr["edge_index"]),
+            "edge_distance": int(dist),
+            "step_x": step_x[si],
+            "step_dy": step_dy[si],
+            "dw_mid": float(tr["dw_mid"]),
+            "n_high_side": int(tr["n_high_side"]),
+            "n_low_side": int(tr["n_low_side"]),
+            "delta_n": int(tr["delta_n"]),
+        })
+    matched.sort(key=lambda m: m["step_edge_index"])
+    return {
+        "matched": matched,
+        "unmatched_steps": [
+            {"edge_index": edges[si], "step_x": step_x[si],
+             "step_dy": step_dy[si]}
+            for si in range(len(edges)) if si not in used_steps
+        ],
+        "unmatched_transitions": [
+            dict(transitions[ti]) for ti in range(len(transitions))
+            if ti not in used_transitions
+        ],
+        "tol_samples": tol,
+    }
+
+
 def _moving_average(y, w):
     """Odd-window centred moving average (edge-replicated); display smoothing only."""
     y = np.asarray(y, dtype=np.float64)
@@ -1133,13 +1285,28 @@ def _moving_average(y, w):
     return np.convolve(ypad, kern, mode="valid")
 
 
-def _draw_regions(ax, soliton_region, annihilation_kappa, steps, *, label=True):
+def _draw_regions(ax, soliton_region, annihilation_kappa, steps, *, label=True,
+                  any_soliton_region=None, matched_step_x=None):
     """Shade the single-DKS existence region, mark the soliton step, and (lightly)
     the power-trace discontinuities.  Shared by both panels; ``label=False``
-    suppresses the legend entries (used on the secondary panel to avoid repeats)."""
+    suppresses the legend entries (used on the secondary panel to avoid repeats).
+
+    ``any_soliton_region`` (optional) additionally shades the any-soliton
+    (``soliton_count >= 1``) existence span behind the single-DKS one.
+    ``matched_step_x`` (optional) is the detuning midpoints of the VALIDATED
+    soliton steps -- detected power discontinuities whose edge coincides with a
+    measured soliton-number transition (:func:`match_steps_to_transitions`);
+    they are drawn solid and legend-labelled as state-verified soliton steps,
+    while every step in ``steps`` NOT in that set keeps the existing dotted
+    "power-trace discontinuity" style (at this device those are the
+    near-resonance MI/CW rise, not soliton steps)."""
     def _lbl(text):
         return text if label else None
 
+    if any_soliton_region is not None:
+        lo, hi = float(any_soliton_region[0]), float(any_soliton_region[1])
+        ax.axvspan(lo, hi, color="tab:olive", alpha=0.10, zorder=0,
+                   label=_lbl(r"any-soliton existence ($N \geq 1$)"))
     if soliton_region is not None:
         lo, hi = float(soliton_region[0]), float(soliton_region[1])
         ax.axvspan(lo, hi, color="tab:green", alpha=0.12, zorder=0,
@@ -1147,18 +1314,28 @@ def _draw_regions(ax, soliton_region, annihilation_kappa, steps, *, label=True):
     if annihilation_kappa is not None:
         ax.axvline(float(annihilation_kappa), color="tab:red", ls="-", lw=1.6,
                    zorder=3, label=_lbl("soliton annihilation (step)"))
+    matched_set = {float(x) for x in (matched_step_x or [])}
+    # State-verified soliton steps: solid black, distinct from the tab:red
+    # annihilation line and the gray dotted discontinuities.
+    for j, xs in enumerate(sorted(matched_set)):
+        ax.axvline(xs, color="black", ls="-", lw=1.4, zorder=3,
+                   label=_lbl(r"soliton step ($N \to N{-}1$, state-verified)")
+                   if j == 0 else None)
     # Power-trace discontinuities (from detect_power_steps) are a SECONDARY,
     # honestly-labelled overlay: at this operating point they key on the
     # near-resonance MI/CW power rise, NOT the soliton step (see the driver).
-    if steps and steps.get("step_x"):
-        for j, xs in enumerate(steps["step_x"]):
-            ax.axvline(xs, color="0.45", ls=":", lw=1.0, zorder=2,
-                       label=_lbl("power-trace discontinuity") if j == 0 else None)
+    unmatched = [xs for xs in (steps.get("step_x") if steps else [])
+                 if float(xs) not in matched_set]
+    for j, xs in enumerate(unmatched):
+        ax.axvline(xs, color="0.45", ls=":", lw=1.0, zorder=2,
+                   label=_lbl("power-trace discontinuity") if j == 0 else None)
 
 
 def plot_soliton_steps(detuning_kappa, power, path, *, power_std=None,
                        transmission=None, soliton_region=None,
+                       any_soliton_region=None,
                        annihilation_kappa=None, steps=None, metadata=None,
+                       state_counts=None, match_tol_samples: int = 1,
                        observable_label=r"intracavity power  $\sum_\mu |a_\mu|^2$ "
                                          r"(norm.)",
                        second_panel_ylabel="norm. transmission",
@@ -1182,12 +1359,30 @@ def plot_soliton_steps(detuning_kappa, power, path, *, power_std=None,
 
     * ``soliton_region`` -- an ``(lo_kappa, hi_kappa)`` span of the single-DKS
       existence region (from the per-step state flag), lightly shaded;
+    * ``any_soliton_region`` -- an ``(lo_kappa, hi_kappa)`` span of the
+      any-soliton (``soliton_count >= 1``) existence region, shaded behind it;
     * ``annihilation_kappa`` -- the soliton step (the branch's lower edge), drawn
       as a solid vertical line;
     * ``steps`` -- a :func:`detect_power_steps` result, drawn as light dotted
       lines and labelled honestly as *power-trace discontinuities* (which, for
       this operating point, mark the near-resonance MI/CW power rise rather than
       the soliton annihilation -- see the driver's note).
+
+    ``state_counts`` (optional) is the per-detuning MEASURED soliton count of
+    the sweep (same sample order as ``detuning_kappa``).  When given it is
+    drawn as data, not decoration: a thin step-plot on a twin axis, with each
+    plateau annotated "N = k" (plateaus narrower than 3 samples stay unlabelled
+    to avoid overplotting -- the step trace itself still shows them).  When
+    ``steps`` is also given, the detected power steps are aligned with the
+    soliton-count transitions (:func:`match_steps_to_transitions`, tolerance
+    ``match_tol_samples``; ``steps`` must have been computed on the
+    ascending-detuning trace so the edge indices are comparable): matched steps
+    -- the VALIDATED soliton steps -- get a distinct solid line + marker and
+    the legend entry "soliton step (N -> N-1, state-verified)", while unmatched
+    power discontinuities keep the existing dotted "power-trace discontinuity"
+    style plus a note that they carry no state change (the near-resonance MI/CW
+    rise at this device).  Without ``state_counts`` the drawing semantics are
+    exactly the pre-existing ones.
 
     ``smooth_window`` enables a DISPLAY-ONLY moving-average overlay (default 0 =
     off); the raw trace always stays visible underneath and the smoothed curve is
@@ -1210,6 +1405,17 @@ def plot_soliton_steps(detuning_kappa, power, path, *, power_std=None,
            if power_std is not None else None)
     T = (np.asarray(transmission, dtype=np.float64).ravel()[order]
          if transmission is not None else None)
+    counts = (np.asarray(state_counts).ravel().astype(np.int64)[order]
+              if state_counts is not None else None)
+
+    # Align the detected power steps with the measured soliton-count
+    # transitions; only the matched ones may be styled as soliton steps.
+    align = None
+    if counts is not None and steps is not None:
+        align = match_steps_to_transitions(
+            steps, soliton_count_transitions(dwk, counts),
+            tol_samples=match_tol_samples)
+    matched_x = [m["step_x"] for m in align["matched"]] if align else []
 
     two_panel = T is not None
     if two_panel:
@@ -1220,7 +1426,9 @@ def plot_soliton_steps(detuning_kappa, power, path, *, power_std=None,
         fig, ax = plt.subplots(figsize=(8.4, 5.0))
         axt = None
 
-    _draw_regions(ax, soliton_region, annihilation_kappa, steps)
+    _draw_regions(ax, soliton_region, annihilation_kappa, steps,
+                  any_soliton_region=any_soliton_region,
+                  matched_step_x=matched_x)
 
     # Raw primary trace (+ breathing error bars).
     if std is not None:
@@ -1243,9 +1451,54 @@ def plot_soliton_steps(detuning_kappa, power, path, *, power_std=None,
                     bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="0.5",
                               alpha=0.85))
 
+    # Validated soliton steps: solid marker on the trace at the step midpoint
+    # (the vertical lines are drawn by _draw_regions).
+    if align is not None:
+        for m in align["matched"]:
+            i = m["step_edge_index"]
+            ax.plot(m["step_x"], 0.5 * (P[i] + P[i + 1]), "D", color="black",
+                    ms=6.5, mec="white", mew=0.6, zorder=6)
+        if align["unmatched_steps"]:
+            ax.annotate(
+                "dotted = power discontinuity with NO soliton-count change\n"
+                "(near-resonance MI/CW rise at this device -- not a soliton "
+                "step)",
+                xy=(0.02, 0.04), xycoords="axes fraction", ha="left",
+                va="bottom", fontsize=7.5,
+                bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="0.45",
+                          alpha=0.85))
+
     ax.set_ylabel(observable_label)
     ax.grid(alpha=0.25)
-    ax.legend(fontsize=8, loc="upper right")
+
+    # Measured soliton count: a thin step-plot on a twin axis (data, not
+    # decoration), with "N = k" plateau annotations.
+    if counts is not None:
+        axn = ax.twinx()
+        axn.step(dwk, counts, where="mid", color="0.35", lw=0.9, alpha=0.9,
+                 label="soliton count $N$ (measured)")
+        axn.set_ylabel("soliton number $N$", fontsize=9, color="0.25")
+        n_max = int(counts.max()) if counts.size else 0
+        axn.set_ylim(-0.4, n_max + 2.6)          # headroom for the main legend
+        axn.set_yticks(range(0, n_max + 1))
+        axn.tick_params(axis="y", labelsize=8, colors="0.25")
+        # Maximal constant-count runs; runs narrower than 3 samples stay
+        # unlabelled (the step trace still shows them).
+        run_start = 0
+        for i in range(1, counts.size + 1):
+            if i == counts.size or counts[i] != counts[run_start]:
+                if i - run_start >= 3:
+                    axn.annotate(f"N = {int(counts[run_start])}",
+                                 xy=(0.5 * (dwk[run_start] + dwk[i - 1]),
+                                     counts[run_start] + 0.18),
+                                 ha="center", va="bottom", fontsize=7.5,
+                                 color="0.25")
+                run_start = i
+        h1, l1 = ax.get_legend_handles_labels()
+        h2, l2 = axn.get_legend_handles_labels()
+        ax.legend(h1 + h2, l1 + l2, fontsize=8, loc="upper right")
+    else:
+        ax.legend(fontsize=8, loc="upper right")
 
     # Secondary top axis in frequency-detuning MHz (delta_omega / 2*pi).
     kappa = metadata.get("kappa_rad_s")
@@ -1261,7 +1514,9 @@ def plot_soliton_steps(detuning_kappa, power, path, *, power_std=None,
                          fontsize=9)
 
     if two_panel:
-        _draw_regions(axt, soliton_region, annihilation_kappa, steps, label=False)
+        _draw_regions(axt, soliton_region, annihilation_kappa, steps,
+                      label=False, any_soliton_region=any_soliton_region,
+                      matched_step_x=matched_x)
         axt.plot(dwk, T, "s-", ms=3.0, lw=1.0, color="tab:purple", zorder=4,
                  label=second_panel_legend)
         axt.set_ylabel(second_panel_ylabel)

@@ -509,6 +509,162 @@ def temporal_peak_positions(e_field: np.ndarray,
     return 2.0 * math.pi * idx.astype(np.float64) / n
 
 
+# Candidate-peak acceptance and clustering defaults for the windowed counter.
+COUNT_REL_HEIGHT_CANDIDATE = 0.25   # candidate floor vs the momentary max
+COUNT_BG_FLOOR_MULTIPLE = 5.0       # absolute floor vs the angular median
+COUNT_MIN_PERSISTENCE = 0.5         # cluster must appear in >= this snapshot frac
+COUNT_TOL_WIDTHS = 10.0             # cluster tolerance in soliton widths
+COUNT_TOL_MIN_CELLS = 8.0           # ... floored at this many angular grid cells
+
+
+def count_solitons_windowed(snapshots, *, rel_height_candidate=COUNT_REL_HEIGHT_CANDIDATE,
+                            bg_floor_multiple=COUNT_BG_FLOOR_MULTIPLE,
+                            cluster_tol_rad=None,
+                            min_persistence=COUNT_MIN_PERSISTENCE,
+                            delta_omega=None, cav=None) -> dict:
+    """Position-persistence soliton count over a hold's in-window snapshots.
+
+    Replaces the end-of-hold SINGLE-SNAPSHOT count for the per-hold
+    ``soliton_count`` observable.  The forensic analysis of the committed
+    sweep (``analysis/staircase_forensics.py``, verdict: counting artifact)
+    showed why one snapshot undercounts: the momentary maximum is set by
+    whichever breather is near its crest, so a peak threshold at 0.5 of the
+    momentary max drops any desynchronized breather near its trough even
+    though the pulse persists (positions frozen, comb energy continuous).
+
+    Method, per snapshot of ``snapshots`` (shape ``(n_snap, n_tau)``, complex
+    intracavity fields):
+
+    * candidate peaks by the same doubled-array circular ``find_peaks`` on
+      ``|E|^2`` as :func:`count_temporal_peaks`, accepted iff their height is
+      ``>= max(rel_height_candidate * snapshot_max,
+      bg_floor_multiple * median(|E|^2 over angle))``.  The LOW relative
+      threshold tolerates the breathing crest/trough asymmetry, and the
+      ABSOLUTE background floor keeps CW ripple out: at this operating point
+      soliton peaks sit >100x above the CW background
+      (``B^2 = 2*delta_omega/gamma`` vs
+      ``kappa_c*Pin/((kappa/2)^2 + delta_omega^2)``), so there is a wide safe
+      corridor between the two.
+
+    Candidate angles from ALL snapshots are then clustered circularly with
+    tolerance ``cluster_tol_rad`` (adjacent sorted angles closer than the
+    tolerance join one cluster, with wrap-around across 0/2*pi).  The default
+    tolerance is ``max(COUNT_TOL_WIDTHS * w, COUNT_TOL_MIN_CELLS * 2*pi /
+    n_tau)`` with ``w = sqrt(d2 / (2*delta_omega))`` the analytic soliton
+    angular width (``cav.d2_local`` preferred, ``cav.d2`` fallback) -- pass
+    ``delta_omega`` and ``cav`` for that computation, or a precomputed
+    ``cluster_tol_rad`` directly.  Ten widths absorb the small intra-hold
+    group-velocity drift of the whole train while staying far below the
+    minimum seeded pulse separation (20 widths).
+
+    A cluster is a SOLITON iff it appears in at least ``min_persistence`` of
+    the snapshots: position persistence rejects both breathing-phase dropouts
+    (a trough snapshot merely fails to contribute to a cluster that the other
+    snapshots pin) and non-pinned transients (a candidate wandering to a new
+    angle every snapshot never accumulates persistence).  NOTE: persistence
+    alone does NOT reject Turing rolls / MI combs (their peaks are also
+    position-persistent); keeping such states at ``soliton_count = 0`` is the
+    caller's LABEL gate's job, not this counter's.
+
+    Returns ``{"count", "cluster_angles_rad" (sorted, one per ACCEPTED
+    cluster), "per_snapshot_counts" (accepted candidates per snapshot),
+    "count_agreement" (fraction of snapshots whose raw candidate count equals
+    the persistent-cluster count -- 1.0 means every single snapshot already
+    agreed; below 1.0 quantifies how often a single-snapshot count would have
+    lied), "persistence_fractions" (per-cluster snapshot fractions for ALL
+    candidate clusters, sorted descending -- the accepted ones are those
+    >= min_persistence; kept for threshold diagnostics)}``.
+    """
+    arr = np.asarray(snapshots)
+    if arr.ndim != 2:
+        raise ValueError(f"snapshots must be 2D (n_snap, n_tau); got {arr.shape}")
+    n_snap, n_tau = arr.shape
+    if n_snap == 0:
+        raise ValueError("snapshots is empty")
+    if not (0.0 < min_persistence <= 1.0):
+        raise ValueError(f"min_persistence must be in (0, 1], got {min_persistence}")
+    if cluster_tol_rad is None:
+        if delta_omega is None or cav is None:
+            raise ValueError(
+                "cluster_tol_rad not given: pass delta_omega and cav so the "
+                "tolerance can be derived from the soliton width")
+        d2 = cav.d2_local if cav.d2_local is not None else cav.d2
+        w_rad = math.sqrt(d2 / (2.0 * abs(float(delta_omega))))
+        cluster_tol_rad = max(COUNT_TOL_WIDTHS * w_rad,
+                              COUNT_TOL_MIN_CELLS * 2.0 * math.pi / n_tau)
+    tol = float(cluster_tol_rad)
+
+    # Per-snapshot accepted candidates (angle, snapshot index).
+    angles, snap_ids, per_snapshot_counts = [], [], []
+    for s in range(n_snap):
+        p = np.abs(arr[s]) ** 2
+        pmax = float(p.max())
+        if pmax <= 0.0:
+            per_snapshot_counts.append(0)
+            continue
+        floor = max(rel_height_candidate * pmax,
+                    bg_floor_multiple * float(np.median(p)))
+        doubled = np.concatenate([p, p])
+        peaks, _ = find_peaks(doubled, height=floor)
+        idx = np.unique(peaks % n_tau)
+        per_snapshot_counts.append(int(idx.size))
+        angles.extend(2.0 * math.pi * idx.astype(np.float64) / n_tau)
+        snap_ids.extend([s] * idx.size)
+
+    if not angles:
+        return {"count": 0, "cluster_angles_rad": np.zeros(0),
+                "per_snapshot_counts": per_snapshot_counts,
+                "count_agreement": float(np.mean(
+                    np.asarray(per_snapshot_counts) == 0)),
+                "persistence_fractions": []}
+
+    angles = np.asarray(angles)
+    snap_ids = np.asarray(snap_ids)
+    order = np.argsort(angles)
+    angles, snap_ids = angles[order], snap_ids[order]
+
+    # Circular clustering: split the sorted angles at gaps > tol; if the
+    # wrap-around gap (last -> first + 2*pi) is also <= tol, the first and
+    # last clusters are one soliton straddling the 0/2*pi seam.
+    gaps = np.diff(angles)
+    breaks = np.nonzero(gaps > tol)[0]
+    cluster_of = np.zeros(angles.size, dtype=int)
+    for b in breaks:
+        cluster_of[b + 1:] += 1
+    n_clusters = int(cluster_of[-1]) + 1
+    wrap_gap = (angles[0] + 2.0 * math.pi) - angles[-1]
+    merged_wrap = n_clusters > 1 and wrap_gap <= tol
+    if merged_wrap:
+        cluster_of[cluster_of == n_clusters - 1] = 0
+        n_clusters -= 1
+
+    clusters = []
+    for ci in range(n_clusters):
+        sel = cluster_of == ci
+        a = angles[sel]
+        if ci == 0 and merged_wrap:
+            # circular mean across the seam
+            mean = math.atan2(float(np.mean(np.sin(a))),
+                              float(np.mean(np.cos(a)))) % (2.0 * math.pi)
+        else:
+            mean = float(np.mean(a))
+        persistence = np.unique(snap_ids[sel]).size / n_snap
+        clusters.append((mean, persistence))
+
+    accepted = sorted(m for m, f in clusters if f >= min_persistence)
+    count = len(accepted)
+    per_snapshot_counts = [int(x) for x in per_snapshot_counts]
+    agreement = float(np.mean(np.asarray(per_snapshot_counts) == count))
+    return {
+        "count": count,
+        "cluster_angles_rad": np.asarray(accepted, dtype=np.float64),
+        "per_snapshot_counts": per_snapshot_counts,
+        "count_agreement": agreement,
+        "persistence_fractions": sorted((f for _, f in clusters),
+                                        reverse=True),
+    }
+
+
 def numpy_label(e_field: np.ndarray, cav: CavityParams, delta_omega: float,
                 pin: float = PIN_W) -> int:
     """NumPy 7-class label (sech^2-fit based) with the physical OFF floor."""
