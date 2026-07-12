@@ -60,6 +60,7 @@ def test_sweep_arrays_shape_and_finiteness(sweep):
     for key in ("dw_over_kappa", "P_intra", "P_intra_std", "P_trans",
                 "U_int", "is_single", "np_label", "n_peaks",
                 "P_comb", "P_comb_std", "soliton_count", "contrast",
+                "soliton_count_end_snapshot", "count_agreement",
                 "is_breather", "is_stationary", "breathing_relstd"):
         assert key in sweep, key
         assert np.asarray(sweep[key]).shape == (CFG.n_steps,)
@@ -81,13 +82,20 @@ def test_multi_soliton_observables(sweep):
     assert np.all(sweep["n_peaks"] >= 1)
     assert np.all(sweep["soliton_count"] >= 0)
     assert np.all(sweep["soliton_count"] <= CFG.n_solitons)
-    # peak positions: NaN-padded (n_steps, max_peaks) angles in [0, 2*pi)
+    # peak positions: NaN-padded (n_steps, max) PERSISTENT-CLUSTER angles
     pos = sweep["peak_positions_rad"]
     assert pos.ndim == 2 and pos.shape[0] == CFG.n_steps
     finite = pos[np.isfinite(pos)]
     assert np.all((finite >= 0.0) & (finite < 2.0 * np.pi))
-    # per-row finite-position count == n_peaks
-    assert np.array_equal(np.isfinite(pos).sum(axis=1), sweep["n_peaks"])
+    # per-row finite-position count == the hardened soliton_count
+    assert np.array_equal(np.isfinite(pos).sum(axis=1),
+                          sweep["soliton_count"])
+    # F5 contract: the settled seed's hardened count survives the first hold
+    # and the windowed counter is self-consistent there
+    assert sweep["soliton_count"][0] == CFG.n_solitons
+    assert sweep["count_agreement"][0] >= 0.5
+    assert np.all((sweep["count_agreement"] >= 0.0)
+                  & (sweep["count_agreement"] <= 1.0))
 
 
 def test_noise_off_config_zeroes_temperature():
@@ -221,6 +229,12 @@ def _synthetic_staircase_sweep(*, monotone=True, n_power_steps=2):
         "P_comb_std": np.full(n, 0.003),
         "soliton_count": counts,
         "contrast": np.where(counts >= 1, 10.0, 1.5),
+        "soliton_count_end_snapshot": np.maximum(counts - (np.arange(n) % 7 == 3),
+                                                 0).astype(np.int64),
+        "count_agreement": np.where(np.arange(n) % 7 == 3, 0.75, 1.0),
+        "count_min_persistence": 0.5,
+        "count_rel_height_candidate": 0.25,
+        "count_bg_floor_multiple": 5.0,
         "is_breather": np.zeros(n, dtype=bool),
         "is_stationary": np.ones(n, dtype=bool),
         "breathing_relstd": np.full(n, 1e-4),
@@ -242,14 +256,22 @@ def _synthetic_staircase_sweep(*, monotone=True, n_power_steps=2):
     return sweep, cfg
 
 
-def test_npz_v3_roundtrip_synthetic(tmp_path):
+def test_npz_v4_roundtrip_synthetic(tmp_path):
     sweep, cfg = _synthetic_staircase_sweep()
     path = tmp_path / "detuning_sweep.npz"
-    save_sweep_npz(path, sweep, cfg)
+    save_sweep_npz(path, sweep, cfg, staircase_validated=True)
     loaded, cfg2 = load_sweep_npz(path)
     assert cfg2 == cfg
-    # v3 stamp + seeding provenance
-    assert loaded["schema_version"] == NPZ_SCHEMA_VERSION == 3
+    # v4 stamp + seeding provenance
+    assert loaded["schema_version"] == NPZ_SCHEMA_VERSION == 4
+    # v4 counter provenance + validation flag round-trip
+    assert loaded["staircase_validated"] is True
+    assert np.issubdtype(loaded["soliton_count_end_snapshot"].dtype,
+                         np.integer)
+    assert np.allclose(loaded["count_agreement"], sweep["count_agreement"])
+    assert loaded["count_min_persistence"] == 0.5
+    assert loaded["count_rel_height_candidate"] == 0.25
+    assert loaded["count_bg_floor_multiple"] == 5.0
     assert loaded["n_solitons_seeded"] == 3
     assert loaded["position_seed"] == cfg.position_seed
     assert loaded["position_jitter_frac"] == cfg.position_jitter_frac
@@ -273,6 +295,32 @@ def test_npz_v3_roundtrip_synthetic(tmp_path):
     save_sweep_npz(path2, loaded, cfg2)
     reloaded, _ = load_sweep_npz(path2)
     assert np.allclose(reloaded["seed_positions_rad"], [0.5, 2.6, 4.7])
+    assert reloaded["staircase_validated"] is False   # not asserted -> False
+
+
+def test_loader_accepts_schema_3_file_without_v4_keys(tmp_path):
+    # simulate a committed pre-v4 npz: save v4, strip the v4 keys, restamp v3
+    import json as _json
+
+    sweep, cfg = _synthetic_staircase_sweep()
+    path4 = tmp_path / "v4.npz"
+    save_sweep_npz(path4, sweep, cfg, staircase_validated=True)
+    d = dict(np.load(path4, allow_pickle=False))
+    for k in ("soliton_count_end_snapshot", "count_agreement",
+              "count_min_persistence", "count_rel_height_candidate",
+              "count_bg_floor_multiple", "staircase_validated"):
+        d.pop(k)
+    d["schema_version"] = 3
+    path3 = tmp_path / "v3.npz"
+    np.savez_compressed(path3, **d)
+    loaded, cfg3 = load_sweep_npz(path3)          # must not raise
+    assert cfg3 == cfg
+    assert loaded["schema_version"] == 3
+    for k in ("soliton_count_end_snapshot", "count_agreement",
+              "count_min_persistence", "staircase_validated"):
+        assert k not in loaded                    # absent, not fabricated
+    assert np.array_equal(loaded["soliton_count"], sweep["soliton_count"])
+    _json  # quiet linters
 
 
 def test_validate_staircase_alignment_gate():
@@ -326,6 +374,12 @@ def test_render_and_report_writes_validated_staircase(tmp_path, monkeypatch):
     assert "matched_step_contrast_P_comb" in stair["primary_observable"]
     assert stair["validation"]["n_matched_steps"] == 2
     assert block["any_soliton_region_over_kappa"] is not None
+    # counting-method provenance (schema-v4 sweeps carry count_agreement)
+    counting = stair["counting"]
+    assert counting["method"] == "position_persistence"
+    assert counting["parameters"]["min_persistence"] == 0.5
+    assert 0.0 <= counting["count_agreement"]["median"] <= 1.0
+    assert "forensics" in counting
 
 
 @pytest.mark.parametrize("kwargs", [{"monotone": False},
@@ -357,13 +411,17 @@ def test_render_only_exits_nonzero_and_prints_ladder(tmp_path, monkeypatch,
     assert excinfo.value.code == 1
     out = capsys.readouterr().out
     assert "STAIRCASE VALIDATION FAILED" in out
-    assert "escalation ladder (Prompt 5)" in out
+    assert "Staircase validation failed. Apply IN ORDER" in out
+    assert "persisted" in out and "unvalidated" in out
     assert not (tmp_path / rds.STEPS_PNG).exists()
     assert not (tmp_path / rds.METRICS_JSON).exists()
 
 
-def test_escalation_ladder_never_weakens_the_gate():
-    # the ladder's remedies must be about the data, never about buying a pass
-    assert "escalation ladder (Prompt 5)" in ESCALATION_LADDER
-    for honest in ("hold", "position-seed", "median", "STOP"):
-        assert honest in ESCALATION_LADDER
+def test_escalation_ladder_is_canonical():
+    # the canonical ladder: measurement rungs first, protocol rungs in order,
+    # and an explicit refusal to weaken the gate
+    assert ESCALATION_LADDER.startswith("Staircase validation failed.")
+    for rung in ("M1", "M2", "P1", "P2", "P3", "P4", "P5", "STOP"):
+        assert rung in ESCALATION_LADDER
+    assert "Never weaken detect_power_steps" in ESCALATION_LADDER
+    assert ESCALATION_LADDER.index("M1") < ESCALATION_LADDER.index("P1")

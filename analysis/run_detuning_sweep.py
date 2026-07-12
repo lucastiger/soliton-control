@@ -125,13 +125,28 @@ with ``contrast = max|E|^2 / mean|E|^2`` of the end-of-hold field and the floor
 fallback zeroes the post-collapse MI/CW states (contrast ~1-2) without vetoing
 genuine solitons; on this deterministic noise-off sweep no genuinely chaotic
 high-contrast state occurs (the class-3 holds ARE the misrouted multi-soliton /
-breathing states).  CAVEAT (honest limitation, kept as-is): ``n_peaks`` is the
-end-of-hold snapshot count at 50% of the max peak, so in the deep-breathing
-sub-band -- where the pulse amplitudes desynchronize and individual solitons
-transiently dip below half of the momentary maximum -- ``soliton_count``
-UNDERCOUNTS even though all pulses persist (the raw ``peak_positions_rad`` and
-``P_comb`` are the reliable per-hold records there).  No thresholds were
-changed anywhere; this caveat is reported, not patched.
+breathing states).
+
+HARDENED COUNTING (schema v4).  The old caveat -- ``n_peaks`` from ONE
+end-of-hold snapshot at 50% of the momentary max undercounts desynchronized
+breathers -- was forensically confirmed as a pure counting artifact
+(``analysis/staircase_forensics.py``: positions persist at the measurement
+ceiling, comb energy continuous to << 1 soliton quantum through every count
+dip).  ``soliton_count`` is now the POSITION-PERSISTENCE count over the
+hold's in-window snapshots (:func:`analysis.dks_access
+.count_solitons_windowed`): per-snapshot candidate peaks at a LOW relative
+threshold with an absolute CW-background floor, clustered circularly across
+snapshots, a cluster counting as a soliton iff it appears in >= half the
+snapshots.  The label arm of the gate now uses the MODE of the solver's
+per-snapshot ``label_history`` over the same window instead of the end field
+alone (Turing rolls / MI combs are also position-persistent -- the label
+gate, not the counter, keeps them at count 0), with the contrast fallback
+retained exactly as documented above.  The legacy end-snapshot count is kept
+as the diagnostic column ``soliton_count_end_snapshot``;
+``peak_positions_rad`` now stores the persistent cluster angles; ``is_single``
+derives from the hardened count.  detect_power_steps, the alignment
+tolerance, and the monotonicity gate are unchanged -- the measurement feeding
+them was hardened, not the thresholds.
 
 Hold length and adiabaticity.  The photon lifetime is ``1/kappa`` ~ 162 round
 trips and the breather period is ~150-180 RT.  The default ``hold_rt = 2000`` is
@@ -162,8 +177,10 @@ measured soliton-number transition: the driver aligns the
 writing ANY artifact, that (a) at least TWO steps are matched (state-verified)
 and (b) ``soliton_count`` is monotonically non-increasing along the descending
 sweep (solitons only annihilate, never appear, going down).  If either check
-fails the driver writes nothing -- no npz, no figure, no JSON -- prints the
-escalation ladder (:data:`ESCALATION_LADDER`) and exits nonzero.  Unmatched
+fails the driver withholds the figure and the JSON staircase block, prints the
+escalation ladder (:data:`ESCALATION_LADDER`) and exits nonzero; the raw sweep
+npz is ALWAYS persisted (flagged ``staircase_validated=False``) because a
+completed solver run is the diagnostic record and is never discarded.  Unmatched
 power discontinuities keep their honest "power-trace discontinuity" label (at
 this device: the near-resonance MI/CW rise); unmatched transitions are state
 changes without a power step, where the muted final 1->0 edge is expected.
@@ -191,10 +208,12 @@ Outputs (all under ``analysis/results/``)
   soliton count on a twin axis and the state-verified steps marked).
 * ``spectral_metrics.json`` gains a ``soliton_step`` block (staircase
   transitions, step-transition alignment, primary-observable decision, the
-  power-discontinuity detection result, and full provenance).
+  counting-method provenance, the power-discontinuity detection result, and
+  full provenance).
 
-Artifacts are only written when the staircase passes the validation gate
-above.
+The figure and the JSON staircase block are only written when the staircase
+passes the validation gate above; the npz is always written (flagged with
+``staircase_validated``).
 """
 
 from __future__ import annotations
@@ -218,6 +237,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
 
 from analysis.dks_access import (  # noqa: E402  (needs the sys.path insert)
     CONFIG_PATH,
+    COUNT_BG_FLOOR_MULTIPLE,
+    COUNT_MIN_PERSISTENCE,
+    COUNT_REL_HEIGHT_CANDIDATE,
     LABEL_SINGLE_SOLITON,
     PIN_W,
     PRODUCTION_NUMERICS,
@@ -226,6 +248,7 @@ from analysis.dks_access import (  # noqa: E402  (needs the sys.path insert)
     _run,
     attach_dispersion,
     breathing_metrics,
+    count_solitons_windowed,
     count_temporal_peaks,
     load_cavity_params,
     numpy_label,
@@ -446,20 +469,49 @@ def run_detuning_sweep(cav, cfg: SweepConfig, *, config_path) -> dict:
 
         label = numpy_label(e_final, cav, dwk * kappa, pin=cfg.pin_w)
         n_peaks = count_temporal_peaks(e_final)
-        peak_positions = temporal_peak_positions(e_final)
-        # Class 6 from the NumPy labeler already encodes the single temporal peak
-        # + sech^2-envelope goodness-of-fit, so (label == 6 and one peak, finite)
-        # is a faithful single-DKS flag without recomputing the full bundle.
         finite = bool(np.all(np.isfinite(e_final)))
-        single = bool(label == LABEL_SINGLE_SOLITON and n_peaks == 1 and finite)
-        # soliton_count: taxonomy gate OR the documented fallback gate for
-        # labeler-misrouted soliton states (see the module docstring).
         p_final = np.abs(e_final) ** 2
         field_contrast = float(p_final.max() / max(p_final.mean(), 1e-300))
+
+        # HARDENED per-hold soliton count: position persistence over the
+        # in-window snapshots (the forensics verdict on the committed sweep --
+        # counting artifact -- keyed on the end-of-hold single-snapshot count).
+        wc = count_solitons_windowed(snaps[in_window],
+                                     delta_omega=dwk * kappa, cav=cav)
+        # Label gate on the WINDOW: mode of the solver's per-snapshot
+        # label_history over the in-window snapshots, not the end field alone.
+        # Turing rolls / MI combs are ALSO position-persistent, so the label
+        # gate (not the counter) is what keeps such states at count 0.  The
+        # documented fallback arm (finite + contrast >= the labeler's soliton
+        # floor) is RETAINED because the labeler's entropy gate misroutes
+        # genuine N-soliton states to class 3 across the whole upper branch
+        # (all 121 holds at dw >= 9k in the committed sweep) -- a strict
+        # taxonomy-only gate would zero them; MI/CW states (contrast ~1-2)
+        # fail both arms either way.
+        lbl_hist = np.asarray(sol["label_history"])[0][in_window]
+        vals, counts_l = np.unique(lbl_hist, return_counts=True)
+        gate_label = int(vals[np.argmax(counts_l)])
         is_soliton_state = bool(
+            gate_label in SOLITON_LABELS
+            or (finite and wc["count"] >= 1
+                and field_contrast >= contrast_floor))
+        soliton_count = int(wc["count"]) if is_soliton_state else 0
+        # Persistent cluster angles are the per-hold position record (empty ->
+        # all-NaN row when the gate zeroes the state, so a giant merged MI
+        # "cluster" never masquerades as a soliton position).
+        peak_positions = (wc["cluster_angles_rad"] if soliton_count > 0
+                          else np.zeros(0))
+        # Legacy end-snapshot count, kept as a stored DIAGNOSTIC column with
+        # its original gate (end-field label / contrast + single-snapshot
+        # peak count) so the artifact the forensics quantified stays visible.
+        legacy_gate = bool(
             label in SOLITON_LABELS
             or (finite and n_peaks >= 1 and field_contrast >= contrast_floor))
-        soliton_count = int(n_peaks) if is_soliton_state else 0
+        soliton_count_end_snapshot = int(n_peaks) if legacy_gate else 0
+        # is_single from the HARDENED count (label gate + count == 1 +
+        # finite), so single_dks_region / the existence shading inherit the
+        # fix.
+        single = bool(is_soliton_state and soliton_count == 1 and finite)
 
         # Schema-v2 breathing fields (V6) on the hold's per-RT U_int history.
         v6 = breathing_metrics(u_hist)
@@ -482,6 +534,8 @@ def run_detuning_sweep(cav, cfg: SweepConfig, *, config_path) -> dict:
             "is_single": single,
             "contrast": field_contrast,
             "soliton_count": soliton_count,
+            "soliton_count_end_snapshot": soliton_count_end_snapshot,
+            "count_agreement": float(wc["count_agreement"]),
             "peak_positions_rad": peak_positions,
             "is_breather": bool(v6["is_breather"]),
             "is_stationary": bool(v6["breathing_relstd"] < STATIONARY_RELSTD),
@@ -495,7 +549,9 @@ def run_detuning_sweep(cav, cfg: SweepConfig, *, config_path) -> dict:
               f"P_intra={rows[-1]['P_intra']:.4e}  "
               f"P_comb={rows[-1]['P_comb']:.4e}  "
               f"U_relstd={rows[-1]['U_int_relstd']:.2%}  lbl={label} "
-              f"npk={n_peaks} N={soliton_count}  ({time.time() - t0:.1f}s)")
+              f"glbl={gate_label} npk={n_peaks} N={soliton_count} "
+              f"(end-snap {soliton_count_end_snapshot}, agree "
+              f"{wc['count_agreement']:.2f})  ({time.time() - t0:.1f}s)")
 
     scalar_keys = [k for k in rows[0] if k != "peak_positions_rad"]
     out = {k: np.array([r[k] for r in rows]) for k in scalar_keys}
@@ -510,6 +566,10 @@ def run_detuning_sweep(cav, cfg: SweepConfig, *, config_path) -> dict:
     out["t_r_s"] = float(cav.t_r)
     out["fsr_hz"] = float(cav.fsr_measured_hz if cav.fsr_measured_hz is not None
                           else cav.fsr_hz)
+    # Windowed-counter parameters actually used (schema-v4 provenance).
+    out["count_min_persistence"] = float(COUNT_MIN_PERSISTENCE)
+    out["count_rel_height_candidate"] = float(COUNT_REL_HEIGHT_CANDIDATE)
+    out["count_bg_floor_multiple"] = float(COUNT_BG_FLOOR_MULTIPLE)
     out["seed_metrics"] = seed_metrics
     return out
 
@@ -575,36 +635,28 @@ class StaircaseValidationError(RuntimeError):
     """The staircase failed the hard validation gate; no artifacts may be written."""
 
 
-# Escalation ladder (Prompt 5): the ordered remedies for a failed staircase
-# validation, printed verbatim by the driver before it exits nonzero.  Work
-# top to bottom, re-run, re-validate -- and never buy a pass by weakening the
-# gate, the detector, or the labeler thresholds.
+# Canonical escalation ladder, printed verbatim by the driver before it exits
+# nonzero on a failed staircase validation.
 ESCALATION_LADDER = """\
-[sweep] escalation ladder (Prompt 5) -- work top to bottom, re-run, re-validate:
-  1. Wrong data before wrong physics: confirm the npz under validation is the
-     intended run (--render-only re-validates whatever detuning_sweep.npz is
-     committed; a stale or legacy file cannot pass the staircase gate).
-  2. Harden the per-hold soliton count, never the thresholds: the end-of-hold
-     single-snapshot count undercounts in the deep-breathing sub-band (pulses
-     transiently dip below 50% of the momentary max while all of them persist).
-     Count temporal peaks on ALL ~8 in-window snapshots and take the median --
-     peak_positions_rad and P_comb are the reliable per-hold records there.
-     Do NOT lower the labeler's contrast floor or the peak threshold to force
-     a count.
-  3. Lengthen the holds (raise --hold-rt): breathing-mediated switching must
-     COMPLETE within a hold so the end-of-hold state is settled; a hold that
-     ends mid-switch records a transient count and breaks monotonicity.
-  4. Densify the grid where it fails (raise --n-steps, or narrow the range
-     around the annihilation cascade) so every N -> N-1 edge is straddled by a
-     clean plateau on each side and the detector can match it.
-  5. Re-break the seeding symmetry (--position-seed / --position-jitter-frac):
-     near-degenerate seed spacings let two solitons annihilate within one grid
-     step, merging staircase steps and starving the matched count.
-  6. If the staircase still fails, STOP and report it honestly (counts,
-     transitions, alignment). Never relabel an unmatched power discontinuity
-     as a soliton step, never smooth the trace, never re-threshold the
-     detector to manufacture a match -- an unvalidated staircase figure does
-     not ship."""
+Staircase validation failed. Apply IN ORDER, one change at a time,
+re-running only the sweep; record every escalation in the npz config
+and the JSON provenance.
+M1 (measurement): inspect count_agreement / persistence_fractions and
+    analysis/staircase_forensics.py output; tune min_persistence,
+    rel_height_candidate, bg_floor_multiple BEFORE any physics change.
+M2 (measurement): lengthen holds (hold_rt 2000 -> 3000) so the
+    in-window snapshots span more breathing periods.
+P1 (protocol): position_jitter_frac 0.25 -> 0.4, new position_seed.
+P2 (protocol): halve the detuning step (densify the grid).
+P3 (protocol): n_solitons 5 -> 7 (re-check the separation constraint).
+P4 (protocol): MI-nucleated seeding via access_by_forward_backward
+    (deterministic, recorded seed); accept if settled count >= 3.
+P5 (last resort): physical noise ON for nucleation only (drop the
+    T_k=0 sidecar for the nucleation stage, restore it for the sweep),
+    RNG seed pinned and recorded.
+STOP: if still failing, report the measured soliton_count trace
+    honestly. Never weaken detect_power_steps, the alignment tolerance,
+    or the monotonicity gate."""
 
 
 def validate_staircase_alignment(counts_ascending, align) -> list:
@@ -681,23 +733,40 @@ _NPZ_V2_KEYS = ("P_comb", "P_comb_std", "soliton_count", "peak_positions_rad",
 # Schema v3: an explicit version stamp plus the seeding provenance, so a
 # consumer can verify the staircase claim (N seeded, where the seeds settled)
 # from the npz alone.  All v1/v2 keys are kept unchanged.
-NPZ_SCHEMA_VERSION = 3
 _NPZ_V3_INT_KEYS = ("schema_version", "n_solitons_seeded", "position_seed")
+# Schema v4: the hardened (position-persistence) counter's provenance.  The
+# per-step diagnostics keep the legacy end-snapshot count alongside the
+# hardened one; the scalars record the counter parameters actually used and
+# whether the persisted sweep passed the staircase validation gate (the npz
+# is ALWAYS written after a completed sweep -- it is the diagnostic record --
+# and only the figure/JSON are gated).
+NPZ_SCHEMA_VERSION = 4
+_NPZ_V4_STEP_KEYS = ("soliton_count_end_snapshot", "count_agreement")
+_NPZ_V4_FLOAT_KEYS = ("count_min_persistence", "count_rel_height_candidate",
+                      "count_bg_floor_multiple")
 
 
-def save_sweep_npz(path: Path, sweep: dict, cfg: SweepConfig) -> None:
-    """Persist the sweep (schema v3) so the figure regenerates without the solver.
+def save_sweep_npz(path: Path, sweep: dict, cfg: SweepConfig, *,
+                   staircase_validated: bool = False) -> None:
+    """Persist the sweep (schema v4) so the figure regenerates without the solver.
 
-    Writes every v1/v2 key unchanged plus ``schema_version``,
-    ``n_solitons_seeded`` / ``position_seed`` / ``position_jitter_frac`` (the
-    seeding provenance, duplicated out of the config JSON for schema-level
-    consumers) and ``seed_positions_rad`` -- the settled seed peak angles,
-    shape ``(N,)``, taken from the fresh run's ``seed_metrics`` or from a
-    previously loaded v3 npz (NaN of shape ``(N,)`` for pre-v3 data that never
-    recorded them).
+    Writes every v1/v2/v3 key unchanged plus the schema-v4 counter provenance:
+    ``soliton_count_end_snapshot`` / ``count_agreement`` (per step),
+    ``count_min_persistence`` / ``count_rel_height_candidate`` /
+    ``count_bg_floor_multiple`` (the windowed-counter parameters) and
+    ``staircase_validated`` (whether this sweep passed
+    :func:`validate_staircase_alignment`; the npz itself is saved either way).
+    ``seed_positions_rad`` comes from the fresh run's ``seed_metrics`` or from
+    a previously loaded v3+/v4 npz (NaN of shape ``(N,)`` for pre-v3 data).
+    Keys absent from ``sweep`` (a re-saved pre-v4 file) are skipped, matching
+    the loader's tolerance.
     """
     arrays = {k: sweep[k] for k in _NPZ_BASE_KEYS + _NPZ_V2_KEYS}
-    if "seed_positions_rad" in sweep:                     # loaded v3 npz
+    for k in _NPZ_V4_STEP_KEYS:
+        if k in sweep:
+            arrays[k] = sweep[k]
+    scalars = {k: float(sweep[k]) for k in _NPZ_V4_FLOAT_KEYS if k in sweep}
+    if "seed_positions_rad" in sweep:                     # loaded v3+/v4 npz
         seed_pos = np.asarray(sweep["seed_positions_rad"], dtype=np.float64)
     elif "seed_metrics" in sweep:                         # fresh solver run
         seed_pos = np.asarray(sweep["seed_metrics"]["peak_positions_rad"],
@@ -713,6 +782,8 @@ def save_sweep_npz(path: Path, sweep: dict, cfg: SweepConfig) -> None:
         position_seed=int(cfg.position_seed),
         position_jitter_frac=float(cfg.position_jitter_frac),
         seed_positions_rad=seed_pos,
+        staircase_validated=bool(staircase_validated),
+        **scalars,
         **arrays,
     )
 
@@ -722,24 +793,32 @@ def load_sweep_npz(path: Path):
 
     Lets the figure + JSON be regenerated from the saved data alone (no solver
     re-run), per the deliverable convention that outputs are regenerable.  The
-    schema-v2 staircase arrays and the schema-v3 seeding-provenance keys are
-    loaded when present, so a legacy (single-soliton v1 or staircase v2) npz
-    still loads; dtypes round-trip unchanged (``soliton_count`` int, the flag
-    columns bool, the ``peak_positions_rad`` NaN padding intact).
+    schema-v2 staircase arrays, the v3 seeding-provenance keys and the v4
+    counter-provenance keys are each loaded only when present, so every older
+    schema (v1 single-soliton, v2 staircase, v3) still loads with the newer
+    keys simply absent -- the offline forensics script keeps working on the
+    committed pre-v4 file.  Dtypes round-trip unchanged (``soliton_count``
+    int, the flag columns bool, the ``peak_positions_rad`` NaN padding
+    intact).
     """
     d = np.load(path, allow_pickle=False)
     cfg = SweepConfig(**json.loads(str(d["sweep_config_json"])))
     sweep = {k: (d[k] if d[k].shape else float(d[k])) for k in _NPZ_BASE_KEYS}
-    for k in _NPZ_V2_KEYS:
+    for k in _NPZ_V2_KEYS + _NPZ_V4_STEP_KEYS:
         if k in d.files:
             sweep[k] = d[k]
     for k in _NPZ_V3_INT_KEYS:
         if k in d.files:
             sweep[k] = int(d[k])
+    for k in _NPZ_V4_FLOAT_KEYS:
+        if k in d.files:
+            sweep[k] = float(d[k])
     if "position_jitter_frac" in d.files:
         sweep["position_jitter_frac"] = float(d["position_jitter_frac"])
     if "seed_positions_rad" in d.files:
         sweep["seed_positions_rad"] = d["seed_positions_rad"]
+    if "staircase_validated" in d.files:
+        sweep["staircase_validated"] = bool(d["staircase_validated"])
     sweep["is_single"] = sweep["is_single"].astype(bool)
     for k in ("is_breather", "is_stationary"):
         if k in sweep:
@@ -1019,19 +1098,49 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
                 "staircase. No smoothing, no detector changes, no "
                 "re-thresholding."),
             "soliton_count_gate": (
-                "n_peaks if (np_label in SOLITON_LABELS = (4, 5, 6)) OR "
-                "(finite field AND n_peaks >= 1 AND contrast >= the labeler's "
+                "windowed position-persistence count if (mode of the "
+                "solver's per-snapshot label_history over the in-window "
+                "snapshots is in SOLITON_LABELS = (4, 5, 6)) OR (finite "
+                "field AND windowed count >= 1 AND contrast >= the labeler's "
                 "soliton contrast floor contrast_high = 8) else 0. The "
                 "taxonomy gate alone empirically zeroes genuine multi-soliton "
                 "holds: the labeler's spectral-entropy chaos gate misroutes "
                 "bright N-soliton combs to class 3 (see the driver "
-                "docstring). CAVEAT: n_peaks is the end-of-hold snapshot "
-                "count at 50% of the max peak, so in the deep-breathing "
-                "sub-band -- where pulse amplitudes desynchronize -- "
-                "soliton_count UNDERCOUNTS even though all pulses persist; "
-                "P_comb and peak_positions_rad are the reliable per-hold "
-                "records there. Reported, not patched."),
+                "docstring); MI/Turing states are position-persistent too, "
+                "so the label gate (not the counter) keeps them at 0."),
         }
+        if "count_agreement" in sweep:
+            agree = np.asarray(sweep["count_agreement"], dtype=float)[order]
+            block["staircase"]["counting"] = {
+                "method": "position_persistence",
+                "parameters": {
+                    "min_persistence": sweep.get("count_min_persistence"),
+                    "rel_height_candidate": sweep.get(
+                        "count_rel_height_candidate"),
+                    "bg_floor_multiple": sweep.get("count_bg_floor_multiple"),
+                    "cluster_tol_rad": "per hold: max(10 * sqrt(d2_local / "
+                                       "(2*delta_omega)), 8 * 2*pi / n_tau)",
+                    "label_gate": "mode of solver label_history over the "
+                                  "in-window snapshots (+ documented "
+                                  "contrast-floor fallback)",
+                },
+                "count_agreement": {
+                    "median": float(np.median(agree)),
+                    "min": float(np.min(agree)),
+                    "fraction_below_1": float(np.mean(agree < 1.0)),
+                    "note": "fraction of holds where a single-snapshot count "
+                            "would have disagreed with the persistent count "
+                            "-- the artifact the windowed counter absorbs",
+                },
+                "legacy_diagnostic": "soliton_count_end_snapshot column "
+                                     "(old end-of-hold single-snapshot "
+                                     "count, old gate) kept in the npz",
+                "forensics": "analysis/results/staircase_forensics.md -- "
+                             "VERDICT: counting artifact (positions persist "
+                             "at the measurement ceiling; comb energy "
+                             "continuous to << 1 quantum through every "
+                             "count dip)",
+            }
         block["primary_observable_decision"] = {
             "rule": ("P_comb is adopted as the PLOTTED primary ONLY if its "
                      "matched-step contrast (min matched |step_dy| / MAD of "
@@ -1102,9 +1211,16 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
     return plot_path
 
 
-def _abort_on_failed_validation(exc: StaircaseValidationError) -> None:
-    """Print the failure + the Prompt-5 escalation ladder and exit nonzero."""
-    print("[sweep] STAIRCASE VALIDATION FAILED -- no artifacts written.")
+def _abort_on_failed_validation(exc: StaircaseValidationError,
+                                npz_note: str) -> None:
+    """Print the failure + the canonical escalation ladder and exit nonzero.
+
+    ``npz_note`` states what happened to the raw data: a completed sweep is
+    ALWAYS persisted (flagged ``staircase_validated=False``) -- only the
+    figure and the JSON staircase block are gated.
+    """
+    print("[sweep] STAIRCASE VALIDATION FAILED -- figure/JSON not written.")
+    print(f"[sweep] {npz_note}")
     print(f"[sweep] {exc}")
     print(ESCALATION_LADDER)
     sys.exit(1)
@@ -1147,7 +1263,12 @@ def main() -> None:
         try:
             render_and_report(sweep, cfg)
         except StaircaseValidationError as exc:
-            _abort_on_failed_validation(exc)
+            _abort_on_failed_validation(
+                exc,
+                f"the sweep data remains persisted in {SWEEP_NPZ} and is "
+                f"flagged unvalidated (staircase_validated="
+                f"{sweep.get('staircase_validated', 'absent (pre-v4 file)')}"
+                f"); it is the diagnostic record for the ladder below.")
         print(f"[sweep] re-rendered from {SWEEP_NPZ} in "
               f"{time.time() - t_start:.1f}s")
         return
@@ -1171,15 +1292,25 @@ def main() -> None:
         except OSError:
             pass
 
-    # Validate-and-render FIRST: the gate inside render_and_report runs before
-    # it writes the figure/JSON, and the npz is only persisted afterwards, so a
-    # failed validation leaves NO artifact of any kind.
+    # The npz is ALWAYS persisted after a completed sweep -- a raw solver run
+    # is never discarded; it is the diagnostic record.  Only the figure and
+    # the JSON staircase block are gated on validation (the gate inside
+    # render_and_report runs before it writes anything).
+    validation_error = None
     try:
         render_and_report(sweep, cfg)
     except StaircaseValidationError as exc:
-        _abort_on_failed_validation(exc)
-    save_sweep_npz(RESULTS_DIR / SWEEP_NPZ, sweep, cfg)
-    print(f"[sweep] data -> {RESULTS_DIR / SWEEP_NPZ}")
+        validation_error = exc
+    save_sweep_npz(RESULTS_DIR / SWEEP_NPZ, sweep, cfg,
+                   staircase_validated=validation_error is None)
+    print(f"[sweep] data -> {RESULTS_DIR / SWEEP_NPZ} "
+          f"(staircase_validated={validation_error is None})")
+    if validation_error is not None:
+        _abort_on_failed_validation(
+            validation_error,
+            f"the raw sweep data WAS persisted to {SWEEP_NPZ} with "
+            f"staircase_validated=False (never discarded); only the figure "
+            f"and the JSON staircase block were withheld.")
     print(f"[sweep] total wall time {time.time() - t_start:.1f}s")
 
 
