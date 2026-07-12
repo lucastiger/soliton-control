@@ -105,8 +105,11 @@ PASS_ACTION = {
 
 def _git_status_map() -> dict:
     """relpath (under analysis/results/) -> git status code (' M', '??', ...)."""
+    # -uall lists individual untracked FILES (otherwise a wholly-untracked
+    # directory such as results/robustness/ collapses to one entry and its
+    # files would be misreported as unchanged).
     out = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "status", "--porcelain",
+        ["git", "-C", str(REPO_ROOT), "status", "--porcelain", "-uall",
          "analysis/results"],
         capture_output=True, text=True).stdout
     status = {}
