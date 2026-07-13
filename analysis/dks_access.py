@@ -95,6 +95,7 @@ import argparse
 import csv
 import dataclasses
 import math
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -510,18 +511,25 @@ def temporal_peak_positions(e_field: np.ndarray,
 
 
 # Candidate-peak acceptance and clustering defaults for the windowed counter.
-COUNT_REL_HEIGHT_CANDIDATE = 0.25   # candidate floor vs the momentary max
+COUNT_REL_HEIGHT_CANDIDATE = 0.25   # LEGACY (removed from the rule): the old
+#   relative arm `rel_height_candidate * snapshot_max`.  Kept ONLY so old npz
+#   provenance and the Stage-B legacy-reference instrumentation can name the
+#   value; passing it to count_solitons_windowed now raises DeprecationWarning
+#   and it never enters the acceptance rule (see the 4-F + 5-D forensics chain
+#   in analysis/results/staircase_forensics.md).
 COUNT_BG_FLOOR_MULTIPLE = 5.0       # absolute floor vs the angular median
+COUNT_SOLITON_FRAC = 0.1            # physics-anchor floor vs B2 = 2*dw/gamma
 COUNT_MIN_PERSISTENCE = 0.5         # cluster must appear in >= this snapshot frac
 COUNT_TOL_WIDTHS = 10.0             # cluster tolerance in soliton widths
 COUNT_TOL_MIN_CELLS = 8.0           # ... floored at this many angular grid cells
 
 
-def count_solitons_windowed(snapshots, *, rel_height_candidate=COUNT_REL_HEIGHT_CANDIDATE,
+def count_solitons_windowed(snapshots, *, rel_height_candidate=None,
                             bg_floor_multiple=COUNT_BG_FLOOR_MULTIPLE,
+                            soliton_frac=COUNT_SOLITON_FRAC,
                             cluster_tol_rad=None,
                             min_persistence=COUNT_MIN_PERSISTENCE,
-                            delta_omega=None, cav=None) -> dict:
+                            delta_omega=None, cav=None, gamma=None) -> dict:
     """Position-persistence soliton count over a hold's in-window snapshots.
 
     Replaces the end-of-hold SINGLE-SNAPSHOT count for the per-hold
@@ -532,19 +540,43 @@ def count_solitons_windowed(snapshots, *, rel_height_candidate=COUNT_REL_HEIGHT_
     momentary max drops any desynchronized breather near its trough even
     though the pulse persists (positions frozen, comb energy continuous).
 
+    DESIGN PRINCIPLE (established by the 4-F -> 5-D forensics chain in
+    ``analysis/results/staircase_forensics.md``): a soliton's detectability
+    must depend ONLY on (a) its own height, (b) the physical background, and
+    (c) the analytic soliton scale at the operating point -- NEVER on the
+    momentary GLOBAL maximum, which is set by whichever sibling is at
+    breathing crest.  Both momentary-max rules failed exactly this way:
+    0.5-of-max (the end-snapshot count, forensics 4-F: "counting artifact")
+    and 0.25-of-max (this counter's old relative arm, forensics 5-D:
+    "RELATIVE-THRESHOLD COUPLING CONFIRMED" -- at every failing hold the
+    victim soliton passed the absolute floor in 100% of snapshots at 23-42x
+    the background, yet was rejected in 38-62% of snapshots purely because a
+    sibling's crest lifted ``snapshot_max``).
+
     Method, per snapshot of ``snapshots`` (shape ``(n_snap, n_tau)``, complex
     intracavity fields):
 
     * candidate peaks by the same doubled-array circular ``find_peaks`` on
       ``|E|^2`` as :func:`count_temporal_peaks`, accepted iff their height is
-      ``>= max(rel_height_candidate * snapshot_max,
-      bg_floor_multiple * median(|E|^2 over angle))``.  The LOW relative
-      threshold tolerates the breathing crest/trough asymmetry, and the
-      ABSOLUTE background floor keeps CW ripple out: at this operating point
-      soliton peaks sit >100x above the CW background
-      (``B^2 = 2*delta_omega/gamma`` vs
-      ``kappa_c*Pin/((kappa/2)^2 + delta_omega^2)``), so there is a wide safe
-      corridor between the two.
+      ``>= max(bg_floor_multiple * median(|E|^2 over angle),
+      soliton_frac * B2_ref)`` with ``B2_ref = 2*|delta_omega|/gamma`` the
+      analytic single-soliton peak power at THIS hold's detuning -- a per-hold
+      PHYSICS anchor, constant across the hold's snapshots, so one soliton's
+      detection can never be coupled to another's breathing phase.
+      Justification of ``soliton_frac = 0.1``: deep breathers oscillate
+      roughly 0.3-3x the nominal peak ``B2_ref`` (the instrumented Stage-B
+      minima on the failing holds were 0.37-0.52x), so ``0.1*B2_ref`` sits
+      ~3x below the deepest expected trough while remaining ~8x above the CW
+      background at the annihilation edge (``B2/background ~ 80`` at 6.75
+      kappa; measured 23-42x for the trough victims) -- anchored to physics,
+      not fitted to any failing hold.  The label gate (``SOLITON_LABELS`` in
+      the driver) remains what excludes MI/Turing states, unchanged.
+      When the physics scale is unavailable (``delta_omega`` is None or no
+      ``gamma``/``cav.gamma``), only the absolute background arm applies --
+      acceptable for synthetic diagnostics; the sweep driver always supplies
+      ``delta_omega`` and ``cav``.  ``rel_height_candidate`` (the removed
+      relative arm) is accepted-but-DEPRECATED: passing it raises a
+      ``DeprecationWarning`` and it never enters the rule.
 
     Candidate angles from ALL snapshots are then clustered circularly with
     tolerance ``cluster_tol_rad`` (adjacent sorted angles closer than the
@@ -566,6 +598,15 @@ def count_solitons_windowed(snapshots, *, rel_height_candidate=COUNT_REL_HEIGHT_
     position-persistent); keeping such states at ``soliton_count = 0`` is the
     caller's LABEL gate's job, not this counter's.
 
+    NON-CIRCULARITY INVARIANT (do not break): this count is MEMORYLESS per
+    hold -- it depends only on the ``snapshots`` passed for a single hold, with
+    no cluster angles carried in from an adjacent hold, no "previous count"
+    prior, and no monotonic constraint.  The driver's monotonicity gate
+    (``validate_staircase_alignment``) is only meaningful because each hold's
+    count is measured independently; a count that inherited a neighbour's answer
+    could never expose a monotonicity break.  Any future cross-hold soliton
+    tracking must be a SEPARATE diagnostic column, never the counted value.
+
     Returns ``{"count", "cluster_angles_rad" (sorted, one per ACCEPTED
     cluster), "per_snapshot_counts" (accepted candidates per snapshot),
     "count_agreement" (fraction of snapshots whose raw candidate count equals
@@ -583,6 +624,22 @@ def count_solitons_windowed(snapshots, *, rel_height_candidate=COUNT_REL_HEIGHT_
         raise ValueError("snapshots is empty")
     if not (0.0 < min_persistence <= 1.0):
         raise ValueError(f"min_persistence must be in (0, 1], got {min_persistence}")
+    if rel_height_candidate is not None:
+        warnings.warn(
+            "rel_height_candidate is deprecated and IGNORED: the relative "
+            "momentary-max arm couples one soliton's detection to its "
+            "siblings' breathing phases and was removed after the 5-D "
+            "forensics verdict (RELATIVE-THRESHOLD COUPLING CONFIRMED, "
+            "analysis/results/staircase_forensics.md). The candidate floor "
+            "is now max(bg_floor_multiple * median(|E|^2), "
+            "soliton_frac * B2_ref) with B2_ref = 2*|delta_omega|/gamma.",
+            DeprecationWarning, stacklevel=2)
+    # Per-hold PHYSICS anchor: the analytic single-soliton peak power at this
+    # hold's detuning.  Constant across the hold's snapshots by construction,
+    # so no snapshot's global maximum can enter any acceptance decision.
+    gamma_val = gamma if gamma is not None else getattr(cav, "gamma", None)
+    b2_ref = (2.0 * abs(float(delta_omega)) / float(gamma_val)
+              if (delta_omega is not None and gamma_val) else None)
     if cluster_tol_rad is None:
         if delta_omega is None or cav is None:
             raise ValueError(
@@ -602,8 +659,12 @@ def count_solitons_windowed(snapshots, *, rel_height_candidate=COUNT_REL_HEIGHT_
         if pmax <= 0.0:
             per_snapshot_counts.append(0)
             continue
-        floor = max(rel_height_candidate * pmax,
-                    bg_floor_multiple * float(np.median(p)))
+        # Acceptance floor: absolute background arm + per-hold physics anchor.
+        # NOTE deliberately NO pmax term -- the momentary global maximum must
+        # never gate a candidate (the 4-F / 5-D coupling defect).
+        floor = bg_floor_multiple * float(np.median(p))
+        if b2_ref is not None:
+            floor = max(floor, soliton_frac * b2_ref)
         doubled = np.concatenate([p, p])
         peaks, _ = find_peaks(doubled, height=floor)
         idx = np.unique(peaks % n_tau)

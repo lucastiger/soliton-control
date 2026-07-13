@@ -91,3 +91,103 @@ Generated 2026-07-12T03:12:49.970611+00:00 by `analysis/staircase_forensics.py` 
 Rule applied: 'counting artifact' iff TEST A shows > 0.9 position persistence AND TEST B shows sub-quantum energy changes; TEST A is evaluated on the rotation-controlled statistic against its measured ceiling because the raw fixed-frame number is invalidated by the coherent pattern drift quantified above (with the raw prescription taken literally, the drift alone would fake a 'new positions' reading for every dip longer than one hold).
 
 Consequences for the schema-4 counter hardening (next step, NOT done here): the flicker is an estimator artifact of the end-of-hold single-snapshot 50%-of-max peak count in the deep-breathing sub-band; the per-hold snapshot-median count proposed in the escalation ladder should remove it. The energy-silent 5 -> 4 envelope drop at 7.65 k means the hardened counter must be validated against P_comb steps, not against the current envelope alone.
+
+## Snapshot starvation (Part A: offline hypothesis test)
+
+Generated 2026-07-12T23:31:51.089818+00:00 by `analysis/staircase_forensics.py --starvation` (offline; no solver run). Hypothesis under test: the robustness count failures are SNAPSHOT STARVATION -- the windowed counter votes over too few, phase-aliased in-window snapshots.
+
+Driver cadence: `snap_int = max(hold_rt // 32, 1)` (`analysis/run_detuning_sweep.py`); the counter votes over the snapshots inside the final-`avg_frac` window. The brief hypothesised `interval = hold_rt // 8`.
+
+### Per-file snapshot budget and quantization signature
+
+| file | hold_rt | snap_int (//32) | **n_in (actual)** | n_in (//8 hyp) | count_agreement grid | signature {k/n_in} | mono-viol | agree==0 |
+|---|---|---|---|---|---|---|---|---|
+| primary | 2000 | 62 | **8** | 2 | 1/8 | True | 0 | 2 |
+| variant_1 | 2000 | 62 | **8** | 2 | 1/8 | True | 1 | 1 |
+| variant_2 | 1600 | 50 | **8** | 2 | 1/8 | True | 0 | 0 |
+| variant_3 | 2000 | 62 | **8** | 2 | 1/8 | True | 1 | 3 |
+
+### Failing holds (monotonicity dips + soliton-bearing agreement==0)
+
+`ratio = snap_int / breathing_period_rt` is the aliasing indicator: **>> 1 would mean the snapshots undersample the breathing cycle (starvation); < 1 means they oversample it.**
+
+| file | dw/k | N | N_end-snap | count_agreement | breathing_relstd | T_b (RT) | snap_int/T_b | kind |
+|---|---|---|---|---|---|---|---|---|
+| primary | 7.050 | 5 | 2 | 0.000 | 0.0318 | 184 | 0.34 | +agree0 |
+| primary | 7.075 | 5 | 3 | 0.000 | 0.0338 | 181 | 0.34 | +agree0 |
+| variant_1 | 6.500 | 5 | 2 | 0.000 | 0.0331 | 393 | 0.16 | +agree0 |
+| variant_1 | 6.750 | 4 | 1 | 0.250 | 0.0587 | 188 | 0.33 | mono |
+| variant_3 | 6.785 | 5 | 3 | 0.000 | 0.0465 | 193 | 0.32 | +agree0 |
+| variant_3 | 6.810 | 5 | 4 | 0.000 | 0.0378 | 192 | 0.32 | +agree0 |
+| variant_3 | 6.960 | 5 | 1 | 0.000 | 0.0531 | 186 | 0.33 | +agree0 |
+| variant_3 | 6.997 | 4 | 2 | 0.375 | 0.0435 | 187 | 0.33 | mono |
+
+### Verdict
+
+**STARVATION: NOT CONFIRMED** (rule: CONFIRMED iff n_in <= 3 for ALL files AND every count_agreement lies on the {k/n_in} grid).
+
+- n_in = [8] (actual `hold_rt//32` cadence), which is **> 3** -- the counter already votes over ~8 in-window snapshots, not ~2. The brief's `hold_rt//8` interval (giving n_in=[2]) is NOT what the driver uses.
+- The count_agreement quantization confirms it: every value lies on an **eighths** grid (1/8), i.e. n_in = 8, not the halves ({0, 0.5, 1}) the starvation hypothesis predicts.
+- The aliasing indicator `snap_int/T_b` is < 1 at every failing hold (snapshots OVERSAMPLE the breathing cycle by ~3x), so phase-aliasing is not the mechanism.
+- **GATE (per the brief): STOP.** The counter had many (~8) phase-spread samples and still failed at isolated deep-breather holds, so the failure mechanism is NOT starvation. Densification / threshold / protocol work must not proceed on the falsified hypothesis; the residual (individual solitons dipping below the rel-height floor during their breathing troughs at these specific holds) needs its own verification before any fix.
+
+## Detectability (offline; Stage A)
+
+Generated 2026-07-13T03:28:26.726382+00:00 by `analysis/staircase_forensics.py --detectability` (offline; no solver run). Working hypothesis: the count defect is a RELATIVE-threshold detectability problem -- a trough-phase soliton is rejected when a sibling is at crest because the candidate floor `rel_height_candidate * snapshot_max` couples each soliton's detection to the others' breathing phases.
+
+### A1 -- missing cluster at each monotonicity-violating hold
+
+| file | dw/k | N | N_end-snap | missing angle | in before | in after | before<->after gap | persists (dropout) |
+|---|---|---|---|---|---|---|---|---|
+| variant_1 | 6.750 | 4 | 1 | 0.057 | yes | yes | 0.0176 | **YES** |
+| variant_3 | 6.997 | 4 | 2 | 3.028 | yes | yes | 0.0090 | **YES** |
+
+A missing soliton present at the SAME angle (within the 0.1 rad drift budget) in BOTH flanking holds never left -- it is a pure detection dropout, consistent with a counting defect (not annihilation/re-nucleation).
+
+### A2 -- is the missing soliton the most strongly interacting?
+
+Rank 1 = tightest nearest-neighbour separation (interacts hardest, breathes deepest). `rank_flank` is computed on the event-neighbourhood positions; `rank_seed` maps the missing soliton back to its seed (rigid-rotation cyclic map) and ranks the seed separations.
+
+| file | seed | dw/k | missing angle | rank_flank (of N) | seed idx | rank_seed (of n) |
+|---|---|---|---|---|---|---|
+| variant_1 | 2 | 6.750 | 0.057 | 3/5 | 4 | 3/5 |
+| variant_3 | 1 | 6.997 | 3.028 | 1/5 | 2 | 1/5 |
+
+Same seed-relative soliton across variants sharing a seed: seed 2: variant_1->idx 4; seed 1: variant_3->idx 2.
+(primary and variant_2 share seed 1 but have NO monotonicity-violating hold, so only variant_3 supplies a seed-1 dropout to locate.)
+
+### A3 -- agreement==0 holds (soliton-bearing)
+
+The raw per-cluster `persistence_fractions` are computed by `count_solitons_windowed` but NOT persisted to the npz (only `count_agreement` and the final accepted cluster angles are), so the per-cluster fraction breakdown the brief asks for is deferred to the instrumented Stage B run. From the stored counts the two signatures still separate: `undercount` (a cluster fell below min_persistence, so N < envelope) vs `correct-count` (all N clusters kept but no single snapshot saw all N).
+
+| file | dw/k | N | envelope | N_end-snap | count_agreement | category |
+|---|---|---|---|---|---|---|
+| primary | 7.050 | 5 | 5 | 2 | 0.000 | correct-count, no unanimous snapshot |
+| primary | 7.075 | 5 | 5 | 3 | 0.000 | correct-count, no unanimous snapshot |
+| variant_1 | 6.500 | 5 | 5 | 2 | 0.000 | correct-count, no unanimous snapshot |
+| variant_3 | 6.785 | 5 | 5 | 3 | 0.000 | correct-count, no unanimous snapshot |
+| variant_3 | 6.810 | 5 | 5 | 4 | 0.000 | correct-count, no unanimous snapshot |
+| variant_3 | 6.960 | 5 | 5 | 1 | 0.000 | correct-count, no unanimous snapshot |
+
+### Stage-A gate
+
+- **POSITION PERSISTENCE CONFIRMED** at all 2 monotonicity events: every missing soliton sits at the same angle in both flanks (max before<->after gap 0.0176 rad). The dropouts are a COUNTING defect, not physics rearrangement -> Stage B (instrumented run) may proceed.
+
+## Detectability (Stage B: instrumented)
+
+Generated 2026-07-13T05:26:41.654287+00:00 by `analysis/staircase_forensics.py --diagnose-report`. Per failing hold the VICTIM soliton (missing one at an undercount hold; lowest-persistence cluster at an agreement==0 hold) is scored: a rel-VICTIM snapshot passes the absolute floor but fails the relative one (`rel_height_candidate * snapshot_max`), so it is rejected only because a sibling's crest lifted `snapshot_max`.
+
+| variant | dw/k | kind | victim | abs pass | rel-victim frac | fails-both | detected (persist.) | min|E|²/bg | min|E|²/B² | class |
+|---|---|---|---|---|---|---|---|---|---|---|
+| variant_1 | 6.750 | mono | missing@0.048 | 1.00 | 0.62 | 0.00 | 0.38 | 32.8 | 0.45 | **coupling** |
+| variant_1 | 6.500 | agree0 | cluster 2 (min persist.) | 1.00 | 0.50 | 0.00 | 0.50 | 23.4 | 0.37 | **coupling** |
+| variant_3 | 6.997 | mono | missing@3.023 | 1.00 | 0.62 | 0.00 | 0.38 | 41.6 | 0.52 | **coupling** |
+| variant_3 | 6.960 | agree0 | cluster 4 (min persist.) | 1.00 | 0.38 | 0.00 | 0.62 | 32.0 | 0.41 | **coupling** |
+| variant_3 | 6.810 | agree0 | cluster 0 (min persist.) | 1.00 | 0.38 | 0.00 | 0.62 | 28.6 | 0.39 | **coupling** |
+| variant_3 | 6.785 | agree0 | cluster 1 (min persist.) | 1.00 | 0.50 | 0.00 | 0.50 | 27.2 | 0.38 | **coupling** |
+
+**STAGE-B VERDICT: RELATIVE-THRESHOLD COUPLING CONFIRMED**
+
+- Rule: COUPLING iff at every undercount hold the missing soliton passes the ABSOLUTE floor in >= 90% of snapshots yet is dropped (persistence < 0.5) by the RELATIVE floor (`rel_height_candidate * snapshot_max`); GENUINE DIMMING iff it fails the absolute floor in the majority of snapshots; MIXED otherwise. agree0 holds corroborate (same mechanism, victim kept above 0.5).
+- No fix applied: this diagnosis is the deliverable. Any remedy (e.g. dropping the coupled relative arm of the candidate floor) is a separate, gated change -- not made here.
+

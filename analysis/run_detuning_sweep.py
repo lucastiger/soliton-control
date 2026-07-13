@@ -134,10 +134,15 @@ breathers -- was forensically confirmed as a pure counting artifact
 ceiling, comb energy continuous to << 1 soliton quantum through every count
 dip).  ``soliton_count`` is now the POSITION-PERSISTENCE count over the
 hold's in-window snapshots (:func:`analysis.dks_access
-.count_solitons_windowed`): per-snapshot candidate peaks at a LOW relative
-threshold with an absolute CW-background floor, clustered circularly across
-snapshots, a cluster counting as a soliton iff it appears in >= half the
-snapshots.  The label arm of the gate now uses the MODE of the solver's
+.count_solitons_windowed`): per-snapshot candidate peaks above
+``max(bg_floor_multiple * median(|E|^2), soliton_frac * B2_ref)`` with
+``B2_ref = 2*|delta_omega|/gamma`` the analytic soliton peak power at the
+hold's detuning (v2 physics anchor -- the counter's original 0.25-of-
+momentary-max relative arm was removed after the Stage-B forensics verdict
+RELATIVE-THRESHOLD COUPLING CONFIRMED: any momentary-max term couples one
+soliton's detectability to its siblings' breathing phases), clustered
+circularly across snapshots, a cluster counting as a soliton iff it appears
+in >= half the snapshots.  The label arm of the gate now uses the MODE of the solver's
 per-snapshot ``label_history`` over the same window instead of the end field
 alone (Turing rolls / MI combs are also position-persistent -- the label
 gate, not the counter, keeps them at count 0), with the contrast fallback
@@ -219,6 +224,30 @@ Outputs (all under ``analysis/results/``)
 The figure and the JSON staircase block are only written when the staircase
 passes the validation gate above; the npz is always written (flagged with
 ``staircase_validated``).
+
+Robustness mode (``--robustness``)
+----------------------------------
+Re-runs the ACCEPTED configuration (read VERBATIM from the committed
+``detuning_sweep.npz`` ``sweep_config_json``, never retyped) under three
+one-at-a-time perturbations -- (i) ``position_seed + 1``, (ii) ``hold_rt``
+2000 -> 1600, (iii) ``n_steps`` doubled (detuning spacing halved) -- and proves
+the staircase STRUCTURE survives each.  Step LOCATIONS may move (annihilation
+detunings are interaction-dependent); the STRUCTURE must persist: for every
+variant, using the hardened windowed counter throughout,
+:func:`validate_staircase_alignment` passes (>= 2 state-verified steps + a
+monotone descent), the per-hold ``count_agreement`` stays physics-driven
+(median >= 0.5 and no soliton-bearing hold at 0 -- else the persistence
+machinery, not the physics, is making the count), every hold at
+``dw >= 9.5*kappa`` is stationary, and the muted 1->0 annihilation persists in
+``[5.75, 6.5]*kappa`` (its matched-vs-unmatched status is data-decided per the
+honesty constraint and recorded, never gated).  Each variant's raw sweep is
+persisted to ``results/robustness/variant_{i}.npz`` (schema v4, NO figure --
+data only) and the primary artifacts are never touched; the per-variant results
+go to the ``staircase_robustness`` block of ``spectral_metrics.json`` and are
+mirrored into ``dks_artifact_provenance.json``.  On any variant failure the
+canonical :data:`ESCALATION_LADDER` and the failing diagnostics are printed and
+the driver exits nonzero -- a robustness failure is a finding, never a reason to
+tune ``min_persistence`` or any threshold.
 """
 
 from __future__ import annotations
@@ -245,6 +274,9 @@ from analysis.dks_access import (  # noqa: E402  (needs the sys.path insert)
     COUNT_BG_FLOOR_MULTIPLE,
     COUNT_MIN_PERSISTENCE,
     COUNT_REL_HEIGHT_CANDIDATE,
+    COUNT_SOLITON_FRAC,
+    COUNT_TOL_MIN_CELLS,
+    COUNT_TOL_WIDTHS,
     LABEL_SINGLE_SOLITON,
     PIN_W,
     PRODUCTION_NUMERICS,
@@ -481,6 +513,13 @@ def run_detuning_sweep(cav, cfg: SweepConfig, *, config_path) -> dict:
         # HARDENED per-hold soliton count: position persistence over the
         # in-window snapshots (the forensics verdict on the committed sweep --
         # counting artifact -- keyed on the end-of-hold single-snapshot count).
+        # NON-CIRCULARITY GUARD: the counter is fed ONLY this hold's in-window
+        # snapshots -- no cluster angles carried from a neighbouring hold, no
+        # "previous count" prior, no monotonic constraint.  The count must stay
+        # memoryless per hold, or the monotonicity gate
+        # (validate_staircase_alignment) it feeds would be measuring an answer
+        # that partly inherited its neighbour's.  Any future cross-hold soliton
+        # tracking must be a SEPARATE diagnostic column, never the counted value.
         wc = count_solitons_windowed(snaps[in_window],
                                      delta_omega=dwk * kappa, cav=cav)
         # Label gate on the WINDOW: mode of the solver's per-snapshot
@@ -573,7 +612,7 @@ def run_detuning_sweep(cav, cfg: SweepConfig, *, config_path) -> dict:
                           else cav.fsr_hz)
     # Windowed-counter parameters actually used (schema-v4 provenance).
     out["count_min_persistence"] = float(COUNT_MIN_PERSISTENCE)
-    out["count_rel_height_candidate"] = float(COUNT_REL_HEIGHT_CANDIDATE)
+    out["count_soliton_frac"] = float(COUNT_SOLITON_FRAC)
     out["count_bg_floor_multiple"] = float(COUNT_BG_FLOOR_MULTIPLE)
     out["seed_metrics"] = seed_metrics
     return out
@@ -748,7 +787,7 @@ _NPZ_V3_INT_KEYS = ("schema_version", "n_solitons_seeded", "position_seed")
 NPZ_SCHEMA_VERSION = 4
 _NPZ_V4_STEP_KEYS = ("soliton_count_end_snapshot", "count_agreement")
 _NPZ_V4_FLOAT_KEYS = ("count_min_persistence", "count_rel_height_candidate",
-                      "count_bg_floor_multiple")
+                      "count_bg_floor_multiple", "count_soliton_frac")
 
 
 def save_sweep_npz(path: Path, sweep: dict, cfg: SweepConfig, *,
@@ -1121,19 +1160,38 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
         }
         if "count_agreement" in sweep:
             agree = np.asarray(sweep["count_agreement"], dtype=float)[order]
+            # v2 sweeps carry count_soliton_frac (the physics anchor); pre-fix
+            # v4 files carry count_rel_height_candidate (the removed relative
+            # arm) -- the method name and parameter set follow the file.
+            v2 = "count_soliton_frac" in sweep
+            counting_params = {
+                "min_persistence": sweep.get("count_min_persistence"),
+                "bg_floor_multiple": sweep.get("count_bg_floor_multiple"),
+                "cluster_tol_rad": "per hold: max(10 * sqrt(d2_local / "
+                                   "(2*delta_omega)), 8 * 2*pi / n_tau)",
+                "label_gate": "mode of solver label_history over the "
+                              "in-window snapshots (+ documented "
+                              "contrast-floor fallback)",
+            }
+            if v2:
+                counting_params["soliton_frac"] = sweep.get(
+                    "count_soliton_frac")
+                counting_params["physics_anchor"] = (
+                    "candidate floor = max(bg_floor_multiple * median(|E|^2), "
+                    "soliton_frac * B2_ref), B2_ref = 2*|delta_omega|/gamma "
+                    "(the analytic single-soliton peak power at the hold's "
+                    "detuning). The momentary-max relative arm was REMOVED: "
+                    "it coupled each soliton's detectability to its siblings' "
+                    "breathing phases (staircase_forensics.md, 4-F end-"
+                    "snapshot artifact -> 5-D RELATIVE-THRESHOLD COUPLING "
+                    "CONFIRMED).")
+            else:
+                counting_params["rel_height_candidate"] = sweep.get(
+                    "count_rel_height_candidate")
             block["staircase"]["counting"] = {
-                "method": "position_persistence",
-                "parameters": {
-                    "min_persistence": sweep.get("count_min_persistence"),
-                    "rel_height_candidate": sweep.get(
-                        "count_rel_height_candidate"),
-                    "bg_floor_multiple": sweep.get("count_bg_floor_multiple"),
-                    "cluster_tol_rad": "per hold: max(10 * sqrt(d2_local / "
-                                       "(2*delta_omega)), 8 * 2*pi / n_tau)",
-                    "label_gate": "mode of solver label_history over the "
-                                  "in-window snapshots (+ documented "
-                                  "contrast-floor fallback)",
-                },
+                "method": ("position_persistence_v2_physics_anchor" if v2
+                           else "position_persistence"),
+                "parameters": counting_params,
                 "count_agreement": {
                     "median": float(np.median(agree)),
                     "min": float(np.min(agree)),
@@ -1146,10 +1204,16 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
                                      "(old end-of-hold single-snapshot "
                                      "count, old gate) kept in the npz",
                 "forensics": "analysis/results/staircase_forensics.md -- "
-                             "VERDICT: counting artifact (positions persist "
-                             "at the measurement ceiling; comb energy "
-                             "continuous to << 1 quantum through every "
-                             "count dip)",
+                             "the full chain: 4-F (end-snapshot flicker = "
+                             "counting artifact) -> 5-R (snapshot starvation "
+                             "FALSIFIED: n_in = 8, agreement quantized in "
+                             "eighths) -> 5-D Stage A (missing solitons "
+                             "persist in position: detection dropout) -> 5-D "
+                             "Stage B (RELATIVE-THRESHOLD COUPLING CONFIRMED: "
+                             "victims pass the absolute floor in 100% of "
+                             "snapshots at 23-42x background, rejected only "
+                             "by the momentary-max arm) -> 5-X (this v2 "
+                             "physics-anchored rule)",
             }
         block["primary_observable_decision"] = {
             "rule": ("P_comb is adopted as the PLOTTED primary ONLY if its "
@@ -1221,6 +1285,691 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
     return plot_path
 
 
+# ---------------------------------------------------------------------------
+# Robustness harness (data-only): re-run the ACCEPTED configuration under
+# one-at-a-time perturbations and prove the staircase STRUCTURE survives.  Step
+# LOCATIONS may move between variants -- annihilation detunings are
+# interaction-dependent -- but the STRUCTURE (>= 2 state-verified steps,
+# monotone descent, a stationary upper branch, physics-driven counts and the
+# muted 1->0 lower edge) must persist.  Variants write their own npz under
+# ``results/robustness/`` and NEVER touch the primary artifacts; no figure is
+# rendered.  The hardened windowed counter (count_solitons_windowed via
+# run_detuning_sweep) is used throughout, unchanged.
+# ---------------------------------------------------------------------------
+PROVENANCE_JSON = "dks_artifact_provenance.json"
+ROBUSTNESS_DIRNAME = "robustness"
+ROBUSTNESS_JSON_KEY = "staircase_robustness"
+
+# The ADDITIONAL structural invariants a perturbed sweep must satisfy.  These
+# are NOT the staircase validation thresholds -- detect_power_steps' k, the
+# 1-sample alignment tolerance and the monotonicity gate are all unchanged and
+# still enforced verbatim through validate_staircase_alignment below.  Per the
+# task, these floors are FIXED and must never be tuned to make a variant pass;
+# a violation is a finding, escalated via the canonical ESCALATION_LADDER.
+ROBUSTNESS_COUNT_AGREEMENT_MEDIAN_FLOOR = 0.5      # median per-hold agreement
+ROBUSTNESS_STATIONARY_EDGE_KAPPA = 9.5             # every hold >= here stationary
+ROBUSTNESS_MUTED_EDGE_WINDOW_KAPPA = (5.75, 6.5)   # the 1->0 annihilation lives here
+
+
+def load_accepted_config(npz_path: Path) -> SweepConfig:
+    """Read the ACCEPTED sweep configuration from a committed sweep npz.
+
+    The perturbation baseline is taken VERBATIM from the committed
+    ``detuning_sweep.npz`` (its ``sweep_config_json``), never retyped, so the
+    variants perturb exactly the configuration that produced the validated
+    staircase.
+    """
+    d = np.load(npz_path, allow_pickle=False)
+    return SweepConfig(**json.loads(str(d["sweep_config_json"])))
+
+
+def robustness_variant_specs(base: SweepConfig) -> list:
+    """The three one-at-a-time perturbations of the accepted configuration.
+
+    (i) ``position_seed + 1`` -- a different deterministic symmetry-breaking
+    jitter (new soliton placement, so the annihilation ORDER/locations may
+    move); (ii) ``hold_rt`` 2000 -> 1600 -- shorter holds (fewer in-window
+    snapshots, fewer breathing periods cycle-averaged); (iii) ``n_steps``
+    doubled -- halved detuning spacing.  Each perturbs a SINGLE field of
+    ``base`` via :func:`dataclasses.replace` so the rest of the accepted
+    configuration is carried verbatim.  Returns a list of
+    ``(index, key, description, variant_cfg)``.
+    """
+    return [
+        (1, "position_seed+1",
+         f"position_seed {base.position_seed} -> {base.position_seed + 1}",
+         dataclasses.replace(base, position_seed=base.position_seed + 1)),
+        (2, "hold_rt_2000_to_1600",
+         f"hold_rt {base.hold_rt} -> 1600",
+         dataclasses.replace(base, hold_rt=1600)),
+        (3, "n_steps_doubled",
+         f"n_steps {base.n_steps} -> {2 * base.n_steps} "
+         f"(detuning spacing halved)",
+         dataclasses.replace(base, n_steps=2 * base.n_steps)),
+    ]
+
+
+def analyze_sweep_staircase(sweep: dict, cfg: SweepConfig) -> dict:
+    """Post-process a sweep into the staircase alignment WITHOUT rendering.
+
+    Mirrors the ``has_staircase`` analysis of :func:`render_and_report`
+    exactly -- the same primary-observable decision (P_intra vs P_comb by
+    matched-step contrast), the same UNCHANGED :func:`detect_power_steps`
+    detections, and the same :func:`soliton_count_transitions` /
+    :func:`match_steps_to_transitions` alignment on the plotted primary -- but
+    returns the pieces instead of drawing a figure.  Used by the robustness
+    harness (which renders no figure) and pinned to the committed JSON staircase
+    block by ``tests/test_detuning_sweep.py`` so it cannot silently diverge from
+    the primary path.
+    """
+    order = np.argsort(sweep["dw_over_kappa"])
+    dwk = np.asarray(sweep["dw_over_kappa"])[order]
+    P = np.asarray(sweep["P_intra"])[order]
+    Pc = np.asarray(sweep["P_comb"])[order]
+    counts = np.asarray(sweep["soliton_count"], dtype=int)[order]
+
+    all_edges, matched = staircase_transition_edges(counts)
+    P_norm_t = P / float(np.max(P))
+    Pc_norm_t = Pc / float(np.max(Pc))
+    steps_intra = detect_power_steps(dwk, P_norm_t, k=cfg.step_k)
+    steps_comb = detect_power_steps(dwk, Pc_norm_t, k=cfg.step_k)
+    contrast_intra = matched_step_contrast(P_norm_t, steps_intra, matched)
+    contrast_comb = matched_step_contrast(Pc_norm_t, steps_comb, matched)
+    use_comb = contrast_comb["contrast"] > contrast_intra["contrast"]
+    steps = steps_comb if use_comb else steps_intra
+    name1 = "P_comb" if use_comb else "P_intra"
+
+    transitions = soliton_count_transitions(dwk, counts)
+    align = match_steps_to_transitions(steps, transitions)
+    return {
+        "dwk": dwk, "counts": counts, "steps": steps, "name1": name1,
+        "use_comb": use_comb, "transitions": transitions, "align": align,
+        "matched_edges": matched, "all_edges": all_edges,
+        "contrast_intra": contrast_intra["contrast"],
+        "contrast_comb": contrast_comb["contrast"],
+    }
+
+
+def assess_robustness_variant(index, key, description, sweep, cfg, analysis,
+                              npz_rel) -> dict:
+    """Score one perturbed sweep against the four robustness invariants.
+
+    Using the hardened windowed counts already in ``sweep`` and the alignment
+    from :func:`analyze_sweep_staircase`, checks (all hard, none tunable):
+
+    1. **Structure** -- :func:`validate_staircase_alignment` passes: >= 2
+       matched (state-verified) power steps AND ``soliton_count`` monotone
+       non-increasing along the descending sweep.
+    2. **Physics-driven counts** -- median per-hold ``count_agreement`` >=
+       ``ROBUSTNESS_COUNT_AGREEMENT_MEDIAN_FLOOR`` AND no soliton-bearing hold
+       (``soliton_count >= 1``) has ``count_agreement == 0``.  Rationale: if
+       the raw per-snapshot counts stop agreeing with the persistent-cluster
+       count, the persistence machinery is doing ALL the work and the
+       "robustness" is an artifact of the counter, not the physics -- an
+       ``agreement == 0`` hold is one where the count is counter-made, not
+       physics-made.
+    3. **Stationary upper branch** -- every hold at ``dw >=
+       ROBUSTNESS_STATIONARY_EDGE_KAPPA`` is ``is_stationary``.
+    4. **Muted lower edge** -- the muted 1->0 annihilation transition is
+       present within ``ROBUSTNESS_MUTED_EDGE_WINDOW_KAPPA``.  Its matched-vs-
+       unmatched STATUS is recorded, not gated: per the driver's honesty
+       constraint (see the module docstring and ``match_steps_to_transitions``)
+       whether the 1->0 registers as a power step is DATA-decided on the
+       plotted primary -- on the accepted sweep it resolves naturally on the
+       pump-excluded comb power (matched), which is a STRONGER outcome than an
+       unmatched (power-muted) edge, never a failure.  The invariant is that
+       the edge's STRUCTURE persists in the window; forcing it to be unmatched
+       would require tampering with the detector, which is forbidden.
+
+    Returns the per-variant record (the JSON-block fields plus diagnostics and
+    the ``violations`` list); ``pass`` is True iff there are no violations.
+    """
+    order = np.argsort(sweep["dw_over_kappa"])
+    dwk = np.asarray(sweep["dw_over_kappa"])[order]
+    counts = np.asarray(sweep["soliton_count"], dtype=int)[order]
+    agree = np.asarray(sweep["count_agreement"], dtype=float)[order]
+    is_stat = np.asarray(sweep["is_stationary"]).astype(bool)[order]
+    align = analysis["align"]
+    violations = []
+
+    # (1) hard validation gate (thresholds UNCHANGED).
+    problems = validate_staircase_alignment(counts, align)
+    violations += [f"structure: {p}" for p in problems]
+
+    # (2) count_agreement: median floor + no soliton-bearing zero.
+    med_agree = float(np.median(agree))
+    if med_agree < ROBUSTNESS_COUNT_AGREEMENT_MEDIAN_FLOOR:
+        violations.append(
+            f"count_agreement: median {med_agree:.3f} < "
+            f"{ROBUSTNESS_COUNT_AGREEMENT_MEDIAN_FLOOR} floor (the persistent "
+            f"counts no longer track the raw per-snapshot counts across the "
+            f"sweep)")
+    soliton_bearing = counts >= 1
+    sb_zero_idx = np.nonzero(soliton_bearing & (agree == 0.0))[0]
+    sb_zero = [{"dw_over_kappa": float(dwk[i]), "soliton_count": int(counts[i])}
+               for i in sb_zero_idx]
+    if sb_zero:
+        shown = ", ".join(f"{z['dw_over_kappa']:.3f}k (N={z['soliton_count']})"
+                          for z in sb_zero[:8])
+        more = f" (+{len(sb_zero) - 8} more)" if len(sb_zero) > 8 else ""
+        violations.append(
+            f"count_agreement: {len(sb_zero)} soliton-bearing hold(s) with "
+            f"count_agreement == 0 -- the persistence machinery is load-bearing "
+            f"there, not the physics: {shown}{more}")
+
+    # (3) stationary for every hold dw >= edge.
+    hi = dwk >= ROBUSTNESS_STATIONARY_EDGE_KAPPA
+    nonstat_idx = np.nonzero(hi & ~is_stat)[0]
+    nonstat = [float(dwk[i]) for i in nonstat_idx]
+    if nonstat:
+        shown = ", ".join(f"{d:.3f}k" for d in nonstat[:8])
+        more = f" (+{len(nonstat) - 8} more)" if len(nonstat) > 8 else ""
+        violations.append(
+            f"stationarity: {len(nonstat)} hold(s) at dw >= "
+            f"{ROBUSTNESS_STATIONARY_EDGE_KAPPA}k are not is_stationary: "
+            f"{shown}{more}")
+
+    # (4) muted 1->0 annihilation edge present in the window.
+    lo_w, hi_w = ROBUSTNESS_MUTED_EDGE_WINDOW_KAPPA
+    one_to_zero = [t for t in analysis["transitions"]
+                   if t["n_low_side"] == 0 and t["n_high_side"] >= 1
+                   and lo_w <= t["dw_mid"] <= hi_w]
+    if not one_to_zero:
+        violations.append(
+            f"muted edge: no 1->0 annihilation transition in "
+            f"[{lo_w}, {hi_w}]k -- the staircase's lower-edge structure is "
+            f"absent")
+        muted = {"dw_mid_over_kappa": None, "status": "absent"}
+    else:
+        edge = one_to_zero[0]
+        matched_tr = {m["transition_edge_index"] for m in align["matched"]}
+        unmatched_tr = {t["edge_index"] for t in align["unmatched_transitions"]}
+        if edge["edge_index"] in matched_tr:
+            status = "matched"        # resolved naturally on the plotted primary
+        elif edge["edge_index"] in unmatched_tr:
+            status = "unmatched"      # power-muted: a state change w/o a power step
+        else:
+            status = "present"
+        muted = {"dw_mid_over_kappa": float(edge["dw_mid"]), "status": status}
+    muted["window_over_kappa"] = [lo_w, hi_w]
+    muted["note"] = (
+        "structural persistence of the 1->0 edge in the window is the gate; "
+        "matched-vs-unmatched is data-decided per the honesty constraint (the "
+        "detector is never forced). On the accepted sweep the edge resolves "
+        "naturally on P_comb (matched) -- a stronger result than an unmatched "
+        "power-muted edge, not a failure.")
+
+    sb_agree = agree[soliton_bearing]
+    return {
+        "index": int(index),
+        "key": key,
+        "perturbation": description,
+        "config": {"position_seed": int(cfg.position_seed),
+                   "hold_rt": int(cfg.hold_rt),
+                   "n_steps": int(cfg.n_steps),
+                   "n_solitons": int(cfg.n_solitons)},
+        "n_detunings": int(dwk.size),
+        "plotted_primary": analysis["name1"],
+        "matched_step_count": int(len(align["matched"])),
+        "matched_dw_mid_over_kappa": [float(m["dw_mid"])
+                                      for m in align["matched"]],
+        "median_count_agreement": med_agree,
+        "min_count_agreement_soliton_bearing": (
+            float(sb_agree.min()) if sb_agree.size else None),
+        "soliton_bearing_zero_agreement_holds": sb_zero,
+        "nonstationary_holds_ge_edge_over_kappa": nonstat,
+        "muted_1to0_edge": muted,
+        "npz": npz_rel,
+        "violations": violations,
+        "pass": len(violations) == 0,
+    }
+
+
+def run_robustness(base_cfg: SweepConfig, *, config_path) -> dict:
+    """Run the three perturbation variants and assemble the robustness block.
+
+    Each variant re-seeds and re-sweeps with the hardened windowed counter,
+    persists its raw npz to ``results/robustness/variant_{i}.npz`` (schema v4,
+    NO figure -- data only), and is scored by
+    :func:`assess_robustness_variant`.  The primary artifacts
+    (``detuning_sweep.npz``, ``soliton_steps.*``, the ``soliton_step`` JSON
+    block) are never touched.  Returns the ``staircase_robustness`` block
+    (per-variant records + ``all_pass`` + ``generated_utc``); the caller writes
+    it to the metrics JSON and mirrors it into the provenance, then escalates on
+    any failure.
+    """
+    rob_dir = RESULTS_DIR / ROBUSTNESS_DIRNAME
+    rob_dir.mkdir(parents=True, exist_ok=True)
+    variants = []
+    for index, key, desc, vcfg in robustness_variant_specs(base_cfg):
+        print(f"\n[robustness] variant {index}/3 -- {desc}")
+        npz_rel = f"{ROBUSTNESS_DIRNAME}/variant_{index}.npz"
+        npz_path = rob_dir / f"variant_{index}.npz"
+        cav = attach_dispersion(load_cavity_params(), vcfg.n_tau)
+        try:
+            sweep = run_detuning_sweep(cav, vcfg, config_path=config_path)
+        except RuntimeError as exc:
+            # e.g. the perturbed seed merged/died during the pre-settle -- a
+            # legitimate robustness finding (the seeding is not robust to this
+            # perturbation), recorded, never silently retried.
+            variants.append({
+                "index": int(index), "key": key, "perturbation": desc,
+                "config": {"position_seed": int(vcfg.position_seed),
+                           "hold_rt": int(vcfg.hold_rt),
+                           "n_steps": int(vcfg.n_steps),
+                           "n_solitons": int(vcfg.n_solitons)},
+                "matched_step_count": 0, "matched_dw_mid_over_kappa": [],
+                "median_count_agreement": None, "muted_1to0_edge": None,
+                "npz": None,
+                "violations": [f"sweep aborted before completion: {exc}"],
+                "pass": False,
+            })
+            print(f"[robustness] variant {index} ABORTED: {exc}")
+            continue
+        analysis = analyze_sweep_staircase(sweep, vcfg)
+        problems = validate_staircase_alignment(analysis["counts"],
+                                                analysis["align"])
+        # The raw npz is ALWAYS persisted (diagnostic record), flagged with
+        # whether it passed the staircase validation gate -- exactly the primary
+        # driver's persistence contract, but into the robustness/ sidecar dir.
+        save_sweep_npz(npz_path, sweep, vcfg,
+                       staircase_validated=(not problems))
+        result = assess_robustness_variant(index, key, desc, sweep, vcfg,
+                                            analysis, npz_rel)
+        variants.append(result)
+        verdict = "PASS" if result["pass"] else "FAIL"
+        print(f"[robustness] variant {index} {verdict}: "
+              f"{result['matched_step_count']} matched step(s) at "
+              + (", ".join(f"{m:.3f}k"
+                           for m in result["matched_dw_mid_over_kappa"]) or "-")
+              + f"; median count_agreement "
+              f"{result['median_count_agreement']:.3f}; muted 1->0 "
+              f"{result['muted_1to0_edge']['status']} at "
+              + (f"{result['muted_1to0_edge']['dw_mid_over_kappa']:.3f}k"
+                 if result['muted_1to0_edge']['dw_mid_over_kappa'] is not None
+                 else "n/a"))
+        for viol in result["violations"]:
+            print(f"[robustness]   - {viol}")
+
+    all_pass = all(v["pass"] for v in variants)
+    return {
+        "metric": "staircase_robustness",
+        "baseline": ("ACCEPTED configuration read verbatim from "
+                     f"{SWEEP_NPZ} sweep_config_json"),
+        "perturbations": ("one-at-a-time: (i) position_seed+1, "
+                          "(ii) hold_rt 2000->1600, (iii) n_steps doubled "
+                          "(detuning spacing halved)"),
+        "counter": ("hardened position-persistence windowed counter "
+                    "(count_solitons_windowed, v2 physics anchor: candidate "
+                    "floor = max(bg_floor_multiple * median, soliton_frac * "
+                    "B2_ref) -- the momentary-max relative arm was removed "
+                    "per the 5-D coupling verdict) throughout; "
+                    "detect_power_steps, the 1-sample alignment tolerance and "
+                    "the monotonicity gate are unchanged"),
+        "invariants": {
+            "structure": (">= 2 matched (state-verified) steps AND soliton_count "
+                          "monotone non-increasing along the descending sweep "
+                          "(validate_staircase_alignment)"),
+            "physics_driven_counts": (
+                f"median count_agreement >= "
+                f"{ROBUSTNESS_COUNT_AGREEMENT_MEDIAN_FLOOR} AND no "
+                f"soliton-bearing (N>=1) hold with count_agreement == 0"),
+            "stationary_upper_branch": (
+                f"every hold at dw >= {ROBUSTNESS_STATIONARY_EDGE_KAPPA}k is "
+                f"is_stationary"),
+            "muted_lower_edge": (
+                f"a 1->0 annihilation transition persists within "
+                f"{list(ROBUSTNESS_MUTED_EDGE_WINDOW_KAPPA)}k (matched-vs-"
+                f"unmatched recorded, not gated -- data-decided per the "
+                f"honesty constraint)"),
+        },
+        "note": ("step LOCATIONS may move between variants (annihilation "
+                 "detunings are interaction-dependent); STRUCTURE must persist. "
+                 "The invariant floors are FIXED -- a violation is a finding, "
+                 "escalated via the canonical ESCALATION_LADDER; min_persistence "
+                 "and the thresholds are never tuned to make a variant pass."),
+        "variants": variants,
+        "all_pass": bool(all_pass),
+        "generated_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+    }
+
+
+def _append_provenance_robustness(block: dict) -> None:
+    """Mirror the robustness block into dks_artifact_provenance.json (Task D).
+
+    Appends a ``staircase_robustness`` key (variants with perturbation +
+    pass/fail + matched-step count/dw_mids + median agreement, the overall
+    ``all_pass`` and ``generated_utc``), leaving every existing provenance key
+    intact.
+    """
+    path = RESULTS_DIR / PROVENANCE_JSON
+    data = {}
+    if path.exists():
+        with open(path) as f:
+            data = json.load(f)
+    entry = {
+        "all_pass": block["all_pass"],
+        "generated_utc": block["generated_utc"],
+        "perturbations": block["perturbations"],
+        "variants": [
+            {"perturbation": v["perturbation"],
+             "pass": v["pass"],
+             "matched_step_count": v.get("matched_step_count"),
+             "matched_dw_mid_over_kappa": v.get("matched_dw_mid_over_kappa"),
+             "median_count_agreement": v.get("median_count_agreement"),
+             "muted_1to0_edge_status": (
+                 v["muted_1to0_edge"]["status"]
+                 if v.get("muted_1to0_edge") else None),
+             "npz": v.get("npz")}
+            for v in block["variants"]],
+    }
+    # Prior mirrors are preserved under "history" (oldest first), never
+    # deleted -- failed runs are findings and stay part of the record.
+    prior = data.get(ROBUSTNESS_JSON_KEY)
+    if prior is not None:
+        entry["history"] = prior.pop("history", []) + [prior]
+    data[ROBUSTNESS_JSON_KEY] = entry
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2, default=float)
+
+
+def _abort_on_failed_robustness(block: dict) -> None:
+    """Print the failing variants' diagnostics + the ladder and exit nonzero.
+
+    The primary artifacts are already untouched by the robustness mode (it only
+    writes the ``robustness/`` npzs and the ``staircase_robustness`` JSON /
+    provenance keys); this just surfaces the finding and escalates.
+    """
+    print("\n[robustness] STAIRCASE ROBUSTNESS FAILED -- primary artifacts "
+          "untouched (detuning_sweep.npz, soliton_steps.*, the soliton_step "
+          "JSON block are all unchanged).")
+    for v in block["variants"]:
+        if not v["pass"]:
+            print(f"[robustness] variant {v['index']} ({v['perturbation']}) "
+                  f"FAILED:")
+            for viol in v["violations"]:
+                print(f"[robustness]     - {viol}")
+    print(ESCALATION_LADDER)
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Stage-B instrumented diagnostic (--diagnose-counting): observe the counter's
+# per-snapshot detection inputs at the robustness failing holds to test the
+# relative-threshold coupling hypothesis (a trough-phase soliton rejected by
+# rel_height_candidate * snapshot_max when a sibling is at crest).  Observes
+# count_solitons_windowed; changes NO counting logic, threshold, or gate.
+#
+# NON-CIRCULARITY GUARD (invariant, enforced by construction here and required
+# of any future change): the per-hold soliton count MUST be memoryless -- the
+# counter is fed ONLY this hold's in-window snapshots, with no carried-over
+# cluster angles from an adjacent hold, no "previous count" prior, and no
+# monotonic constraint.  The monotonicity GATE
+# (validate_staircase_alignment) is only meaningful because each hold's count
+# is measured independently; a count that inherited a neighbour's answer could
+# never expose the monotonicity break this whole investigation rests on.  The
+# flank-recovered "missing angle" instrumented below is a DIAGNOSTIC-ONLY probe
+# of a known dropout location -- it is never fed back into the counted value.
+# ---------------------------------------------------------------------------
+DIAGNOSE_EARLY_STOP_KAPPA = 0.3   # dw_stop override = lowest failing hold - this
+
+
+def _diag_unmatched(src, dst, tol: float = 0.05) -> list:
+    """dst angles not covered by any src angle within ``tol`` (circular, 1:1)."""
+    src = [float(x) for x in src]
+    dst = [float(x) for x in dst]
+    used = set()
+    for a in src:
+        best, bd = None, 1e9
+        for k, b in enumerate(dst):
+            if k in used:
+                continue
+            dd = abs(float(np.angle(np.exp(1j * (a - b)))))
+            if dd < bd:
+                bd, best = dd, k
+        if best is not None and bd <= tol:
+            used.add(best)
+    return [dst[k] for k in range(len(dst)) if k not in used]
+
+
+def _diag_cluster_tol_rad(cav, delta_omega, n_tau) -> float:
+    """The counter's clustering tolerance at this hold (replicated, read-only).
+
+    Mirrors :func:`count_solitons_windowed`'s default tolerance EXACTLY --
+    ``max(COUNT_TOL_WIDTHS * w, COUNT_TOL_MIN_CELLS * 2*pi/n_tau)`` with
+    ``w = sqrt(d2 / (2|delta_omega|))`` -- so the local-max search window
+    matches the counter's own clustering scale; the counter is untouched.
+    """
+    d2 = cav.d2_local if cav.d2_local is not None else cav.d2
+    w = float(np.sqrt(d2 / (2.0 * abs(float(delta_omega)))))
+    return float(max(COUNT_TOL_WIDTHS * w,
+                     COUNT_TOL_MIN_CELLS * 2.0 * np.pi / n_tau))
+
+
+def _diag_local_max(power, angle, tol_rad, n_tau) -> float:
+    """Max ``|E|^2`` within +/- ``tol_rad`` of ``angle`` on the ring (circular)."""
+    center = int(round(float(angle) * n_tau / (2.0 * np.pi))) % n_tau
+    half = max(1, int(round(tol_rad * n_tau / (2.0 * np.pi))))
+    idx = (center + np.arange(-half, half + 1)) % n_tau
+    return float(np.asarray(power)[idx].max())
+
+
+def _variant_failing_holds(name: str) -> dict:
+    """Failing holds of a committed variant npz: ``{dw: (kind, missing_angle)}``.
+
+    ``kind`` in ``{'mono', 'agree0'}``; ``missing_angle`` is the circular-mean
+    flank-recovered angle of the dropped soliton at a monotonicity hold (NaN
+    for agree0 holds, where no cluster is dropped).  Read-only on the committed
+    variant npz -- this only tells the diagnostic WHERE to look; it never feeds
+    the counter.
+    """
+    d = np.load(RESULTS_DIR / ROBUSTNESS_DIRNAME / f"{name}.npz",
+                allow_pickle=False)
+    order = np.argsort(d["dw_over_kappa"])
+    dw = d["dw_over_kappa"][order]
+    c = d["soliton_count"][order].astype(int)
+    ca = d["count_agreement"][order].astype(float)
+    pos = d["peak_positions_rad"][order]
+    out = {}
+    for j in (np.nonzero(np.diff(c) < 0)[0] + 1):
+        if j == 0 or j + 1 >= c.size:
+            continue
+        ev = pos[j][np.isfinite(pos[j])]
+        mb = _diag_unmatched(ev, pos[j - 1][np.isfinite(pos[j - 1])])
+        ma = _diag_unmatched(ev, pos[j + 1][np.isfinite(pos[j + 1])])
+        if mb and ma:
+            angle = float(np.angle(np.exp(1j * mb[0]) + np.exp(1j * ma[0]))
+                          ) % (2.0 * np.pi)
+        elif mb or ma:
+            angle = float((mb or ma)[0])
+        else:
+            angle = float("nan")
+        out[float(dw[j])] = ("mono", angle)
+    for j in np.nonzero((c >= 1) & (ca == 0.0))[0]:
+        out.setdefault(float(dw[j]), ("agree0", float("nan")))
+    return out
+
+
+def run_diagnose_counting(name: str, *, config_path) -> dict:
+    """Instrumented re-run of a named variant to probe the detection inputs.
+
+    Reproduces the variant's config VERBATIM (from its committed npz's
+    ``sweep_config_json``), warm-continues DOWN to an early stop
+    (:data:`DIAGNOSE_EARLY_STOP_KAPPA` below the lowest failing hold), and
+    records, per hold and per in-window snapshot: ``snapshot_max``, median
+    background, the rel/abs candidate thresholds, the analytic CW background
+    ``B^2 = 2*delta_omega_eff/gamma``, and -- for every persistent cluster
+    (plus, at a monotonicity hold, the flank-recovered MISSING soliton) -- the
+    local ``|E|^2`` max within ``cluster_tol`` and the booleans ``above_rel`` /
+    ``above_abs``.  ``count_solitons_windowed`` is called exactly as the driver
+    calls it and only observed.  Returns the stacked sidecar dict.
+    """
+    failing = _variant_failing_holds(name)
+    if not failing:
+        raise RuntimeError(f"{name}: no failing holds to diagnose")
+    dw_stop = min(failing) - DIAGNOSE_EARLY_STOP_KAPPA
+    d = np.load(RESULTS_DIR / ROBUSTNESS_DIRNAME / f"{name}.npz",
+                allow_pickle=False)
+    cfg = SweepConfig(**json.loads(str(d["sweep_config_json"])))
+    cav = attach_dispersion(load_cavity_params(), cfg.n_tau)
+    kappa, n_tau = cav.kappa, int(cfg.n_tau)
+    # abs/phys are the two arms of the CURRENT (v2 physics-anchored) rule:
+    # accepted iff local max >= max(abs_t, phys_t) <=> above_abs AND
+    # above_phys.  rel is the REMOVED legacy relative arm, recorded only as a
+    # before/after reference trace (it no longer gates anything).
+    rel_k, abs_k = COUNT_REL_HEIGHT_CANDIDATE, COUNT_BG_FLOOR_MULTIPLE
+    frac_k = COUNT_SOLITON_FRAC
+    n_sol = int(cfg.n_solitons)
+
+    print(f"[diagnose] {name}: reproduce config verbatim "
+          f"(seed={cfg.position_seed}, hold_rt={cfg.hold_rt}, "
+          f"n_steps={cfg.n_steps}); failing holds "
+          f"{sorted(round(k, 3) for k in failing)}; early stop dw>={dw_stop:.3f}k")
+    seed_field = sech_soliton_seed(
+        cfg.dw_start_kappa * kappa, cav, n_tau=n_tau, pin=cfg.pin_w,
+        n_solitons=n_sol, position_seed=int(cfg.position_seed),
+        position_jitter_frac=float(cfg.position_jitter_frac))
+    sol0 = _run(cfg.dw_start_kappa * kappa, int(cfg.settle_rt), cav,
+                e0=seed_field, seed=int(cfg.seed), n_tau=n_tau, pin=cfg.pin_w,
+                snapshot_interval=int(cfg.settle_rt), config_path=config_path,
+                **PRODUCTION_NUMERICS)
+    e_prev = np.asarray(sol0["e_final"])[0]
+    dt_prev = float(np.asarray(sol0["delta_t_final"]).reshape(-1)[0])
+    n_settled = count_temporal_peaks(e_prev)
+    if n_settled != n_sol:
+        raise RuntimeError(f"{name}: settled {n_settled} != {n_sol} solitons")
+
+    snap_int = max(int(cfg.hold_rt) // 32, 1)
+    rows = []
+    for i, dwk in enumerate(cfg.detunings_kappa()):
+        if dwk < dw_stop - 1e-9:
+            break
+        sol = _run(dwk * kappa, int(cfg.hold_rt), cav, e0=e_prev,
+                   delta_t0=dt_prev, seed=int(cfg.seed), n_tau=n_tau,
+                   pin=cfg.pin_w, snapshot_interval=snap_int,
+                   config_path=config_path, **PRODUCTION_NUMERICS)
+        u_hist = np.asarray(sol["U_int_history"])[0]
+        dweff_hist = np.asarray(sol["delta_omega_eff_history"])[0]
+        e_final = np.asarray(sol["e_final"])[0]
+        dt_final = float(np.asarray(sol["delta_t_final"]).reshape(-1)[0])
+        u_avg = hold_window_average(u_hist, avg_frac=cfg.avg_frac)
+        dweff_mean = float(np.mean(dweff_hist[u_avg["i_start"]:]))
+        snaps = np.asarray(sol["E_snapshots"])[0]
+        snap_rt = np.arange(snaps.shape[0]) * snap_int
+        in_window = snap_rt >= u_avg["i_start"]
+        if not in_window.any():
+            in_window[-1] = True
+        in_snaps = snaps[in_window]
+        # Memoryless: only THIS hold's snapshots go to the counter (guard above).
+        wc = count_solitons_windowed(in_snaps, delta_omega=dwk * kappa, cav=cav)
+        clusters = list(np.asarray(wc["cluster_angles_rad"], dtype=float))
+
+        fkey = next((k for k in failing if abs(k - float(dwk)) < 1e-6), None)
+        kind, miss_angle = failing.get(fkey, ("", float("nan"))) if fkey \
+            else ("", float("nan"))
+        tol = _diag_cluster_tol_rad(cav, dwk * kappa, n_tau)
+        b2 = 2.0 * dweff_mean / cav.gamma
+
+        n_in = int(in_snaps.shape[0])
+        # The counter's anchor uses the NOMINAL hold detuning (what the driver
+        # passes as delta_omega); b2 above keeps the effective-detuning value
+        # as the physics reference column.
+        phys_t = frac_k * (2.0 * (dwk * kappa) / cav.gamma)
+        smax = np.empty(n_in)
+        medbg = np.empty(n_in)
+        # per persistent cluster + one missing slot
+        cl_lmax = np.full((n_in, n_sol), np.nan)
+        cl_rel = np.zeros((n_in, n_sol), bool)
+        cl_abs = np.zeros((n_in, n_sol), bool)
+        cl_phys = np.zeros((n_in, n_sol), bool)
+        ms_lmax = np.full(n_in, np.nan)
+        ms_rel = np.zeros(n_in, bool)
+        ms_abs = np.zeros(n_in, bool)
+        ms_phys = np.zeros(n_in, bool)
+        for s in range(n_in):
+            p = np.abs(in_snaps[s]) ** 2
+            smax[s] = float(p.max())
+            medbg[s] = float(np.median(p))
+            rel_t = rel_k * smax[s]
+            abs_t = abs_k * medbg[s]
+            for ci, ang in enumerate(clusters[:n_sol]):
+                lm = _diag_local_max(p, ang, tol, n_tau)
+                cl_lmax[s, ci] = lm
+                cl_rel[s, ci] = lm >= rel_t
+                cl_abs[s, ci] = lm >= abs_t
+                cl_phys[s, ci] = lm >= phys_t
+            if np.isfinite(miss_angle):
+                lm = _diag_local_max(p, miss_angle, tol, n_tau)
+                ms_lmax[s] = lm
+                ms_rel[s] = lm >= rel_t
+                ms_abs[s] = lm >= abs_t
+                ms_phys[s] = lm >= phys_t
+        rows.append(dict(
+            dw=float(dwk), dweff=dweff_mean, b2=float(b2),
+            phys_t=float(phys_t),
+            count=int(wc["count"]), agree=float(wc["count_agreement"]),
+            tol=tol, kind=kind, miss_angle=float(miss_angle),
+            n_cluster=len(clusters), smax=smax, medbg=medbg,
+            cl_lmax=cl_lmax, cl_rel=cl_rel, cl_abs=cl_abs, cl_phys=cl_phys,
+            ms_lmax=ms_lmax, ms_rel=ms_rel, ms_abs=ms_abs, ms_phys=ms_phys))
+        if kind:
+            frac_relvic = float(np.mean(ms_abs & ~ms_rel)) if np.isfinite(
+                miss_angle) else float("nan")
+            print(f"[diagnose] {name} FAILING {kind} @ {dwk:.3f}k: count="
+                  f"{wc['count']} agree={wc['count_agreement']:.3f} "
+                  + (f"missing@{miss_angle:.3f} rel-victim frac={frac_relvic:.2f} "
+                     f"min|E|^2/bg="
+                     f"{np.nanmin(ms_lmax)/np.median(medbg):.1f}"
+                     if np.isfinite(miss_angle) else "(agree0: see clusters)"))
+        e_prev, dt_prev = e_final, dt_final
+        # Each hold compiles a fresh XLA executable (the scan-time labeler is a
+        # static jit arg keyed on the hold's max|delta_omega|), so the JIT cache
+        # grows ~O(100 MB)/hold; drop dead compilations every 10 holds to keep
+        # memory flat over the long warm-continuation (identical to the primary
+        # sweep loop; frees only dead compilations -- numerics unchanged).
+        if (i + 1) % 10 == 0:
+            jax.clear_caches()
+
+    n_in = rows[0]["smax"].size
+    stack = lambda key: np.array([r[key] for r in rows])
+    out = {
+        "variant": name,
+        "sweep_config_json": json.dumps(cfg.as_dict()),
+        "dw_over_kappa": stack("dw"), "dw_eff_over_kappa":
+            np.array([r["dweff"] for r in rows]) / kappa,
+        "B2_ref": stack("b2"), "soliton_count": stack("count"),
+        "count_agreement": stack("agree"), "cluster_tol_rad": stack("tol"),
+        "kind": np.array([r["kind"] for r in rows]),
+        "missing_angle_rad": stack("miss_angle"),
+        "n_cluster": stack("n_cluster"),
+        "snapshot_max": stack("smax"), "median_bg": stack("medbg"),
+        "rel_thresh": COUNT_REL_HEIGHT_CANDIDATE * stack("smax"),
+        "abs_thresh": COUNT_BG_FLOOR_MULTIPLE * stack("medbg"),
+        "phys_thresh": np.array([r["phys_t"] for r in rows]),
+        "cluster_local_max": stack("cl_lmax"),
+        "cluster_above_rel": stack("cl_rel"),
+        "cluster_above_abs": stack("cl_abs"),
+        "cluster_above_phys": stack("cl_phys"),
+        "missing_local_max": stack("ms_lmax"),
+        "missing_above_rel": stack("ms_rel"),
+        "missing_above_abs": stack("ms_abs"),
+        "missing_above_phys": stack("ms_phys"),
+        "rel_height_candidate": float(COUNT_REL_HEIGHT_CANDIDATE),
+        "bg_floor_multiple": float(COUNT_BG_FLOOR_MULTIPLE),
+        "soliton_frac": float(COUNT_SOLITON_FRAC),
+        "min_persistence": float(COUNT_MIN_PERSISTENCE),
+        "n_in_snapshots": int(n_in),
+        "early_stop_over_kappa": float(dw_stop),
+    }
+    return out
+
+
+def save_diagnose_npz(path: Path, sidecar: dict) -> None:
+    """Persist the Stage-B instrumentation sidecar (diagnose_{variant}.npz)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, **sidecar)
+
+
 def _abort_on_failed_validation(exc: StaircaseValidationError,
                                 npz_note: str) -> None:
     """Print the failure + the canonical escalation ladder and exit nonzero.
@@ -1263,10 +2012,86 @@ def main() -> None:
     ap.add_argument("--render-only", action="store_true",
                     help="regenerate the figure + JSON from the committed "
                          "detuning_sweep.npz without re-running the solver")
+    ap.add_argument("--robustness", action="store_true",
+                    help="re-run the ACCEPTED configuration (read verbatim from "
+                         "the committed detuning_sweep.npz) under three "
+                         "one-at-a-time perturbations and prove the staircase "
+                         "STRUCTURE persists; writes results/robustness/"
+                         "variant_{i}.npz (data only, no figure) and the "
+                         "staircase_robustness JSON/provenance blocks, never "
+                         "touching the primary artifacts")
+    ap.add_argument("--diagnose-counting", dest="diagnose_variant",
+                    metavar="VARIANT", default=None,
+                    help="Stage-B instrumented re-run of a named robustness "
+                         "variant (e.g. variant_1): reproduces its config "
+                         "verbatim, warm-continues to an early stop below the "
+                         "lowest failing hold, and records the counter's "
+                         "per-snapshot detection inputs to "
+                         "results/robustness/diagnose_{VARIANT}.npz. Observes "
+                         "count_solitons_windowed; changes no counting logic")
     args = ap.parse_args()
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     t_start = time.time()
+
+    if args.diagnose_variant:
+        name = args.diagnose_variant
+        noise_cfg = write_noise_off_config(CONFIG_PATH)
+        try:
+            print(f"[diagnose] deterministic (noise-off) config -> {noise_cfg}")
+            sidecar = run_diagnose_counting(name, config_path=noise_cfg)
+        finally:
+            try:
+                noise_cfg.unlink()
+            except OSError:
+                pass
+        out = RESULTS_DIR / ROBUSTNESS_DIRNAME / f"diagnose_{name}.npz"
+        save_diagnose_npz(out, sidecar)
+        print(f"[diagnose] sidecar -> {out} "
+              f"({sidecar['dw_over_kappa'].size} holds, "
+              f"{sidecar['n_in_snapshots']} in-window snapshots/hold) "
+              f"({time.time() - t_start:.1f}s)")
+        return
+
+    if args.robustness:
+        base_cfg = load_accepted_config(RESULTS_DIR / SWEEP_NPZ)
+        print(f"[robustness] accepted config (verbatim from {SWEEP_NPZ}): "
+              f"n_solitons={base_cfg.n_solitons}, position_seed="
+              f"{base_cfg.position_seed}, hold_rt={base_cfg.hold_rt}, "
+              f"n_steps={base_cfg.n_steps}, n_tau={base_cfg.n_tau}")
+        noise_cfg = write_noise_off_config(CONFIG_PATH)
+        try:
+            print(f"[robustness] deterministic (noise-off) config -> {noise_cfg}")
+            block = run_robustness(base_cfg, config_path=noise_cfg)
+        finally:
+            try:
+                noise_cfg.unlink()
+            except OSError:
+                pass
+        # Record the full result (JSON block + provenance mirror) BEFORE any
+        # escalation, so the pass/fail record is complete even on failure; these
+        # are separate keys and never modify the primary soliton_step block.
+        # Prior runs are preserved under "history" (oldest first), never
+        # deleted -- the failed starved-counter/coupling records are findings
+        # and stay part of the artifact.
+        metrics_path = RESULTS_DIR / METRICS_JSON
+        if metrics_path.exists():
+            with open(metrics_path) as f:
+                prior = json.load(f).get(ROBUSTNESS_JSON_KEY)
+            if prior is not None:
+                block["history"] = prior.pop("history", []) + [prior]
+        _update_json(metrics_path, ROBUSTNESS_JSON_KEY, block)
+        _append_provenance_robustness(block)
+        print(f"\n[robustness] json  -> {RESULTS_DIR / METRICS_JSON} "
+              f"({ROBUSTNESS_JSON_KEY})")
+        print(f"[robustness] prov  -> {RESULTS_DIR / PROVENANCE_JSON} "
+              f"({ROBUSTNESS_JSON_KEY})")
+        if not block["all_pass"]:
+            _abort_on_failed_robustness(block)
+        print(f"[robustness] ALL {len(block['variants'])} VARIANTS PASS -- "
+              f"staircase structure is robust to the perturbations "
+              f"({time.time() - t_start:.1f}s)")
+        return
 
     if args.render_only:
         sweep, cfg = load_sweep_npz(RESULTS_DIR / SWEEP_NPZ)

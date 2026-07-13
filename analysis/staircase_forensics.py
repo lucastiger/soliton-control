@@ -376,7 +376,656 @@ def test_c_breathing(dw, c, env, under, events, sweep):
     }
 
 
+# ---------------------------------------------------------------------------
+# --starvation mode: is the robustness failure SNAPSHOT STARVATION?
+# ---------------------------------------------------------------------------
+# The driver takes a field snapshot every ``snap_int = max(hold_rt // 32, 1)``
+# round trips (analysis/run_detuning_sweep.py) and the windowed counter votes
+# only over the snapshots inside the final-``avg_frac`` power-averaging window.
+# The starvation hypothesis: that window holds only ~2 snapshots, so with the
+# breather period T_b ~ 150-180 RT the persistence vote is phase-aliased and
+# rests on too few samples.  This mode PROVES OR DISPROVES that offline, from
+# the committed npzs alone -- it never runs the solver.
+SNAP_DIVISOR_ACTUAL = 32     # mirrors the driver: snap_int = max(hold_rt//32, 1)
+SNAP_DIVISOR_HYPOTHESIS = 8  # the hypothesis in the brief: interval = hold_rt//8
+STARVATION_N_IN_MAX = 3      # "few samples" ceiling for the CONFIRMED verdict
+
+
+def _n_in_window(hold_rt: int, avg_frac: float, interval: int) -> int:
+    """In-window snapshot count, matching the solver + driver EXACTLY.
+
+    The solver stores ``n_snap = ceil(hold_rt / interval)`` snapshots at round
+    trips ``0, interval, 2*interval, ...`` (``simulator/lle_solver.py``:
+    ``n_snapshots = (t_slow + interval - 1)//interval`` with
+    ``do_snapshot = step_idx % interval == 0``); the driver keeps those with
+    ``snap_rt >= floor(hold_rt*(1-avg_frac))``
+    (``analysis/run_detuning_sweep.py``).  Returns that count (>= 1: a
+    degenerate window falls back to the last snapshot, as the driver does).
+    """
+    n_snap = (int(hold_rt) + int(interval) - 1) // int(interval)
+    snap_rt = np.arange(n_snap) * int(interval)
+    i_start = int(np.floor(hold_rt * (1.0 - avg_frac)))
+    n_in = int((snap_rt >= i_start).sum())
+    return n_in if n_in > 0 else 1
+
+
+def _on_grid(values, n_in, tol=1e-6) -> bool:
+    """True iff every value lies on the grid {0, 1/n_in, 2/n_in, ..., 1}."""
+    v = np.asarray(values, dtype=float)
+    return bool(np.all(np.abs(v * n_in - np.round(v * n_in)) <= tol * n_in))
+
+
+def _empirical_denominator(values, max_den=64) -> int:
+    """Finest common grid the observed values lie on (their agreement n_in)."""
+    from fractions import Fraction
+    import math
+    N = 1
+    for v in sorted(set(np.round(np.asarray(values, dtype=float), 9).tolist())):
+        N = N * Fraction(v).limit_denominator(max_den).denominator \
+            // math.gcd(N, Fraction(v).limit_denominator(max_den).denominator)
+    return int(N)
+
+
+def starvation_forensics() -> int:
+    """Part A: prove/disprove snapshot starvation from the committed npzs only.
+
+    For the primary sweep and each ``robustness/variant_*.npz``: computes the
+    in-window snapshot count ``n_in`` (both the driver's actual ``hold_rt//32``
+    cadence and the brief's hypothesised ``hold_rt//8``), tests the count_
+    agreement quantization signature (every stored value must lie on the
+    ``{k/n_in}`` grid), and tabulates every monotonicity-violating and every
+    ``count_agreement == 0`` hold with the aliasing indicator
+    ``snapshot_spacing / breathing_period_rt``.  Appends a ``Snapshot
+    starvation`` section to the forensics report with a one-line verdict:
+    CONFIRMED iff ``n_in <= STARVATION_N_IN_MAX`` for ALL files AND the
+    quantization signature holds.  Returns 0 (report written); the GATE
+    decision (proceed vs stop) is the caller's, keyed on the printed verdict.
+    """
+    files = [("primary", RESULTS_DIR / SWEEP_NPZ)]
+    rob = sorted((RESULTS_DIR / "robustness").glob("variant_*.npz"))
+    files += [(p.stem, p) for p in rob]
+
+    md = ["", "## Snapshot starvation (Part A: offline hypothesis test)", "",
+          f"Generated {_dt.datetime.now(_dt.timezone.utc).isoformat()} by "
+          f"`analysis/staircase_forensics.py --starvation` (offline; no solver "
+          f"run). Hypothesis under test: the robustness count failures are "
+          f"SNAPSHOT STARVATION -- the windowed counter votes over too few, "
+          f"phase-aliased in-window snapshots.", "",
+          "Driver cadence: `snap_int = max(hold_rt // "
+          f"{SNAP_DIVISOR_ACTUAL}, 1)` "
+          "(`analysis/run_detuning_sweep.py`); the counter votes over the "
+          "snapshots inside the final-`avg_frac` window. The brief hypothesised "
+          f"`interval = hold_rt // {SNAP_DIVISOR_HYPOTHESIS}`.", ""]
+
+    all_n_in, all_sig_ok, per_file = [], [], []
+    print(f"[starvation] auditing {len(files)} file(s)")
+    for name, path in files:
+        if not path.exists():
+            print(f"[starvation] SKIP {name}: {path} missing")
+            continue
+        sweep, cfg = load_sweep_npz(path)
+        hold_rt, avg_frac = int(cfg.hold_rt), float(cfg.avg_frac)
+        iv_act = max(hold_rt // SNAP_DIVISOR_ACTUAL, 1)
+        iv_hyp = max(hold_rt // SNAP_DIVISOR_HYPOTHESIS, 1)
+        n_in_act = _n_in_window(hold_rt, avg_frac, iv_act)
+        n_in_hyp = _n_in_window(hold_rt, avg_frac, iv_hyp)
+
+        order = np.argsort(np.asarray(sweep["dw_over_kappa"]))
+        dw = np.asarray(sweep["dw_over_kappa"], float)[order]
+        c = np.asarray(sweep["soliton_count"], int)[order]
+        ca = np.asarray(sweep["count_agreement"], float)[order]
+        ce = (np.asarray(sweep["soliton_count_end_snapshot"], int)[order]
+              if "soliton_count_end_snapshot" in sweep else np.full(c.size, -1))
+        brel = np.asarray(sweep["breathing_relstd"], float)[order]
+        bper = np.asarray(sweep["breathing_period_rt"], float)[order]
+
+        emp_den = _empirical_denominator(ca)
+        sig_ok = _on_grid(ca, n_in_act)          # signature for the ACTUAL n_in
+        all_n_in.append(n_in_act)
+        all_sig_ok.append(sig_ok)
+
+        # monotonicity-violating holds (ascending: the lower side of a diff<0
+        # edge -- the undercounted hold) + soliton-bearing agreement==0 holds
+        mono = np.nonzero(np.diff(c) < 0)[0] + 1
+        agree0 = np.nonzero((c >= 1) & (ca == 0.0))[0]
+        problem = sorted(set(mono.tolist()) | set(agree0.tolist()))
+
+        per_file.append(dict(
+            name=name, hold_rt=hold_rt, avg_frac=avg_frac, iv_act=iv_act,
+            iv_hyp=iv_hyp, n_in_act=n_in_act, n_in_hyp=n_in_hyp,
+            emp_den=emp_den, sig_ok=sig_ok, n_mono=int(mono.size),
+            n_agree0=int(agree0.size),
+            rows=[dict(dw=float(dw[i]), N=int(c[i]), Nend=int(ce[i]),
+                       agree=float(ca[i]), brel=float(brel[i]),
+                       bper=float(bper[i]),
+                       ratio=(float(iv_act) / float(bper[i])
+                              if np.isfinite(bper[i]) and bper[i] > 0
+                              else float("nan")),
+                       kind=("mono" if i in set(mono.tolist()) else "")
+                            + ("+agree0" if i in set(agree0.tolist()) else ""))
+                  for i in problem]))
+        print(f"[starvation] {name}: hold_rt={hold_rt} avg_frac={avg_frac} "
+              f"| n_in(actual //{SNAP_DIVISOR_ACTUAL})={n_in_act}  "
+              f"n_in(hyp //{SNAP_DIVISOR_HYPOTHESIS})={n_in_hyp}  "
+              f"| count_agreement grid=1/{emp_den} (signature on {{k/{n_in_act}}}: "
+              f"{sig_ok}) | mono-violating={int(mono.size)} agree0={int(agree0.size)}")
+
+    # ---- Verdict (the brief's rule) ----------------------------------------
+    n_in_ok = bool(all_n_in) and all(n <= STARVATION_N_IN_MAX for n in all_n_in)
+    sig_all = all(all_sig_ok)
+    confirmed = n_in_ok and sig_all
+    verdict = "CONFIRMED" if confirmed else "NOT CONFIRMED"
+
+    # ---- Report body -------------------------------------------------------
+    md.append("### Per-file snapshot budget and quantization signature")
+    md.append("")
+    md.append("| file | hold_rt | snap_int (//%d) | **n_in (actual)** | "
+              "n_in (//%d hyp) | count_agreement grid | signature {k/n_in} | "
+              "mono-viol | agree==0 |"
+              % (SNAP_DIVISOR_ACTUAL, SNAP_DIVISOR_HYPOTHESIS))
+    md.append("|---|---|---|---|---|---|---|---|---|")
+    for f in per_file:
+        md.append(f"| {f['name']} | {f['hold_rt']} | {f['iv_act']} | "
+                  f"**{f['n_in_act']}** | {f['n_in_hyp']} | 1/{f['emp_den']} | "
+                  f"{f['sig_ok']} | {f['n_mono']} | {f['n_agree0']} |")
+    md.append("")
+    md.append("### Failing holds (monotonicity dips + soliton-bearing "
+              "agreement==0)")
+    md.append("")
+    md.append("`ratio = snap_int / breathing_period_rt` is the aliasing "
+              "indicator: **>> 1 would mean the snapshots undersample the "
+              "breathing cycle (starvation); < 1 means they oversample it.**")
+    md.append("")
+    md.append("| file | dw/k | N | N_end-snap | count_agreement | "
+              "breathing_relstd | T_b (RT) | snap_int/T_b | kind |")
+    md.append("|---|---|---|---|---|---|---|---|---|")
+    for f in per_file:
+        for r in f["rows"]:
+            md.append(f"| {f['name']} | {r['dw']:.3f} | {r['N']} | "
+                      f"{r['Nend']} | {r['agree']:.3f} | {r['brel']:.4f} | "
+                      f"{r['bper']:.0f} | {r['ratio']:.2f} | {r['kind']} |")
+    md.append("")
+    md.append("### Verdict")
+    md.append("")
+    md.append(f"**STARVATION: {verdict}** "
+              f"(rule: CONFIRMED iff n_in <= {STARVATION_N_IN_MAX} for ALL "
+              f"files AND every count_agreement lies on the {{k/n_in}} grid).")
+    md.append("")
+    if confirmed:
+        md.append(f"- n_in <= {STARVATION_N_IN_MAX} for every file and the "
+                  f"quantization signature holds: the counter is sample-starved "
+                  f"and phase-aliased. Densification (Part B) is warranted.")
+    else:
+        n_in_set = sorted(set(all_n_in))
+        md.append(f"- n_in = {n_in_set} (actual `hold_rt//{SNAP_DIVISOR_ACTUAL}` "
+                  f"cadence), which is **> {STARVATION_N_IN_MAX}** -- the "
+                  f"counter already votes over ~8 in-window snapshots, not ~2. "
+                  f"The brief's `hold_rt//{SNAP_DIVISOR_HYPOTHESIS}` interval "
+                  f"(giving n_in={sorted(set(f['n_in_hyp'] for f in per_file))}) "
+                  f"is NOT what the driver uses.")
+        md.append(f"- The count_agreement quantization confirms it: every value "
+                  f"lies on an **eighths** grid (1/{per_file[0]['emp_den']}), "
+                  f"i.e. n_in = {per_file[0]['emp_den']}, not the halves "
+                  f"({{0, 0.5, 1}}) the starvation hypothesis predicts.")
+        md.append(f"- The aliasing indicator `snap_int/T_b` is < 1 at every "
+                  f"failing hold (snapshots OVERSAMPLE the breathing cycle by "
+                  f"~3x), so phase-aliasing is not the mechanism.")
+        md.append(f"- **GATE (per the brief): STOP.** The counter had many "
+                  f"(~8) phase-spread samples and still failed at isolated "
+                  f"deep-breather holds, so the failure mechanism is NOT "
+                  f"starvation. Densification / threshold / protocol work must "
+                  f"not proceed on the falsified hypothesis; the residual "
+                  f"(individual solitons dipping below the rel-height floor "
+                  f"during their breathing troughs at these specific holds) "
+                  f"needs its own verification before any fix.")
+    md.append("")
+
+    out = RESULTS_DIR / REPORT_MD
+    prior = out.read_text(encoding="utf-8") if out.exists() else ""
+    marker = "\n## Snapshot starvation (Part A"
+    if marker in prior:                       # idempotent: replace prior section
+        prior = prior[:prior.index(marker)].rstrip() + "\n"
+    out.write_text(prior.rstrip() + "\n" + "\n".join(md) + "\n", encoding="utf-8")
+    print(f"[starvation] VERDICT: {verdict} "
+          f"(n_in={sorted(set(all_n_in))}, signature_holds={sig_all})")
+    if not confirmed:
+        print("[starvation] GATE: NOT CONFIRMED -> STOP. The counter already "
+              "had ~8 in-window snapshots; starvation is falsified. Do not "
+              "densify or touch thresholds blind.")
+    print(f"[starvation] report -> {out}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# --detectability mode (Stage A): is the count defect a RELATIVE-THRESHOLD
+# detectability problem (a trough-phase soliton rejected because a sibling is
+# at crest, coupling its detection to the others via snapshot_max), and does
+# the missing soliton PERSIST in position through the event (a counting
+# dropout, not a physics annihilation)?  Offline, committed npzs only.
+# ---------------------------------------------------------------------------
+DETECT_TOL_RAD = 0.05        # per the brief: circular position-match tolerance
+DETECT_TOL_PERSIST = 0.10    # before<->after span is 2 holds; allow ~2x drift
+
+
+def _greedy_unmatched(src, dst, tol):
+    """dst angles NOT covered by any src angle within ``tol`` (circular, 1:1)."""
+    src = [float(x) for x in src]
+    dst = [float(x) for x in dst]
+    used = set()
+    for a in src:
+        best, bd = None, 1e9
+        for j, b in enumerate(dst):
+            if j in used:
+                continue
+            d = _circ_dist(a, b)
+            if d < bd:
+                bd, best = d, j
+        if best is not None and bd <= tol:
+            used.add(best)
+    return [dst[j] for j in range(len(dst)) if j not in used]
+
+
+def _nn_separations(angles):
+    """Nearest-neighbour circular separation for each angle in ``angles``."""
+    a = [float(x) for x in angles]
+    return [min(_circ_dist(a[i], a[j]) for j in range(len(a)) if j != i)
+            for i in range(len(a))]
+
+
+def _rank_smallest(values, target):
+    """1-based rank of ``target`` among ``values`` (1 = smallest)."""
+    return int(sum(1 for v in values if v < target - 1e-12) + 1)
+
+
+def _cyclic_seed_index(hold_angles, seed_angles):
+    """Map each sorted hold angle to a seed index assuming a rigid rotation.
+
+    Soliton order is preserved along the sweep (no crossings), so the settled
+    pattern is a cyclic rotation of the seed; pick the cyclic shift minimising
+    the total circular distance.  Returns ``{sorted_hold_idx: seed_sorted_idx}``
+    and the sorted seed angles.
+    """
+    h = np.sort(np.asarray([float(x) for x in hold_angles]))
+    s = np.sort(np.asarray([float(x) for x in seed_angles]))
+    n = min(h.size, s.size)
+    if n == 0:
+        return {}, s
+    best = (1e18, 0)
+    for shift in range(n):
+        tot = sum(_circ_dist(h[i], s[(i + shift) % n]) for i in range(n))
+        if tot < best[0]:
+            best = (tot, shift)
+    shift = best[1]
+    return {i: (i + shift) % n for i in range(n)}, s
+
+
+def detectability_forensics() -> int:
+    """Stage A: offline detectability diagnosis over the committed npzs.
+
+    A1 identifies the missing cluster at every monotonicity-violating hold and
+    tests whether it PERSISTS in position through the event (present at the same
+    angle in both flanking holds -> a detection dropout, not a physics
+    rearrangement -- the GATE).  A2 ranks the missing soliton's seed
+    nearest-neighbour separation (tightest pairs breathe deepest) and checks
+    whether the same seed-relative soliton drops in variants sharing a seed.
+    A3 categorises every soliton-bearing agreement==0 hold (undercount vs
+    correct-count-but-no-unanimous-snapshot) from the stored counts -- the raw
+    per-cluster persistence_fractions are NOT persisted in the npz (only
+    count_agreement and the final cluster angles are), so the fraction
+    breakdown is deferred to the instrumented Stage B run.  Appends a
+    "Detectability (offline)" section to the report; returns 0.  The caller
+    keys the Stage-A GATE on the printed persistence verdict.
+    """
+    files = [("primary", RESULTS_DIR / SWEEP_NPZ)]
+    files += [(p.stem, p) for p in
+              sorted((RESULTS_DIR / "robustness").glob("variant_*.npz"))]
+
+    a1_rows, a3_rows = [], []
+    persist_all = []          # gate: every mono event must persist in position
+    md = ["", "## Detectability (offline; Stage A)", "",
+          f"Generated {_dt.datetime.now(_dt.timezone.utc).isoformat()} by "
+          f"`analysis/staircase_forensics.py --detectability` (offline; no "
+          f"solver run). Working hypothesis: the count defect is a "
+          f"RELATIVE-threshold detectability problem -- a trough-phase soliton "
+          f"is rejected when a sibling is at crest because the candidate floor "
+          f"`rel_height_candidate * snapshot_max` couples each soliton's "
+          f"detection to the others' breathing phases.", ""]
+
+    for name, path in files:
+        if not path.exists():
+            continue
+        sweep, cfg = load_sweep_npz(path)
+        order = np.argsort(np.asarray(sweep["dw_over_kappa"]))
+        dw = np.asarray(sweep["dw_over_kappa"], float)[order]
+        c = np.asarray(sweep["soliton_count"], int)[order]
+        ce = np.asarray(sweep["soliton_count_end_snapshot"], int)[order]
+        ca = np.asarray(sweep["count_agreement"], float)[order]
+        pos = np.asarray(sweep["peak_positions_rad"], float)[order]
+        seed = _finite_row(np.asarray(sweep["seed_positions_rad"], float))
+        n_seed = int(sweep.get("n_solitons_seeded", seed.size)) or seed.size
+
+        # ---- A1: monotonicity-violating holds (ascending diff<0 -> hold i) ---
+        mono = (np.nonzero(np.diff(c) < 0)[0] + 1)
+        for j in mono:
+            if j == 0 or j + 1 >= c.size:
+                continue
+            ev, be, af = (_finite_row(pos[j]), _finite_row(pos[j - 1]),
+                          _finite_row(pos[j + 1]))
+            miss_be = _greedy_unmatched(ev, be, DETECT_TOL_RAD)
+            miss_af = _greedy_unmatched(ev, af, DETECT_TOL_RAD)
+            gap = (_circ_dist(miss_be[0], miss_af[0])
+                   if (miss_be and miss_af) else float("nan"))
+            persists = bool(len(miss_be) == 1 and len(miss_af) == 1
+                            and gap <= DETECT_TOL_PERSIST)
+            persist_all.append(persists)
+            miss_angle = float(miss_be[0]) if miss_be else float("nan")
+            # A2: NN-separation rank of the missing soliton
+            nn_flank = _nn_separations(be) if be.size else []
+            rank_flank = (_rank_smallest(
+                nn_flank, min(_circ_dist(miss_angle, b) for b in be
+                              if _circ_dist(miss_angle, b) > 1e-9))
+                if (be.size and np.isfinite(miss_angle)) else None)
+            nn_seed = _nn_separations(seed) if seed.size else []
+            smap, s_sorted = _cyclic_seed_index(be, seed)
+            # sorted index of the missing angle within the before-flank
+            be_sorted = np.sort(be)
+            mi = int(np.argmin(np.abs(_wrap(be_sorted - miss_angle)))) \
+                if be.size else -1
+            seed_idx = smap.get(mi)
+            rank_seed = (_rank_smallest(nn_seed, nn_seed[seed_idx])
+                         if (seed_idx is not None and nn_seed) else None)
+            a1_rows.append(dict(
+                file=name, dw=float(dw[j]), N=int(c[j]), N_end=int(ce[j]),
+                miss=miss_angle, miss_be=miss_be, miss_af=miss_af, gap=gap,
+                persists=persists, rank_flank=rank_flank, n=len(be),
+                seed_idx=seed_idx, rank_seed=rank_seed, n_seed=len(nn_seed)))
+
+        # ---- A3: soliton-bearing agreement==0 holds -------------------------
+        # running future-max envelope = the true-count lower bound (descending
+        # sweep), so "undercount" = count below the envelope.
+        env = np.maximum.accumulate(c[::-1])[::-1]   # max over lower detunings
+        for j in np.nonzero((c >= 1) & (ca == 0.0))[0]:
+            a3_rows.append(dict(
+                file=name, dw=float(dw[j]), N=int(c[j]), env=int(env[j]),
+                N_end=int(ce[j]), agree=float(ca[j]),
+                category=("undercount (a cluster fell below min_persistence)"
+                          if c[j] < env[j] else
+                          "correct-count, no unanimous snapshot")))
+
+    # ---- Report: A1 ---------------------------------------------------------
+    md.append("### A1 -- missing cluster at each monotonicity-violating hold")
+    md.append("")
+    md.append("| file | dw/k | N | N_end-snap | missing angle | in before | "
+              "in after | before<->after gap | persists (dropout) |")
+    md.append("|---|---|---|---|---|---|---|---|---|")
+    for r in a1_rows:
+        md.append(f"| {r['file']} | {r['dw']:.3f} | {r['N']} | {r['N_end']} | "
+                  f"{r['miss']:.3f} | {'yes' if r['miss_be'] else 'no'} | "
+                  f"{'yes' if r['miss_af'] else 'no'} | {r['gap']:.4f} | "
+                  f"**{'YES' if r['persists'] else 'NO'}** |")
+    md.append("")
+    md.append("A missing soliton present at the SAME angle (within the "
+              f"{DETECT_TOL_PERSIST} rad drift budget) in BOTH flanking holds "
+              "never left -- it is a pure detection dropout, consistent with a "
+              "counting defect (not annihilation/re-nucleation).")
+    md.append("")
+
+    # ---- Report: A2 ---------------------------------------------------------
+    md.append("### A2 -- is the missing soliton the most strongly interacting?")
+    md.append("")
+    md.append("Rank 1 = tightest nearest-neighbour separation (interacts "
+              "hardest, breathes deepest). `rank_flank` is computed on the "
+              "event-neighbourhood positions; `rank_seed` maps the missing "
+              "soliton back to its seed (rigid-rotation cyclic map) and ranks "
+              "the seed separations.")
+    md.append("")
+    md.append("| file | seed | dw/k | missing angle | rank_flank (of N) | "
+              "seed idx | rank_seed (of n) |")
+    md.append("|---|---|---|---|---|---|---|")
+    seed_of = {}
+    for name, path in files:
+        if path.exists():
+            _, cfg = load_sweep_npz(path)
+            seed_of[name] = int(cfg.position_seed)
+    for r in a1_rows:
+        md.append(f"| {r['file']} | {seed_of.get(r['file'],'?')} | {r['dw']:.3f} "
+                  f"| {r['miss']:.3f} | "
+                  f"{r['rank_flank']}/{r['n']} | {r['seed_idx']} | "
+                  f"{r['rank_seed']}/{r['n_seed']} |")
+    md.append("")
+    shared = {}
+    for r in a1_rows:
+        shared.setdefault(seed_of.get(r["file"]), []).append(
+            (r["file"], r["seed_idx"]))
+    md.append("Same seed-relative soliton across variants sharing a seed: "
+              + "; ".join(f"seed {s}: "
+                          + ", ".join(f"{f}->idx {i}" for f, i in v)
+                          for s, v in shared.items()) + ".")
+    md.append("(primary and variant_2 share seed 1 but have NO "
+              "monotonicity-violating hold, so only variant_3 supplies a "
+              "seed-1 dropout to locate.)")
+    md.append("")
+
+    # ---- Report: A3 ---------------------------------------------------------
+    md.append("### A3 -- agreement==0 holds (soliton-bearing)")
+    md.append("")
+    md.append("The raw per-cluster `persistence_fractions` are computed by "
+              "`count_solitons_windowed` but NOT persisted to the npz (only "
+              "`count_agreement` and the final accepted cluster angles are), so "
+              "the per-cluster fraction breakdown the brief asks for is "
+              "deferred to the instrumented Stage B run. From the stored counts "
+              "the two signatures still separate: `undercount` (a cluster fell "
+              "below min_persistence, so N < envelope) vs `correct-count` "
+              "(all N clusters kept but no single snapshot saw all N).")
+    md.append("")
+    md.append("| file | dw/k | N | envelope | N_end-snap | count_agreement | "
+              "category |")
+    md.append("|---|---|---|---|---|---|---|")
+    for r in a3_rows:
+        md.append(f"| {r['file']} | {r['dw']:.3f} | {r['N']} | {r['env']} | "
+                  f"{r['N_end']} | {r['agree']:.3f} | {r['category']} |")
+    md.append("")
+
+    # ---- GATE + verdict -----------------------------------------------------
+    all_persist = bool(a1_rows) and all(persist_all)
+    md.append("### Stage-A gate")
+    md.append("")
+    if not a1_rows:
+        md.append("- No monotonicity-violating hold found; nothing to gate on.")
+        gate = "no-events"
+    elif all_persist:
+        md.append(f"- **POSITION PERSISTENCE CONFIRMED** at all "
+                  f"{len(a1_rows)} monotonicity events: every missing soliton "
+                  f"sits at the same angle in both flanks (max "
+                  f"before<->after gap "
+                  f"{max(r['gap'] for r in a1_rows):.4f} rad). The dropouts are "
+                  f"a COUNTING defect, not physics rearrangement -> Stage B "
+                  f"(instrumented run) may proceed.")
+        gate = "proceed"
+    else:
+        md.append("- **POSITION REARRANGEMENT DETECTED**: at least one missing "
+                  "soliton does not persist through the event, so it may be a "
+                  "physics event. **GATE: STOP** -- Stage B must not run.")
+        gate = "stop"
+    md.append("")
+
+    out = RESULTS_DIR / REPORT_MD
+    prior = out.read_text(encoding="utf-8") if out.exists() else ""
+    marker = "\n## Detectability (offline; Stage A)"
+    if marker in prior:
+        prior = prior[:prior.index(marker)].rstrip() + "\n"
+    out.write_text(prior.rstrip() + "\n" + "\n".join(md) + "\n", encoding="utf-8")
+    for r in a1_rows:
+        print(f"[detectability] {r['file']} @ {r['dw']:.3f}k: missing "
+              f"{r['miss']:.3f} rad, persists={r['persists']} "
+              f"(gap {r['gap']:.4f}), rank_flank {r['rank_flank']}/{r['n']}, "
+              f"N_end={r['N_end']}")
+    print(f"[detectability] agreement==0 holds tabulated: {len(a3_rows)} "
+          f"(persistence_fractions NOT stored -> deferred to Stage B)")
+    print(f"[detectability] STAGE-A GATE: {gate.upper()} "
+          f"(position persistence at all events: {all_persist})")
+    print(f"[detectability] report -> {out}")
+    return 0
+
+
+def _victim_stats(above_rel, above_abs, local_max, median_bg, b2):
+    """Per-snapshot detection stats for one soliton across a hold's window.
+
+    ``detected`` (== persistence for this soliton) is passing the candidate
+    floor ``max(rel_thresh, abs_thresh)`` -> above_rel AND above_abs.  A
+    rel-VICTIM snapshot passes the ABSOLUTE floor but fails the RELATIVE one
+    (above_abs AND NOT above_rel): it would have counted under the absolute
+    floor alone and is rejected only because a sibling's crest lifted
+    ``snapshot_max``.
+    """
+    ar = np.asarray(above_rel, bool)
+    aa = np.asarray(above_abs, bool)
+    lm = np.asarray(local_max, float)
+    return dict(
+        abs_pass=float(np.mean(aa)),
+        rel_fail=float(np.mean(~ar)),
+        detected=float(np.mean(ar & aa)),
+        rel_victim=float(np.mean(aa & ~ar)),
+        fails_both=float(np.mean(~aa)),
+        min_over_bg=float(np.nanmin(lm) / max(np.median(median_bg), 1e-300)),
+        min_over_b2=float(np.nanmin(lm) / max(abs(b2), 1e-300)))
+
+
+def diagnose_report() -> int:
+    """Stage B (B2/B3): read the instrumented sidecars and rule on the mechanism.
+
+    For every failing hold in ``diagnose_{variant}.npz`` picks the victim
+    soliton (the flank-recovered MISSING one at a monotonicity/undercount hold;
+    the lowest-persistence cluster at an agreement==0 hold), tabulates its
+    rel-victim / genuine-dim statistics, and appends a "Detectability (Stage B)"
+    verdict to the report: COUPLING CONFIRMED, GENUINE DIMMING, or MIXED.
+    """
+    sidecars = sorted((RESULTS_DIR / "robustness").glob("diagnose_*.npz"))
+    if not sidecars:
+        print("[diagnose-report] no diagnose_*.npz found -- run "
+              "--diagnose-counting first.")
+        return 2
+    md = ["", "## Detectability (Stage B: instrumented)", "",
+          f"Generated {_dt.datetime.now(_dt.timezone.utc).isoformat()} by "
+          f"`analysis/staircase_forensics.py --diagnose-report`. Per failing "
+          f"hold the VICTIM soliton (missing one at an undercount hold; "
+          f"lowest-persistence cluster at an agreement==0 hold) is scored: a "
+          f"rel-VICTIM snapshot passes the absolute floor but fails the "
+          f"relative one (`rel_height_candidate * snapshot_max`), so it is "
+          f"rejected only because a sibling's crest lifted `snapshot_max`.", ""]
+    md.append("| variant | dw/k | kind | victim | abs pass | rel-victim frac "
+              "| fails-both | detected (persist.) | min|E|²/bg | min|E|²/B² | "
+              "class |")
+    md.append("|---|---|---|---|---|---|---|---|---|---|---|")
+
+    mono_classes, all_classes = [], []
+    for sc in sidecars:
+        d = np.load(sc, allow_pickle=False)
+        name = str(d["variant"])
+        dw = d["dw_over_kappa"]
+        kind = d["kind"].astype(str)
+        b2 = d["B2_ref"]
+        medbg = d["median_bg"]
+        fails = np.nonzero(kind != "")[0]
+        for j in fails:
+            if kind[j] == "mono":
+                st = _victim_stats(d["missing_above_rel"][j],
+                                   d["missing_above_abs"][j],
+                                   d["missing_local_max"][j], medbg[j], b2[j])
+                victim = f"missing@{d['missing_angle_rad'][j]:.3f}"
+            else:  # agree0: lowest-persistence real cluster
+                ncl = int(d["n_cluster"][j])
+                det = [float(np.mean(d["cluster_above_rel"][j, :, c]
+                                     & d["cluster_above_abs"][j, :, c]))
+                       for c in range(ncl)]
+                c = int(np.argmin(det)) if det else 0
+                st = _victim_stats(d["cluster_above_rel"][j, :, c],
+                                   d["cluster_above_abs"][j, :, c],
+                                   d["cluster_local_max"][j, :, c],
+                                   medbg[j], b2[j])
+                victim = f"cluster {c} (min persist.)"
+            # classify: coupling = passes abs a lot but the relative floor is
+            # what suppresses it; dimming = fails the absolute floor itself.
+            if st["abs_pass"] >= 0.9 and st["rel_victim"] > 0.0 and (
+                    kind[j] != "mono" or st["detected"] < 0.5):
+                cls = "coupling"
+            elif st["fails_both"] > 0.5:
+                cls = "dimming"
+            else:
+                cls = "mixed"
+            all_classes.append(cls)
+            if kind[j] == "mono":
+                mono_classes.append(cls)
+            md.append(f"| {name} | {dw[j]:.3f} | {kind[j]} | {victim} | "
+                      f"{st['abs_pass']:.2f} | {st['rel_victim']:.2f} | "
+                      f"{st['fails_both']:.2f} | {st['detected']:.2f} | "
+                      f"{st['min_over_bg']:.1f} | {st['min_over_b2']:.2f} | "
+                      f"**{cls}** |")
+
+    # ---- Verdict (B3) -------------------------------------------------------
+    # The count DEFECT (monotonicity break) is the undercount holds; the verdict
+    # is keyed on them (where a soliton is actually dropped, so "persistence <
+    # 0.5" is meaningful). agree0 holds corroborate the same mechanism without
+    # a full drop.
+    key = mono_classes if mono_classes else all_classes
+    if key and all(c == "coupling" for c in key) and all(
+            c != "dimming" for c in all_classes):
+        verdict = "RELATIVE-THRESHOLD COUPLING CONFIRMED"
+    elif key and all(c == "dimming" for c in key):
+        verdict = "GENUINE DIMMING"
+    else:
+        verdict = "MIXED/INCONCLUSIVE"
+    md.append("")
+    md.append(f"**STAGE-B VERDICT: {verdict}**")
+    md.append("")
+    md.append("- Rule: COUPLING iff at every undercount hold the missing "
+              "soliton passes the ABSOLUTE floor in >= 90% of snapshots yet is "
+              "dropped (persistence < 0.5) by the RELATIVE floor "
+              "(`rel_height_candidate * snapshot_max`); GENUINE DIMMING iff it "
+              "fails the absolute floor in the majority of snapshots; MIXED "
+              "otherwise. agree0 holds corroborate (same mechanism, victim "
+              "kept above 0.5).")
+    md.append("- No fix applied: this diagnosis is the deliverable. Any "
+              "remedy (e.g. dropping the coupled relative arm of the candidate "
+              "floor) is a separate, gated change -- not made here.")
+    md.append("")
+
+    out = RESULTS_DIR / REPORT_MD
+    prior = out.read_text(encoding="utf-8") if out.exists() else ""
+    marker = "\n## Detectability (Stage B: instrumented)"
+    if marker in prior:
+        prior = prior[:prior.index(marker)].rstrip() + "\n"
+    out.write_text(prior.rstrip() + "\n" + "\n".join(md) + "\n", encoding="utf-8")
+    print(f"[diagnose-report] STAGE-B VERDICT: {verdict}")
+    print(f"[diagnose-report] report -> {out}")
+    return 0
+
+
 def main() -> None:
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--starvation", action="store_true",
+                    help="offline snapshot-starvation hypothesis test over the "
+                         "primary + robustness variant npzs (Part A); appends a "
+                         "section to staircase_forensics.md and prints a "
+                         "CONFIRMED / NOT CONFIRMED verdict")
+    ap.add_argument("--detectability", action="store_true",
+                    help="offline detectability diagnosis (Stage A): missing-"
+                         "cluster position persistence at monotonicity events, "
+                         "seed nearest-neighbour ranking, agreement==0 "
+                         "categorisation; appends a section and gates Stage B")
+    ap.add_argument("--diagnose-report", action="store_true",
+                    help="Stage B (B2/B3): read results/robustness/diagnose_*"
+                         ".npz and append the COUPLING/DIMMING/MIXED verdict "
+                         "to staircase_forensics.md")
+    args = ap.parse_args()
+    if args.starvation:
+        sys.exit(starvation_forensics())
+    if args.detectability:
+        sys.exit(detectability_forensics())
+    if args.diagnose_report:
+        sys.exit(diagnose_report())
+
     sweep, cfg, audit_lines, missing = load_and_audit()
     for ln in audit_lines:
         print("[forensics]", ln.replace("**", ""))

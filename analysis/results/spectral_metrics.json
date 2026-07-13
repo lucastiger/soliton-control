@@ -2,21 +2,21 @@
   "three_db_span": {
     "metric": "three_db_span",
     "metric_definition": "Full width, in relative cavity-mode number Delta_mu, of the pump-excluded, numerical-floor-masked, dB-domain median-smoothed, PCHIP-interpolated comb-line power envelope, measured between the OUTERMOST points where the envelope falls level_db below its maximum (level_db = 3.0 dB, i.e. the -3 dB / half-power level). Converted to frequency via Delta_mu * FSR.",
-    "span_modes": 189.60000393168784,
-    "span_hz": 4636031242663.597,
-    "span_thz": 4.636031242663597,
-    "span_ghz": 4636.0312426635965,
-    "left_crossing_mu": -95.03101593851902,
-    "right_crossing_mu": 94.56898799316882,
-    "envelope_peak_mu": 52.999999998774,
-    "reference_level_db": -5.112382462991054,
+    "span_modes": 285.7291060929655,
+    "span_hz": 6986545544917.791,
+    "span_thz": 6.986545544917791,
+    "span_ghz": 6986.545544917791,
+    "left_crossing_mu": -138.11186815589704,
+    "right_crossing_mu": 147.61723793706847,
+    "envelope_peak_mu": -23.000000001164153,
+    "reference_level_db": -1.4568658644487806,
     "n_crossings": 2,
     "one_sided": false,
     "fsr_hz": 24451641068.182365,
     "params": {
       "exclude_pump": true,
       "smooth_modes_requested": "auto",
-      "smooth_modes_used": 13,
+      "smooth_modes_used": 17,
       "floor_db": 60.0,
       "interp_factor": 10,
       "level_db": 3.0,
@@ -37,37 +37,37 @@
       "level_db": "dB"
     },
     "sech2_core_fwhm_crosscheck": {
-      "fwhm_modes": 251.38768257441978,
-      "fwhm_hz": 6146841383271.875,
-      "fwhm_thz": 6.146841383271875,
-      "width_w_modes": 142.88333860132636,
-      "center_mu": 0.6940317898187397,
-      "peak_db": -6.062866384962848,
-      "fit_rms_db": 1.2326874692776866,
+      "fwhm_modes": 300.63157172758514,
+      "fwhm_hz": 7350935285646.434,
+      "fwhm_thz": 7.350935285646433,
+      "width_w_modes": 170.8725034476786,
+      "center_mu": 3.5126660106201246,
+      "peak_db": -1.7394569766647625,
+      "fit_rms_db": 0.6304146848265808,
       "core_mu": 200,
       "note": "cross-check only (dB-domain sech^2 core fit); not the primary 3 dB span metric"
     },
     "provenance": {
       "input_file": "analysis/results/dks_single_soliton_spectrum.npz",
-      "input_sha256": "4642784da2856257617359880a94fa3c368fe65977903d0fffa3ba6a57af9b8e",
+      "input_sha256": "794d8c6f0592a79dc1f86b351824455acf157b35940d3620c2f04fb910601b46",
       "config_file": "sin_params.yaml",
       "config_sha256": "c5adc61ccb056ce6061455586622fccb92771ddbab473701f77de0a735f04d61",
       "run_id": {
-        "n_rt_averaged": 304,
-        "breathing_period_rt": 154.0,
-        "breathing_relstd": 0.04090545738813848
+        "n_rt_averaged": null,
+        "breathing_period_rt": null,
+        "breathing_relstd": null
       },
       "fsr_hz": 24451641068.182365,
       "fsr_source": "measured dispersion (attach_dispersion) ",
       "n_tau": 16384,
-      "generated_utc": "2026-07-09T03:37:55.207789+00:00",
+      "generated_utc": "2026-07-12T08:39:40.771593+00:00",
       "module": "analysis/spectral_metrics.py",
       "script": "analysis/compute_spectral_metrics.py"
     }
   },
   "conversion_efficiency": {
     "metric": "conversion_efficiency",
-    "eta_intra": 0.20508363724623144,
+    "eta_intra": 0.3019231819075336,
     "eta": null,
     "eta_reason": "the input spectrum is pump-normalised (|a_0|^2 == 1), so the absolute intracavity power scale <|E|^2> was normalised away; the absolute out-coupled comb power (hence eta) cannot be recovered without an absolute-power anchor (an un-normalised spectrum, or mean_intracavity_energy_j). eta_intra is still reported.",
     "definitions": {
@@ -84,8 +84,8 @@
       "spectrum_pump_normalized": true,
       "mean_intracavity_energy_j": null,
       "pump_power_arb": 1.0,
-      "comb_power_sum_arb": 0.2579939813237404,
-      "total_power_sum_arb": 1.2579939813237404
+      "comb_power_sum_arb": 0.4325071024884559,
+      "total_power_sum_arb": 1.432507102488456
     },
     "units": {
       "eta_intra": "dimensionless (intracavity power fraction)",
@@ -99,18 +99,18 @@
     },
     "provenance": {
       "input_file": "analysis/results/dks_single_soliton_spectrum.npz",
-      "input_sha256": "4642784da2856257617359880a94fa3c368fe65977903d0fffa3ba6a57af9b8e",
+      "input_sha256": "794d8c6f0592a79dc1f86b351824455acf157b35940d3620c2f04fb910601b46",
       "config_file": "sin_params.yaml",
       "config_sha256": "c5adc61ccb056ce6061455586622fccb92771ddbab473701f77de0a735f04d61",
       "run_id": {
-        "n_rt_averaged": 304,
-        "breathing_period_rt": 154.0,
-        "breathing_relstd": 0.04090545738813848
+        "n_rt_averaged": null,
+        "breathing_period_rt": null,
+        "breathing_relstd": null
       },
       "fsr_hz": 24451641068.182365,
       "fsr_source": "measured dispersion (attach_dispersion) ",
       "n_tau": 16384,
-      "generated_utc": "2026-07-09T03:37:55.207789+00:00",
+      "generated_utc": "2026-07-12T08:39:40.771593+00:00",
       "module": "analysis/spectral_metrics.py",
       "script": "analysis/compute_spectral_metrics.py"
     }
@@ -214,8 +214,8 @@
         true,
         false,
         false,
-        false,
         true,
+        false,
         false,
         false,
         false,
@@ -315,7 +315,7 @@
         "position_seed": 1,
         "position_jitter_frac": 0.25
       },
-      "generated_utc": "2026-07-12T04:48:12.380396+00:00"
+      "generated_utc": "2026-07-13T10:14:44.310936+00:00"
     },
     "any_soliton_region_over_kappa": [
       6.199999999999999,
@@ -360,7 +360,7 @@
         "6.250": 3,
         "6.275": 3,
         "6.300": 3,
-        "6.325": 3,
+        "6.325": 4,
         "6.350": 4,
         "6.375": 4,
         "6.400": 4,
@@ -605,8 +605,8 @@
           "delta_n": 2
         },
         {
-          "edge_index": 33,
-          "dw_mid": 6.3374999999999995,
+          "edge_index": 32,
+          "dw_mid": 6.3125,
           "n_high_side": 4,
           "n_low_side": 3,
           "delta_n": 1
@@ -639,11 +639,11 @@
           "n_low_side": 1
         },
         {
-          "dw_mid": 6.3374999999999995,
+          "dw_mid": 6.3125,
           "delta_n": 1,
-          "step_dy": 0.10271525567412021,
-          "step_edge_index": 33,
-          "transition_edge_index": 33,
+          "step_dy": 0.056834704834087924,
+          "step_edge_index": 32,
+          "transition_edge_index": 32,
           "n_high_side": 4,
           "n_low_side": 3
         },
@@ -671,9 +671,9 @@
           "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
         },
         {
-          "dw_mid": 6.3125,
-          "step_dy": 0.056834704834087924,
-          "edge_index": 32,
+          "dw_mid": 6.3374999999999995,
+          "step_dy": 0.10271525567412021,
+          "edge_index": 33,
           "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
         },
         {
@@ -1053,51 +1053,52 @@
       },
       "primary_observable": {
         "chosen": "P_comb",
-        "matched_step_contrast_P_intra": 30.091990674212298,
-        "matched_step_contrast_P_comb": 193.2502148307545,
+        "matched_step_contrast_P_intra": 38.63188450088004,
+        "matched_step_contrast_P_comb": 106.92977247582641,
         "rule": "P_comb is plotted as primary ONLY if its matched-step contrast (min matched |step_dy| / MAD of dy) strictly exceeds P_intra's; see primary_observable_decision for the full inputs"
       },
       "matched_staircase_edges_over_kappa": [
         6.2375,
-        6.3374999999999995,
+        6.3125,
         6.512499999999999
       ],
       "final_1_to_0_over_kappa": 6.1875,
       "honesty_note": "the final 1->0 annihilation MUST NOT be forced to register as a power step; whether it is matched is decided by the untouched detector on the plotted primary (see final_edge_note). The N->N-1 transitions above it are the staircase. No smoothing, no detector changes, no re-thresholding.",
       "soliton_count_gate": "windowed position-persistence count if (mode of the solver's per-snapshot label_history over the in-window snapshots is in SOLITON_LABELS = (4, 5, 6)) OR (finite field AND windowed count >= 1 AND contrast >= the labeler's soliton contrast floor contrast_high = 8) else 0. The taxonomy gate alone empirically zeroes genuine multi-soliton holds: the labeler's spectral-entropy chaos gate misroutes bright N-soliton combs to class 3 (see the driver docstring); MI/Turing states are position-persistent too, so the label gate (not the counter) keeps them at 0.",
       "counting": {
-        "method": "position_persistence",
+        "method": "position_persistence_v2_physics_anchor",
         "parameters": {
           "min_persistence": 0.5,
-          "rel_height_candidate": 0.25,
           "bg_floor_multiple": 5.0,
           "cluster_tol_rad": "per hold: max(10 * sqrt(d2_local / (2*delta_omega)), 8 * 2*pi / n_tau)",
-          "label_gate": "mode of solver label_history over the in-window snapshots (+ documented contrast-floor fallback)"
+          "label_gate": "mode of solver label_history over the in-window snapshots (+ documented contrast-floor fallback)",
+          "soliton_frac": 0.1,
+          "physics_anchor": "candidate floor = max(bg_floor_multiple * median(|E|^2), soliton_frac * B2_ref), B2_ref = 2*|delta_omega|/gamma (the analytic single-soliton peak power at the hold's detuning). The momentary-max relative arm was REMOVED: it coupled each soliton's detectability to its siblings' breathing phases (staircase_forensics.md, 4-F end-snapshot artifact -> 5-D RELATIVE-THRESHOLD COUPLING CONFIRMED)."
         },
         "count_agreement": {
           "median": 1.0,
-          "min": 0.0,
-          "fraction_below_1": 0.23371647509578544,
+          "min": 0.5,
+          "fraction_below_1": 0.0038314176245210726,
           "note": "fraction of holds where a single-snapshot count would have disagreed with the persistent count -- the artifact the windowed counter absorbs"
         },
         "legacy_diagnostic": "soliton_count_end_snapshot column (old end-of-hold single-snapshot count, old gate) kept in the npz",
-        "forensics": "analysis/results/staircase_forensics.md -- VERDICT: counting artifact (positions persist at the measurement ceiling; comb energy continuous to << 1 quantum through every count dip)"
+        "forensics": "analysis/results/staircase_forensics.md -- the full chain: 4-F (end-snapshot flicker = counting artifact) -> 5-R (snapshot starvation FALSIFIED: n_in = 8, agreement quantized in eighths) -> 5-D Stage A (missing solitons persist in position: detection dropout) -> 5-D Stage B (RELATIVE-THRESHOLD COUPLING CONFIRMED: victims pass the absolute floor in 100% of snapshots at 23-42x background, rejected only by the momentary-max arm) -> 5-X (this v2 physics-anchored rule)"
       }
     },
     "primary_observable_decision": {
       "rule": "P_comb is adopted as the PLOTTED primary ONLY if its matched-step contrast (min matched |step_dy| / MAD of dy) is strictly higher than total intracavity power's. Steps are the unchanged detect_power_steps detections on each normalised trace; a detection is matched when its edge coincides with a soliton_count transition edge (the power-muted final ->0 annihilation is excluded); a trace with no matched detection has contrast 0. Decided from the regenerated data.",
-      "matched_step_contrast_P_intra": 30.091990674212298,
-      "matched_step_contrast_P_comb": 193.2502148307545,
+      "matched_step_contrast_P_intra": 38.63188450088004,
+      "matched_step_contrast_P_comb": 106.92977247582641,
       "mad_dy_P_intra": 0.0009450376115897607,
       "mad_dy_P_comb": 0.000531514315593784,
       "matched_step_dy_P_intra": [
         0.15636485035291636,
-        0.028438062994738944,
+        0.03650858385992317,
         0.08420343710934897
       ],
       "matched_step_dy_P_comb": [
         0.3460425335669497,
-        0.10271525567412021,
+        0.056834704834087924,
         0.1692940003481147
       ],
       "detected_steps_P_intra_over_kappa": [
@@ -1193,12 +1194,12 @@
       ],
       "matched_detected_P_intra_over_kappa": [
         6.2375,
-        6.3374999999999995,
+        6.3125,
         6.512499999999999
       ],
       "matched_detected_P_comb_over_kappa": [
         6.2375,
-        6.3374999999999995,
+        6.3125,
         6.512499999999999
       ],
       "plotted_primary": "P_comb",
@@ -1208,5 +1209,290 @@
       "annihilation_over_kappa": 6.1875,
       "note": "lower edge of the single-DKS existence region (from the hardened count). Whether the 1->0 event registers as a matched power step is decided by the untouched detector on the plotted primary (see staircase.final_edge_note)."
     }
+  },
+  "staircase_robustness": {
+    "metric": "staircase_robustness",
+    "baseline": "ACCEPTED configuration read verbatim from detuning_sweep.npz sweep_config_json",
+    "perturbations": "one-at-a-time: (i) position_seed+1, (ii) hold_rt 2000->1600, (iii) n_steps doubled (detuning spacing halved)",
+    "counter": "hardened position-persistence windowed counter (count_solitons_windowed, v2 physics anchor: candidate floor = max(bg_floor_multiple * median, soliton_frac * B2_ref) -- the momentary-max relative arm was removed per the 5-D coupling verdict) throughout; detect_power_steps, the 1-sample alignment tolerance and the monotonicity gate are unchanged",
+    "invariants": {
+      "structure": ">= 2 matched (state-verified) steps AND soliton_count monotone non-increasing along the descending sweep (validate_staircase_alignment)",
+      "physics_driven_counts": "median count_agreement >= 0.5 AND no soliton-bearing (N>=1) hold with count_agreement == 0",
+      "stationary_upper_branch": "every hold at dw >= 9.5k is is_stationary",
+      "muted_lower_edge": "a 1->0 annihilation transition persists within [5.75, 6.5]k (matched-vs-unmatched recorded, not gated -- data-decided per the honesty constraint)"
+    },
+    "note": "step LOCATIONS may move between variants (annihilation detunings are interaction-dependent); STRUCTURE must persist. The invariant floors are FIXED -- a violation is a finding, escalated via the canonical ESCALATION_LADDER; min_persistence and the thresholds are never tuned to make a variant pass.",
+    "variants": [
+      {
+        "index": 1,
+        "key": "position_seed+1",
+        "perturbation": "position_seed 1 -> 2",
+        "config": {
+          "position_seed": 2,
+          "hold_rt": 2000,
+          "n_steps": 261,
+          "n_solitons": 5
+        },
+        "n_detunings": 261,
+        "plotted_primary": "P_comb",
+        "matched_step_count": 5,
+        "matched_dw_mid_over_kappa": [
+          6.1625,
+          6.1875,
+          6.2375,
+          6.2875,
+          6.3625
+        ],
+        "median_count_agreement": 1.0,
+        "min_count_agreement_soliton_bearing": 1.0,
+        "soliton_bearing_zero_agreement_holds": [],
+        "nonstationary_holds_ge_edge_over_kappa": [],
+        "muted_1to0_edge": {
+          "dw_mid_over_kappa": 6.1625,
+          "status": "matched",
+          "window_over_kappa": [
+            5.75,
+            6.5
+          ],
+          "note": "structural persistence of the 1->0 edge in the window is the gate; matched-vs-unmatched is data-decided per the honesty constraint (the detector is never forced). On the accepted sweep the edge resolves naturally on P_comb (matched) -- a stronger result than an unmatched power-muted edge, not a failure."
+        },
+        "npz": "robustness/variant_1.npz",
+        "violations": [],
+        "pass": true
+      },
+      {
+        "index": 2,
+        "key": "hold_rt_2000_to_1600",
+        "perturbation": "hold_rt 2000 -> 1600",
+        "config": {
+          "position_seed": 1,
+          "hold_rt": 1600,
+          "n_steps": 261,
+          "n_solitons": 5
+        },
+        "n_detunings": 261,
+        "plotted_primary": "P_comb",
+        "matched_step_count": 5,
+        "matched_dw_mid_over_kappa": [
+          6.1625,
+          6.1875,
+          6.2124999999999995,
+          6.2875,
+          6.4624999999999995
+        ],
+        "median_count_agreement": 1.0,
+        "min_count_agreement_soliton_bearing": 0.625,
+        "soliton_bearing_zero_agreement_holds": [],
+        "nonstationary_holds_ge_edge_over_kappa": [],
+        "muted_1to0_edge": {
+          "dw_mid_over_kappa": 6.1625,
+          "status": "matched",
+          "window_over_kappa": [
+            5.75,
+            6.5
+          ],
+          "note": "structural persistence of the 1->0 edge in the window is the gate; matched-vs-unmatched is data-decided per the honesty constraint (the detector is never forced). On the accepted sweep the edge resolves naturally on P_comb (matched) -- a stronger result than an unmatched power-muted edge, not a failure."
+        },
+        "npz": "robustness/variant_2.npz",
+        "violations": [],
+        "pass": true
+      },
+      {
+        "index": 3,
+        "key": "n_steps_doubled",
+        "perturbation": "n_steps 261 -> 522 (detuning spacing halved)",
+        "config": {
+          "position_seed": 1,
+          "hold_rt": 2000,
+          "n_steps": 522,
+          "n_solitons": 5
+        },
+        "n_detunings": 522,
+        "plotted_primary": "P_comb",
+        "matched_step_count": 5,
+        "matched_dw_mid_over_kappa": [
+          6.167466410748561,
+          6.1924184261036475,
+          6.27975047984645,
+          6.367082533589252,
+          6.666506717850288
+        ],
+        "median_count_agreement": 1.0,
+        "min_count_agreement_soliton_bearing": 1.0,
+        "soliton_bearing_zero_agreement_holds": [],
+        "nonstationary_holds_ge_edge_over_kappa": [],
+        "muted_1to0_edge": {
+          "dw_mid_over_kappa": 6.167466410748561,
+          "status": "matched",
+          "window_over_kappa": [
+            5.75,
+            6.5
+          ],
+          "note": "structural persistence of the 1->0 edge in the window is the gate; matched-vs-unmatched is data-decided per the honesty constraint (the detector is never forced). On the accepted sweep the edge resolves naturally on P_comb (matched) -- a stronger result than an unmatched power-muted edge, not a failure."
+        },
+        "npz": "robustness/variant_3.npz",
+        "violations": [],
+        "pass": true
+      }
+    ],
+    "all_pass": true,
+    "generated_utc": "2026-07-13T11:25:56.163339+00:00",
+    "history": [
+      {
+        "metric": "staircase_robustness",
+        "baseline": "ACCEPTED configuration read verbatim from detuning_sweep.npz sweep_config_json",
+        "perturbations": "one-at-a-time: (i) position_seed+1, (ii) hold_rt 2000->1600, (iii) n_steps doubled (detuning spacing halved)",
+        "counter": "hardened position-persistence windowed counter (count_solitons_windowed) throughout; detect_power_steps, the 1-sample alignment tolerance and the monotonicity gate are unchanged",
+        "invariants": {
+          "structure": ">= 2 matched (state-verified) steps AND soliton_count monotone non-increasing along the descending sweep (validate_staircase_alignment)",
+          "physics_driven_counts": "median count_agreement >= 0.5 AND no soliton-bearing (N>=1) hold with count_agreement == 0",
+          "stationary_upper_branch": "every hold at dw >= 9.5k is is_stationary",
+          "muted_lower_edge": "a 1->0 annihilation transition persists within [5.75, 6.5]k (matched-vs-unmatched recorded, not gated -- data-decided per the honesty constraint)"
+        },
+        "note": "step LOCATIONS may move between variants (annihilation detunings are interaction-dependent); STRUCTURE must persist. The invariant floors are FIXED -- a violation is a finding, escalated via the canonical ESCALATION_LADDER; min_persistence and the thresholds are never tuned to make a variant pass.",
+        "variants": [
+          {
+            "index": 1,
+            "key": "position_seed+1",
+            "perturbation": "position_seed 1 -> 2",
+            "config": {
+              "position_seed": 2,
+              "hold_rt": 2000,
+              "n_steps": 261,
+              "n_solitons": 5
+            },
+            "n_detunings": 261,
+            "plotted_primary": "P_intra",
+            "matched_step_count": 7,
+            "matched_dw_mid_over_kappa": [
+              6.1625,
+              6.1875,
+              6.2375,
+              6.2875,
+              6.3625,
+              6.7375,
+              6.762499999999999
+            ],
+            "median_count_agreement": 1.0,
+            "min_count_agreement_soliton_bearing": 0.0,
+            "soliton_bearing_zero_agreement_holds": [
+              {
+                "dw_over_kappa": 6.5,
+                "soliton_count": 5
+              }
+            ],
+            "nonstationary_holds_ge_edge_over_kappa": [],
+            "muted_1to0_edge": {
+              "dw_mid_over_kappa": 6.1625,
+              "status": "matched",
+              "window_over_kappa": [
+                5.75,
+                6.5
+              ],
+              "note": "structural persistence of the 1->0 edge in the window is the gate; matched-vs-unmatched is data-decided per the honesty constraint (the detector is never forced). On the accepted sweep the edge resolves naturally on P_comb (matched) -- a stronger result than an unmatched power-muted edge, not a failure."
+            },
+            "npz": "robustness/variant_1.npz",
+            "violations": [
+              "structure: soliton_count is not monotonically non-increasing along the descending sweep: 1 count increase(s) going down in detuning, at ascending-order edge 49 (5 -> 4)",
+              "count_agreement: 1 soliton-bearing hold(s) with count_agreement == 0 -- the persistence machinery is load-bearing there, not the physics: 6.500k (N=5)"
+            ],
+            "pass": false
+          },
+          {
+            "index": 2,
+            "key": "hold_rt_2000_to_1600",
+            "perturbation": "hold_rt 2000 -> 1600",
+            "config": {
+              "position_seed": 1,
+              "hold_rt": 1600,
+              "n_steps": 261,
+              "n_solitons": 5
+            },
+            "n_detunings": 261,
+            "plotted_primary": "P_comb",
+            "matched_step_count": 4,
+            "matched_dw_mid_over_kappa": [
+              6.1625,
+              6.2124999999999995,
+              6.2875,
+              6.4624999999999995
+            ],
+            "median_count_agreement": 1.0,
+            "min_count_agreement_soliton_bearing": 0.125,
+            "soliton_bearing_zero_agreement_holds": [],
+            "nonstationary_holds_ge_edge_over_kappa": [],
+            "muted_1to0_edge": {
+              "dw_mid_over_kappa": 6.1625,
+              "status": "matched",
+              "window_over_kappa": [
+                5.75,
+                6.5
+              ],
+              "note": "structural persistence of the 1->0 edge in the window is the gate; matched-vs-unmatched is data-decided per the honesty constraint (the detector is never forced). On the accepted sweep the edge resolves naturally on P_comb (matched) -- a stronger result than an unmatched power-muted edge, not a failure."
+            },
+            "npz": "robustness/variant_2.npz",
+            "violations": [],
+            "pass": true
+          },
+          {
+            "index": 3,
+            "key": "n_steps_doubled",
+            "perturbation": "n_steps 261 -> 522 (detuning spacing halved)",
+            "config": {
+              "position_seed": 1,
+              "hold_rt": 2000,
+              "n_steps": 522,
+              "n_solitons": 5
+            },
+            "n_detunings": 522,
+            "plotted_primary": "P_comb",
+            "matched_step_count": 7,
+            "matched_dw_mid_over_kappa": [
+              6.167466410748561,
+              6.1924184261036475,
+              6.27975047984645,
+              6.367082533589252,
+              6.666506717850288,
+              6.990882917466411,
+              7.003358925143955
+            ],
+            "median_count_agreement": 1.0,
+            "min_count_agreement_soliton_bearing": 0.0,
+            "soliton_bearing_zero_agreement_holds": [
+              {
+                "dw_over_kappa": 6.785028790786948,
+                "soliton_count": 5
+              },
+              {
+                "dw_over_kappa": 6.809980806142034,
+                "soliton_count": 5
+              },
+              {
+                "dw_over_kappa": 6.959692898272553,
+                "soliton_count": 5
+              }
+            ],
+            "nonstationary_holds_ge_edge_over_kappa": [],
+            "muted_1to0_edge": {
+              "dw_mid_over_kappa": 6.167466410748561,
+              "status": "matched",
+              "window_over_kappa": [
+                5.75,
+                6.5
+              ],
+              "note": "structural persistence of the 1->0 edge in the window is the gate; matched-vs-unmatched is data-decided per the honesty constraint (the detector is never forced). On the accepted sweep the edge resolves naturally on P_comb (matched) -- a stronger result than an unmatched power-muted edge, not a failure."
+            },
+            "npz": "robustness/variant_3.npz",
+            "violations": [
+              "structure: soliton_count is not monotonically non-increasing along the descending sweep: 1 count increase(s) going down in detuning, at ascending-order edge 119 (5 -> 4)",
+              "count_agreement: 3 soliton-bearing hold(s) with count_agreement == 0 -- the persistence machinery is load-bearing there, not the physics: 6.785k (N=5), 6.810k (N=5), 6.960k (N=5)"
+            ],
+            "pass": false
+          }
+        ],
+        "all_pass": false,
+        "generated_utc": "2026-07-12T10:04:14.422746+00:00"
+      }
+    ]
   }
 }
