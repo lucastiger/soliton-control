@@ -173,3 +173,21 @@ The raw per-cluster `persistence_fractions` are computed by `count_solitons_wind
 
 - **POSITION PERSISTENCE CONFIRMED** at all 2 monotonicity events: every missing soliton sits at the same angle in both flanks (max before<->after gap 0.0176 rad). The dropouts are a COUNTING defect, not physics rearrangement -> Stage B (instrumented run) may proceed.
 
+## Detectability (Stage B: instrumented)
+
+Generated 2026-07-13T05:26:41.654287+00:00 by `analysis/staircase_forensics.py --diagnose-report`. Per failing hold the VICTIM soliton (missing one at an undercount hold; lowest-persistence cluster at an agreement==0 hold) is scored: a rel-VICTIM snapshot passes the absolute floor but fails the relative one (`rel_height_candidate * snapshot_max`), so it is rejected only because a sibling's crest lifted `snapshot_max`.
+
+| variant | dw/k | kind | victim | abs pass | rel-victim frac | fails-both | detected (persist.) | min|E|²/bg | min|E|²/B² | class |
+|---|---|---|---|---|---|---|---|---|---|---|
+| variant_1 | 6.750 | mono | missing@0.048 | 1.00 | 0.62 | 0.00 | 0.38 | 32.8 | 0.45 | **coupling** |
+| variant_1 | 6.500 | agree0 | cluster 2 (min persist.) | 1.00 | 0.50 | 0.00 | 0.50 | 23.4 | 0.37 | **coupling** |
+| variant_3 | 6.997 | mono | missing@3.023 | 1.00 | 0.62 | 0.00 | 0.38 | 41.6 | 0.52 | **coupling** |
+| variant_3 | 6.960 | agree0 | cluster 4 (min persist.) | 1.00 | 0.38 | 0.00 | 0.62 | 32.0 | 0.41 | **coupling** |
+| variant_3 | 6.810 | agree0 | cluster 0 (min persist.) | 1.00 | 0.38 | 0.00 | 0.62 | 28.6 | 0.39 | **coupling** |
+| variant_3 | 6.785 | agree0 | cluster 1 (min persist.) | 1.00 | 0.50 | 0.00 | 0.50 | 27.2 | 0.38 | **coupling** |
+
+**STAGE-B VERDICT: RELATIVE-THRESHOLD COUPLING CONFIRMED**
+
+- Rule: COUPLING iff at every undercount hold the missing soliton passes the ABSOLUTE floor in >= 90% of snapshots yet is dropped (persistence < 0.5) by the RELATIVE floor (`rel_height_candidate * snapshot_max`); GENUINE DIMMING iff it fails the absolute floor in the majority of snapshots; MIXED otherwise. agree0 holds corroborate (same mechanism, victim kept above 0.5).
+- No fix applied: this diagnosis is the deliverable. Any remedy (e.g. dropping the coupled relative arm of the candidate floor) is a separate, gated change -- not made here.
+
