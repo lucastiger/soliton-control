@@ -219,22 +219,20 @@
     "spectrum_max_dev_db": 0.003966700173037907
   },
   "staircase_robustness": {
-    "all_pass": false,
-    "generated_utc": "2026-07-12T10:04:14.422746+00:00",
+    "all_pass": true,
+    "generated_utc": "2026-07-13T11:25:56.163339+00:00",
     "perturbations": "one-at-a-time: (i) position_seed+1, (ii) hold_rt 2000->1600, (iii) n_steps doubled (detuning spacing halved)",
     "variants": [
       {
         "perturbation": "position_seed 1 -> 2",
-        "pass": false,
-        "matched_step_count": 7,
+        "pass": true,
+        "matched_step_count": 5,
         "matched_dw_mid_over_kappa": [
           6.1625,
           6.1875,
           6.2375,
           6.2875,
-          6.3625,
-          6.7375,
-          6.762499999999999
+          6.3625
         ],
         "median_count_agreement": 1.0,
         "muted_1to0_edge_status": "matched",
@@ -243,9 +241,10 @@
       {
         "perturbation": "hold_rt 2000 -> 1600",
         "pass": true,
-        "matched_step_count": 4,
+        "matched_step_count": 5,
         "matched_dw_mid_over_kappa": [
           6.1625,
+          6.1875,
           6.2124999999999995,
           6.2875,
           6.4624999999999995
@@ -256,20 +255,75 @@
       },
       {
         "perturbation": "n_steps 261 -> 522 (detuning spacing halved)",
-        "pass": false,
-        "matched_step_count": 7,
+        "pass": true,
+        "matched_step_count": 5,
         "matched_dw_mid_over_kappa": [
           6.167466410748561,
           6.1924184261036475,
           6.27975047984645,
           6.367082533589252,
-          6.666506717850288,
-          6.990882917466411,
-          7.003358925143955
+          6.666506717850288
         ],
         "median_count_agreement": 1.0,
         "muted_1to0_edge_status": "matched",
         "npz": "robustness/variant_3.npz"
+      }
+    ],
+    "history": [
+      {
+        "all_pass": false,
+        "generated_utc": "2026-07-12T10:04:14.422746+00:00",
+        "perturbations": "one-at-a-time: (i) position_seed+1, (ii) hold_rt 2000->1600, (iii) n_steps doubled (detuning spacing halved)",
+        "variants": [
+          {
+            "perturbation": "position_seed 1 -> 2",
+            "pass": false,
+            "matched_step_count": 7,
+            "matched_dw_mid_over_kappa": [
+              6.1625,
+              6.1875,
+              6.2375,
+              6.2875,
+              6.3625,
+              6.7375,
+              6.762499999999999
+            ],
+            "median_count_agreement": 1.0,
+            "muted_1to0_edge_status": "matched",
+            "npz": "robustness/variant_1.npz"
+          },
+          {
+            "perturbation": "hold_rt 2000 -> 1600",
+            "pass": true,
+            "matched_step_count": 4,
+            "matched_dw_mid_over_kappa": [
+              6.1625,
+              6.2124999999999995,
+              6.2875,
+              6.4624999999999995
+            ],
+            "median_count_agreement": 1.0,
+            "muted_1to0_edge_status": "matched",
+            "npz": "robustness/variant_2.npz"
+          },
+          {
+            "perturbation": "n_steps 261 -> 522 (detuning spacing halved)",
+            "pass": false,
+            "matched_step_count": 7,
+            "matched_dw_mid_over_kappa": [
+              6.167466410748561,
+              6.1924184261036475,
+              6.27975047984645,
+              6.367082533589252,
+              6.666506717850288,
+              6.990882917466411,
+              7.003358925143955
+            ],
+            "median_count_agreement": 1.0,
+            "muted_1to0_edge_status": "matched",
+            "npz": "robustness/variant_3.npz"
+          }
+        ]
       }
     ]
   }
