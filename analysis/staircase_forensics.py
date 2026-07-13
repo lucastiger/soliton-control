@@ -596,6 +596,278 @@ def starvation_forensics() -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# --detectability mode (Stage A): is the count defect a RELATIVE-THRESHOLD
+# detectability problem (a trough-phase soliton rejected because a sibling is
+# at crest, coupling its detection to the others via snapshot_max), and does
+# the missing soliton PERSIST in position through the event (a counting
+# dropout, not a physics annihilation)?  Offline, committed npzs only.
+# ---------------------------------------------------------------------------
+DETECT_TOL_RAD = 0.05        # per the brief: circular position-match tolerance
+DETECT_TOL_PERSIST = 0.10    # before<->after span is 2 holds; allow ~2x drift
+
+
+def _greedy_unmatched(src, dst, tol):
+    """dst angles NOT covered by any src angle within ``tol`` (circular, 1:1)."""
+    src = [float(x) for x in src]
+    dst = [float(x) for x in dst]
+    used = set()
+    for a in src:
+        best, bd = None, 1e9
+        for j, b in enumerate(dst):
+            if j in used:
+                continue
+            d = _circ_dist(a, b)
+            if d < bd:
+                bd, best = d, j
+        if best is not None and bd <= tol:
+            used.add(best)
+    return [dst[j] for j in range(len(dst)) if j not in used]
+
+
+def _nn_separations(angles):
+    """Nearest-neighbour circular separation for each angle in ``angles``."""
+    a = [float(x) for x in angles]
+    return [min(_circ_dist(a[i], a[j]) for j in range(len(a)) if j != i)
+            for i in range(len(a))]
+
+
+def _rank_smallest(values, target):
+    """1-based rank of ``target`` among ``values`` (1 = smallest)."""
+    return int(sum(1 for v in values if v < target - 1e-12) + 1)
+
+
+def _cyclic_seed_index(hold_angles, seed_angles):
+    """Map each sorted hold angle to a seed index assuming a rigid rotation.
+
+    Soliton order is preserved along the sweep (no crossings), so the settled
+    pattern is a cyclic rotation of the seed; pick the cyclic shift minimising
+    the total circular distance.  Returns ``{sorted_hold_idx: seed_sorted_idx}``
+    and the sorted seed angles.
+    """
+    h = np.sort(np.asarray([float(x) for x in hold_angles]))
+    s = np.sort(np.asarray([float(x) for x in seed_angles]))
+    n = min(h.size, s.size)
+    if n == 0:
+        return {}, s
+    best = (1e18, 0)
+    for shift in range(n):
+        tot = sum(_circ_dist(h[i], s[(i + shift) % n]) for i in range(n))
+        if tot < best[0]:
+            best = (tot, shift)
+    shift = best[1]
+    return {i: (i + shift) % n for i in range(n)}, s
+
+
+def detectability_forensics() -> int:
+    """Stage A: offline detectability diagnosis over the committed npzs.
+
+    A1 identifies the missing cluster at every monotonicity-violating hold and
+    tests whether it PERSISTS in position through the event (present at the same
+    angle in both flanking holds -> a detection dropout, not a physics
+    rearrangement -- the GATE).  A2 ranks the missing soliton's seed
+    nearest-neighbour separation (tightest pairs breathe deepest) and checks
+    whether the same seed-relative soliton drops in variants sharing a seed.
+    A3 categorises every soliton-bearing agreement==0 hold (undercount vs
+    correct-count-but-no-unanimous-snapshot) from the stored counts -- the raw
+    per-cluster persistence_fractions are NOT persisted in the npz (only
+    count_agreement and the final cluster angles are), so the fraction
+    breakdown is deferred to the instrumented Stage B run.  Appends a
+    "Detectability (offline)" section to the report; returns 0.  The caller
+    keys the Stage-A GATE on the printed persistence verdict.
+    """
+    files = [("primary", RESULTS_DIR / SWEEP_NPZ)]
+    files += [(p.stem, p) for p in
+              sorted((RESULTS_DIR / "robustness").glob("variant_*.npz"))]
+
+    a1_rows, a3_rows = [], []
+    persist_all = []          # gate: every mono event must persist in position
+    md = ["", "## Detectability (offline; Stage A)", "",
+          f"Generated {_dt.datetime.now(_dt.timezone.utc).isoformat()} by "
+          f"`analysis/staircase_forensics.py --detectability` (offline; no "
+          f"solver run). Working hypothesis: the count defect is a "
+          f"RELATIVE-threshold detectability problem -- a trough-phase soliton "
+          f"is rejected when a sibling is at crest because the candidate floor "
+          f"`rel_height_candidate * snapshot_max` couples each soliton's "
+          f"detection to the others' breathing phases.", ""]
+
+    for name, path in files:
+        if not path.exists():
+            continue
+        sweep, cfg = load_sweep_npz(path)
+        order = np.argsort(np.asarray(sweep["dw_over_kappa"]))
+        dw = np.asarray(sweep["dw_over_kappa"], float)[order]
+        c = np.asarray(sweep["soliton_count"], int)[order]
+        ce = np.asarray(sweep["soliton_count_end_snapshot"], int)[order]
+        ca = np.asarray(sweep["count_agreement"], float)[order]
+        pos = np.asarray(sweep["peak_positions_rad"], float)[order]
+        seed = _finite_row(np.asarray(sweep["seed_positions_rad"], float))
+        n_seed = int(sweep.get("n_solitons_seeded", seed.size)) or seed.size
+
+        # ---- A1: monotonicity-violating holds (ascending diff<0 -> hold i) ---
+        mono = (np.nonzero(np.diff(c) < 0)[0] + 1)
+        for j in mono:
+            if j == 0 or j + 1 >= c.size:
+                continue
+            ev, be, af = (_finite_row(pos[j]), _finite_row(pos[j - 1]),
+                          _finite_row(pos[j + 1]))
+            miss_be = _greedy_unmatched(ev, be, DETECT_TOL_RAD)
+            miss_af = _greedy_unmatched(ev, af, DETECT_TOL_RAD)
+            gap = (_circ_dist(miss_be[0], miss_af[0])
+                   if (miss_be and miss_af) else float("nan"))
+            persists = bool(len(miss_be) == 1 and len(miss_af) == 1
+                            and gap <= DETECT_TOL_PERSIST)
+            persist_all.append(persists)
+            miss_angle = float(miss_be[0]) if miss_be else float("nan")
+            # A2: NN-separation rank of the missing soliton
+            nn_flank = _nn_separations(be) if be.size else []
+            rank_flank = (_rank_smallest(
+                nn_flank, min(_circ_dist(miss_angle, b) for b in be
+                              if _circ_dist(miss_angle, b) > 1e-9))
+                if (be.size and np.isfinite(miss_angle)) else None)
+            nn_seed = _nn_separations(seed) if seed.size else []
+            smap, s_sorted = _cyclic_seed_index(be, seed)
+            # sorted index of the missing angle within the before-flank
+            be_sorted = np.sort(be)
+            mi = int(np.argmin(np.abs(_wrap(be_sorted - miss_angle)))) \
+                if be.size else -1
+            seed_idx = smap.get(mi)
+            rank_seed = (_rank_smallest(nn_seed, nn_seed[seed_idx])
+                         if (seed_idx is not None and nn_seed) else None)
+            a1_rows.append(dict(
+                file=name, dw=float(dw[j]), N=int(c[j]), N_end=int(ce[j]),
+                miss=miss_angle, miss_be=miss_be, miss_af=miss_af, gap=gap,
+                persists=persists, rank_flank=rank_flank, n=len(be),
+                seed_idx=seed_idx, rank_seed=rank_seed, n_seed=len(nn_seed)))
+
+        # ---- A3: soliton-bearing agreement==0 holds -------------------------
+        # running future-max envelope = the true-count lower bound (descending
+        # sweep), so "undercount" = count below the envelope.
+        env = np.maximum.accumulate(c[::-1])[::-1]   # max over lower detunings
+        for j in np.nonzero((c >= 1) & (ca == 0.0))[0]:
+            a3_rows.append(dict(
+                file=name, dw=float(dw[j]), N=int(c[j]), env=int(env[j]),
+                N_end=int(ce[j]), agree=float(ca[j]),
+                category=("undercount (a cluster fell below min_persistence)"
+                          if c[j] < env[j] else
+                          "correct-count, no unanimous snapshot")))
+
+    # ---- Report: A1 ---------------------------------------------------------
+    md.append("### A1 -- missing cluster at each monotonicity-violating hold")
+    md.append("")
+    md.append("| file | dw/k | N | N_end-snap | missing angle | in before | "
+              "in after | before<->after gap | persists (dropout) |")
+    md.append("|---|---|---|---|---|---|---|---|---|")
+    for r in a1_rows:
+        md.append(f"| {r['file']} | {r['dw']:.3f} | {r['N']} | {r['N_end']} | "
+                  f"{r['miss']:.3f} | {'yes' if r['miss_be'] else 'no'} | "
+                  f"{'yes' if r['miss_af'] else 'no'} | {r['gap']:.4f} | "
+                  f"**{'YES' if r['persists'] else 'NO'}** |")
+    md.append("")
+    md.append("A missing soliton present at the SAME angle (within the "
+              f"{DETECT_TOL_PERSIST} rad drift budget) in BOTH flanking holds "
+              "never left -- it is a pure detection dropout, consistent with a "
+              "counting defect (not annihilation/re-nucleation).")
+    md.append("")
+
+    # ---- Report: A2 ---------------------------------------------------------
+    md.append("### A2 -- is the missing soliton the most strongly interacting?")
+    md.append("")
+    md.append("Rank 1 = tightest nearest-neighbour separation (interacts "
+              "hardest, breathes deepest). `rank_flank` is computed on the "
+              "event-neighbourhood positions; `rank_seed` maps the missing "
+              "soliton back to its seed (rigid-rotation cyclic map) and ranks "
+              "the seed separations.")
+    md.append("")
+    md.append("| file | seed | dw/k | missing angle | rank_flank (of N) | "
+              "seed idx | rank_seed (of n) |")
+    md.append("|---|---|---|---|---|---|---|")
+    seed_of = {}
+    for name, path in files:
+        if path.exists():
+            _, cfg = load_sweep_npz(path)
+            seed_of[name] = int(cfg.position_seed)
+    for r in a1_rows:
+        md.append(f"| {r['file']} | {seed_of.get(r['file'],'?')} | {r['dw']:.3f} "
+                  f"| {r['miss']:.3f} | "
+                  f"{r['rank_flank']}/{r['n']} | {r['seed_idx']} | "
+                  f"{r['rank_seed']}/{r['n_seed']} |")
+    md.append("")
+    shared = {}
+    for r in a1_rows:
+        shared.setdefault(seed_of.get(r["file"]), []).append(
+            (r["file"], r["seed_idx"]))
+    md.append("Same seed-relative soliton across variants sharing a seed: "
+              + "; ".join(f"seed {s}: "
+                          + ", ".join(f"{f}->idx {i}" for f, i in v)
+                          for s, v in shared.items()) + ".")
+    md.append("(primary and variant_2 share seed 1 but have NO "
+              "monotonicity-violating hold, so only variant_3 supplies a "
+              "seed-1 dropout to locate.)")
+    md.append("")
+
+    # ---- Report: A3 ---------------------------------------------------------
+    md.append("### A3 -- agreement==0 holds (soliton-bearing)")
+    md.append("")
+    md.append("The raw per-cluster `persistence_fractions` are computed by "
+              "`count_solitons_windowed` but NOT persisted to the npz (only "
+              "`count_agreement` and the final accepted cluster angles are), so "
+              "the per-cluster fraction breakdown the brief asks for is "
+              "deferred to the instrumented Stage B run. From the stored counts "
+              "the two signatures still separate: `undercount` (a cluster fell "
+              "below min_persistence, so N < envelope) vs `correct-count` "
+              "(all N clusters kept but no single snapshot saw all N).")
+    md.append("")
+    md.append("| file | dw/k | N | envelope | N_end-snap | count_agreement | "
+              "category |")
+    md.append("|---|---|---|---|---|---|---|")
+    for r in a3_rows:
+        md.append(f"| {r['file']} | {r['dw']:.3f} | {r['N']} | {r['env']} | "
+                  f"{r['N_end']} | {r['agree']:.3f} | {r['category']} |")
+    md.append("")
+
+    # ---- GATE + verdict -----------------------------------------------------
+    all_persist = bool(a1_rows) and all(persist_all)
+    md.append("### Stage-A gate")
+    md.append("")
+    if not a1_rows:
+        md.append("- No monotonicity-violating hold found; nothing to gate on.")
+        gate = "no-events"
+    elif all_persist:
+        md.append(f"- **POSITION PERSISTENCE CONFIRMED** at all "
+                  f"{len(a1_rows)} monotonicity events: every missing soliton "
+                  f"sits at the same angle in both flanks (max "
+                  f"before<->after gap "
+                  f"{max(r['gap'] for r in a1_rows):.4f} rad). The dropouts are "
+                  f"a COUNTING defect, not physics rearrangement -> Stage B "
+                  f"(instrumented run) may proceed.")
+        gate = "proceed"
+    else:
+        md.append("- **POSITION REARRANGEMENT DETECTED**: at least one missing "
+                  "soliton does not persist through the event, so it may be a "
+                  "physics event. **GATE: STOP** -- Stage B must not run.")
+        gate = "stop"
+    md.append("")
+
+    out = RESULTS_DIR / REPORT_MD
+    prior = out.read_text(encoding="utf-8") if out.exists() else ""
+    marker = "\n## Detectability (offline; Stage A)"
+    if marker in prior:
+        prior = prior[:prior.index(marker)].rstrip() + "\n"
+    out.write_text(prior.rstrip() + "\n" + "\n".join(md) + "\n", encoding="utf-8")
+    for r in a1_rows:
+        print(f"[detectability] {r['file']} @ {r['dw']:.3f}k: missing "
+              f"{r['miss']:.3f} rad, persists={r['persists']} "
+              f"(gap {r['gap']:.4f}), rank_flank {r['rank_flank']}/{r['n']}, "
+              f"N_end={r['N_end']}")
+    print(f"[detectability] agreement==0 holds tabulated: {len(a3_rows)} "
+          f"(persistence_fractions NOT stored -> deferred to Stage B)")
+    print(f"[detectability] STAGE-A GATE: {gate.upper()} "
+          f"(position persistence at all events: {all_persist})")
+    print(f"[detectability] report -> {out}")
+    return 0
+
+
 def main() -> None:
     import argparse
     ap = argparse.ArgumentParser(description=__doc__)
@@ -604,9 +876,16 @@ def main() -> None:
                          "primary + robustness variant npzs (Part A); appends a "
                          "section to staircase_forensics.md and prints a "
                          "CONFIRMED / NOT CONFIRMED verdict")
+    ap.add_argument("--detectability", action="store_true",
+                    help="offline detectability diagnosis (Stage A): missing-"
+                         "cluster position persistence at monotonicity events, "
+                         "seed nearest-neighbour ranking, agreement==0 "
+                         "categorisation; appends a section and gates Stage B")
     args = ap.parse_args()
     if args.starvation:
         sys.exit(starvation_forensics())
+    if args.detectability:
+        sys.exit(detectability_forensics())
 
     sweep, cfg, audit_lines, missing = load_and_audit()
     for ln in audit_lines:

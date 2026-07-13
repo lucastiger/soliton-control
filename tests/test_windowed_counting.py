@@ -197,3 +197,20 @@ def test_count_agreement_quantization_signature():
     assert _empirical_denominator(eighths) == 8         # => n_in = 8, not 2
     assert _on_grid(eighths, 8) is True
     assert _on_grid(eighths, 2) is False                # not halves {0,0.5,1}
+
+
+def test_detectability_missing_cluster_and_nn_rank():
+    # A soliton present in the flank but dropped at the event: greedy match
+    # against the flank leaves exactly that angle unmatched (a dropout).
+    from analysis.staircase_forensics import (_greedy_unmatched,
+                                              _nn_separations, _rank_smallest)
+    flank = [0.05, 1.10, 2.40, 3.65, 4.44]     # 5 solitons
+    event = [1.10, 2.40, 3.65, 4.44]           # the 0.05 one dropped
+    missing = _greedy_unmatched(event, flank, tol=0.05)
+    assert len(missing) == 1 and abs(missing[0] - 0.05) < 1e-9
+    # nearest-neighbour separations + rank of the (tightest) missing soliton
+    nn = _nn_separations(flank)
+    # the 0.05 <-> 4.44 pair straddles the seam (gap ~1.9 rad); 1.10 is closest
+    # to nothing tighter than ~1.0 -- just assert ranking is well-formed
+    assert _rank_smallest(nn, min(nn)) == 1
+    assert 1 <= _rank_smallest(nn, nn[0]) <= len(flank)

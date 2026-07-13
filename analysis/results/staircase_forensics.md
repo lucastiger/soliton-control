@@ -131,3 +131,45 @@ Driver cadence: `snap_int = max(hold_rt // 32, 1)` (`analysis/run_detuning_sweep
 - The aliasing indicator `snap_int/T_b` is < 1 at every failing hold (snapshots OVERSAMPLE the breathing cycle by ~3x), so phase-aliasing is not the mechanism.
 - **GATE (per the brief): STOP.** The counter had many (~8) phase-spread samples and still failed at isolated deep-breather holds, so the failure mechanism is NOT starvation. Densification / threshold / protocol work must not proceed on the falsified hypothesis; the residual (individual solitons dipping below the rel-height floor during their breathing troughs at these specific holds) needs its own verification before any fix.
 
+## Detectability (offline; Stage A)
+
+Generated 2026-07-13T03:28:26.726382+00:00 by `analysis/staircase_forensics.py --detectability` (offline; no solver run). Working hypothesis: the count defect is a RELATIVE-threshold detectability problem -- a trough-phase soliton is rejected when a sibling is at crest because the candidate floor `rel_height_candidate * snapshot_max` couples each soliton's detection to the others' breathing phases.
+
+### A1 -- missing cluster at each monotonicity-violating hold
+
+| file | dw/k | N | N_end-snap | missing angle | in before | in after | before<->after gap | persists (dropout) |
+|---|---|---|---|---|---|---|---|---|
+| variant_1 | 6.750 | 4 | 1 | 0.057 | yes | yes | 0.0176 | **YES** |
+| variant_3 | 6.997 | 4 | 2 | 3.028 | yes | yes | 0.0090 | **YES** |
+
+A missing soliton present at the SAME angle (within the 0.1 rad drift budget) in BOTH flanking holds never left -- it is a pure detection dropout, consistent with a counting defect (not annihilation/re-nucleation).
+
+### A2 -- is the missing soliton the most strongly interacting?
+
+Rank 1 = tightest nearest-neighbour separation (interacts hardest, breathes deepest). `rank_flank` is computed on the event-neighbourhood positions; `rank_seed` maps the missing soliton back to its seed (rigid-rotation cyclic map) and ranks the seed separations.
+
+| file | seed | dw/k | missing angle | rank_flank (of N) | seed idx | rank_seed (of n) |
+|---|---|---|---|---|---|---|
+| variant_1 | 2 | 6.750 | 0.057 | 3/5 | 4 | 3/5 |
+| variant_3 | 1 | 6.997 | 3.028 | 1/5 | 2 | 1/5 |
+
+Same seed-relative soliton across variants sharing a seed: seed 2: variant_1->idx 4; seed 1: variant_3->idx 2.
+(primary and variant_2 share seed 1 but have NO monotonicity-violating hold, so only variant_3 supplies a seed-1 dropout to locate.)
+
+### A3 -- agreement==0 holds (soliton-bearing)
+
+The raw per-cluster `persistence_fractions` are computed by `count_solitons_windowed` but NOT persisted to the npz (only `count_agreement` and the final accepted cluster angles are), so the per-cluster fraction breakdown the brief asks for is deferred to the instrumented Stage B run. From the stored counts the two signatures still separate: `undercount` (a cluster fell below min_persistence, so N < envelope) vs `correct-count` (all N clusters kept but no single snapshot saw all N).
+
+| file | dw/k | N | envelope | N_end-snap | count_agreement | category |
+|---|---|---|---|---|---|---|
+| primary | 7.050 | 5 | 5 | 2 | 0.000 | correct-count, no unanimous snapshot |
+| primary | 7.075 | 5 | 5 | 3 | 0.000 | correct-count, no unanimous snapshot |
+| variant_1 | 6.500 | 5 | 5 | 2 | 0.000 | correct-count, no unanimous snapshot |
+| variant_3 | 6.785 | 5 | 5 | 3 | 0.000 | correct-count, no unanimous snapshot |
+| variant_3 | 6.810 | 5 | 5 | 4 | 0.000 | correct-count, no unanimous snapshot |
+| variant_3 | 6.960 | 5 | 5 | 1 | 0.000 | correct-count, no unanimous snapshot |
+
+### Stage-A gate
+
+- **POSITION PERSISTENCE CONFIRMED** at all 2 monotonicity events: every missing soliton sits at the same angle in both flanks (max before<->after gap 0.0176 rad). The dropouts are a COUNTING defect, not physics rearrangement -> Stage B (instrumented run) may proceed.
+
