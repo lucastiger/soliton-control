@@ -214,8 +214,8 @@
         true,
         false,
         false,
-        false,
         true,
+        false,
         false,
         false,
         false,
@@ -315,7 +315,7 @@
         "position_seed": 1,
         "position_jitter_frac": 0.25
       },
-      "generated_utc": "2026-07-12T04:48:12.380396+00:00"
+      "generated_utc": "2026-07-13T10:14:44.310936+00:00"
     },
     "any_soliton_region_over_kappa": [
       6.199999999999999,
@@ -360,7 +360,7 @@
         "6.250": 3,
         "6.275": 3,
         "6.300": 3,
-        "6.325": 3,
+        "6.325": 4,
         "6.350": 4,
         "6.375": 4,
         "6.400": 4,
@@ -605,8 +605,8 @@
           "delta_n": 2
         },
         {
-          "edge_index": 33,
-          "dw_mid": 6.3374999999999995,
+          "edge_index": 32,
+          "dw_mid": 6.3125,
           "n_high_side": 4,
           "n_low_side": 3,
           "delta_n": 1
@@ -639,11 +639,11 @@
           "n_low_side": 1
         },
         {
-          "dw_mid": 6.3374999999999995,
+          "dw_mid": 6.3125,
           "delta_n": 1,
-          "step_dy": 0.10271525567412021,
-          "step_edge_index": 33,
-          "transition_edge_index": 33,
+          "step_dy": 0.056834704834087924,
+          "step_edge_index": 32,
+          "transition_edge_index": 32,
           "n_high_side": 4,
           "n_low_side": 3
         },
@@ -671,9 +671,9 @@
           "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
         },
         {
-          "dw_mid": 6.3125,
-          "step_dy": 0.056834704834087924,
-          "edge_index": 32,
+          "dw_mid": 6.3374999999999995,
+          "step_dy": 0.10271525567412021,
+          "edge_index": 33,
           "label": "power-trace discontinuity (no soliton_count change; at this device the near-resonance MI/CW power rise -- NOT a soliton step)"
         },
         {
@@ -1053,51 +1053,52 @@
       },
       "primary_observable": {
         "chosen": "P_comb",
-        "matched_step_contrast_P_intra": 30.091990674212298,
-        "matched_step_contrast_P_comb": 193.2502148307545,
+        "matched_step_contrast_P_intra": 38.63188450088004,
+        "matched_step_contrast_P_comb": 106.92977247582641,
         "rule": "P_comb is plotted as primary ONLY if its matched-step contrast (min matched |step_dy| / MAD of dy) strictly exceeds P_intra's; see primary_observable_decision for the full inputs"
       },
       "matched_staircase_edges_over_kappa": [
         6.2375,
-        6.3374999999999995,
+        6.3125,
         6.512499999999999
       ],
       "final_1_to_0_over_kappa": 6.1875,
       "honesty_note": "the final 1->0 annihilation MUST NOT be forced to register as a power step; whether it is matched is decided by the untouched detector on the plotted primary (see final_edge_note). The N->N-1 transitions above it are the staircase. No smoothing, no detector changes, no re-thresholding.",
       "soliton_count_gate": "windowed position-persistence count if (mode of the solver's per-snapshot label_history over the in-window snapshots is in SOLITON_LABELS = (4, 5, 6)) OR (finite field AND windowed count >= 1 AND contrast >= the labeler's soliton contrast floor contrast_high = 8) else 0. The taxonomy gate alone empirically zeroes genuine multi-soliton holds: the labeler's spectral-entropy chaos gate misroutes bright N-soliton combs to class 3 (see the driver docstring); MI/Turing states are position-persistent too, so the label gate (not the counter) keeps them at 0.",
       "counting": {
-        "method": "position_persistence",
+        "method": "position_persistence_v2_physics_anchor",
         "parameters": {
           "min_persistence": 0.5,
-          "rel_height_candidate": 0.25,
           "bg_floor_multiple": 5.0,
           "cluster_tol_rad": "per hold: max(10 * sqrt(d2_local / (2*delta_omega)), 8 * 2*pi / n_tau)",
-          "label_gate": "mode of solver label_history over the in-window snapshots (+ documented contrast-floor fallback)"
+          "label_gate": "mode of solver label_history over the in-window snapshots (+ documented contrast-floor fallback)",
+          "soliton_frac": 0.1,
+          "physics_anchor": "candidate floor = max(bg_floor_multiple * median(|E|^2), soliton_frac * B2_ref), B2_ref = 2*|delta_omega|/gamma (the analytic single-soliton peak power at the hold's detuning). The momentary-max relative arm was REMOVED: it coupled each soliton's detectability to its siblings' breathing phases (staircase_forensics.md, 4-F end-snapshot artifact -> 5-D RELATIVE-THRESHOLD COUPLING CONFIRMED)."
         },
         "count_agreement": {
           "median": 1.0,
-          "min": 0.0,
-          "fraction_below_1": 0.23371647509578544,
+          "min": 0.5,
+          "fraction_below_1": 0.0038314176245210726,
           "note": "fraction of holds where a single-snapshot count would have disagreed with the persistent count -- the artifact the windowed counter absorbs"
         },
         "legacy_diagnostic": "soliton_count_end_snapshot column (old end-of-hold single-snapshot count, old gate) kept in the npz",
-        "forensics": "analysis/results/staircase_forensics.md -- VERDICT: counting artifact (positions persist at the measurement ceiling; comb energy continuous to << 1 quantum through every count dip)"
+        "forensics": "analysis/results/staircase_forensics.md -- the full chain: 4-F (end-snapshot flicker = counting artifact) -> 5-R (snapshot starvation FALSIFIED: n_in = 8, agreement quantized in eighths) -> 5-D Stage A (missing solitons persist in position: detection dropout) -> 5-D Stage B (RELATIVE-THRESHOLD COUPLING CONFIRMED: victims pass the absolute floor in 100% of snapshots at 23-42x background, rejected only by the momentary-max arm) -> 5-X (this v2 physics-anchored rule)"
       }
     },
     "primary_observable_decision": {
       "rule": "P_comb is adopted as the PLOTTED primary ONLY if its matched-step contrast (min matched |step_dy| / MAD of dy) is strictly higher than total intracavity power's. Steps are the unchanged detect_power_steps detections on each normalised trace; a detection is matched when its edge coincides with a soliton_count transition edge (the power-muted final ->0 annihilation is excluded); a trace with no matched detection has contrast 0. Decided from the regenerated data.",
-      "matched_step_contrast_P_intra": 30.091990674212298,
-      "matched_step_contrast_P_comb": 193.2502148307545,
+      "matched_step_contrast_P_intra": 38.63188450088004,
+      "matched_step_contrast_P_comb": 106.92977247582641,
       "mad_dy_P_intra": 0.0009450376115897607,
       "mad_dy_P_comb": 0.000531514315593784,
       "matched_step_dy_P_intra": [
         0.15636485035291636,
-        0.028438062994738944,
+        0.03650858385992317,
         0.08420343710934897
       ],
       "matched_step_dy_P_comb": [
         0.3460425335669497,
-        0.10271525567412021,
+        0.056834704834087924,
         0.1692940003481147
       ],
       "detected_steps_P_intra_over_kappa": [
@@ -1193,12 +1194,12 @@
       ],
       "matched_detected_P_intra_over_kappa": [
         6.2375,
-        6.3374999999999995,
+        6.3125,
         6.512499999999999
       ],
       "matched_detected_P_comb_over_kappa": [
         6.2375,
-        6.3374999999999995,
+        6.3125,
         6.512499999999999
       ],
       "plotted_primary": "P_comb",
