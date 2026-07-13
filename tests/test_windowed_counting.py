@@ -62,11 +62,16 @@ def test_single_snapshot_undercounts_where_windowed_counter_does_not():
     single = [count_temporal_peaks(s) for s in snaps]
     assert min(single) < 5, single
     # ... while the windowed position-persistence count over >= 8
-    # phase-spread snapshots recovers exactly 5, and honestly reports that
-    # the single-snapshot counts disagreed (count_agreement < 1)
+    # phase-spread snapshots recovers exactly 5.  Under the ORIGINAL windowed
+    # rule (0.25-of-momentary-max relative arm) this test asserted
+    # count_agreement < 1.0: the relative arm still dropped trough pulses in
+    # SOME snapshots and only persistence absorbed it -- that internal
+    # disagreement WAS the 5-D coupling defect.  With the physics-anchored
+    # floor (no momentary-max term) every pulse passes in every snapshot, so
+    # the per-snapshot counts are unanimous: agreement is exactly 1.0.
     res = count_solitons_windowed(snaps, cluster_tol_rad=0.05)
     assert res["count"] == 5
-    assert res["count_agreement"] < 1.0
+    assert res["count_agreement"] == 1.0
     assert len(res["per_snapshot_counts"]) == snaps.shape[0]
     # the persistent cluster angles recover the true pulse positions
     assert res["cluster_angles_rad"].shape == (5,)
@@ -173,6 +178,106 @@ def test_cluster_tolerance_from_cavity_parameters():
     snaps, _ = _breathing_snapshots()
     res = count_solitons_windowed(snaps, delta_omega=1.5e9, cav=_Cav())
     assert res["count"] == 5
+
+
+# ---------------------------------------------------------------------------
+# 5-D regression: adversarial sibling-phase locking (the RELATIVE-THRESHOLD
+# COUPLING defect, staircase_forensics.md Stage B).  One soliton's modulation
+# trough coincides with a sibling's crest in EVERY snapshot, so under any
+# momentary-max rule the victim is rejected in every snapshot even though it
+# always sits far above the physical background.  The physics-anchored rule
+# (bg floor + soliton_frac * B2_ref) must count all 5 with persistence 1.0.
+# ---------------------------------------------------------------------------
+# Physics scale of this fixture: B2_ref = 2*DELTA_OMEGA/GAMMA_TEST = 1.0, i.e.
+# the nominal single-soliton peak power is 1.0 in fixture units.
+DELTA_OMEGA_TEST = 1.5e9
+GAMMA_TEST = 3.0e9          # -> B2_ref = 2 * 1.5e9 / 3.0e9 = 1.0
+
+
+def breathing_modulated_field(n_snap=8):
+    """The 5-D failure mode: victim trough phase-locked to a sibling's crest.
+
+    Five sech pulses on the CW background.  The victim (center 0.5) breathes
+    around 0.30 * B2_ref power while the locked sibling (center 3.0) breathes
+    around 2.5 * B2_ref, ANTI-phase, so in EVERY snapshot the victim sits
+    below 0.25 * momentary-max (the old relative arm) yet always >= 20x the
+    background and ~0.3 * B2_ref (a deep but ordinary breather trough).  The
+    other three pulses hold the nominal peak power 1.0 * B2_ref.
+    """
+    centers = np.array([0.5, 1.7, 3.0, 4.2, 5.5])
+    snaps = []
+    for k in range(n_snap):
+        s = np.sin(2.0 * np.pi * k / n_snap)
+        p_victim = 0.30 - 0.05 * s          # power in [0.25, 0.35]
+        p_crest = 2.50 + 0.50 * s           # power in [2.0, 3.0], anti-phase
+        amps = [np.sqrt(p_victim), 1.0, np.sqrt(p_crest), 1.0, 1.0]
+        snaps.append(_field(list(zip(centers, amps))))
+    return np.array(snaps), centers
+
+
+def test_5d_adversarial_lock_old_rule_undercounts_new_rule_does_not():
+    from scipy.signal import find_peaks
+
+    snaps, centers = breathing_modulated_field()
+    victim, others = centers[0], centers[1:]
+
+    # every pulse is always >= 20x the background power (the 5-D signature:
+    # the victim is never dim, it is only OUT-SHONE)
+    for s in snaps:
+        p = np.abs(s) ** 2
+        bg = float(np.median(p))
+        for c in centers:
+            i = int(round(c * N_TAU / (2 * np.pi))) % N_TAU
+            assert p[i] >= 20.0 * bg
+
+    # OLD rule, reconstructed locally (0.25 * momentary max + bg floor): the
+    # victim fails in EVERY snapshot (adversarial lock), the other four always
+    # pass -> persistence(victim) = 0 < 0.5 -> the old windowed count is 4.
+    for s in snaps:
+        p = np.abs(s) ** 2
+        floor_old = max(0.25 * float(p.max()), 5.0 * float(np.median(p)))
+        peaks, _ = find_peaks(np.concatenate([p, p]), height=floor_old)
+        angs = 2.0 * np.pi * np.unique(peaks % N_TAU) / N_TAU
+        assert not any(abs(_wrap(a - victim)) < 0.05 for a in angs)
+        for c in others:
+            assert any(abs(_wrap(a - c)) < 0.05 for a in angs)
+
+    # NEW physics-anchored rule: all five counted, every cluster persistence
+    # exactly 1.0 (no snapshot ever loses the victim).
+    res = count_solitons_windowed(snaps, cluster_tol_rad=0.05,
+                                  delta_omega=DELTA_OMEGA_TEST,
+                                  gamma=GAMMA_TEST)
+    assert res["count"] == 5
+    assert np.allclose(np.sort(res["cluster_angles_rad"]),
+                       np.sort(centers), atol=0.02)
+    assert len(res["persistence_fractions"]) == 5
+    assert all(f == 1.0 for f in res["persistence_fractions"])
+    assert res["count_agreement"] == 1.0
+
+
+def test_physics_anchor_arm_is_live():
+    # a persistent ripple at 0.06 * B2_ref: above the absolute bg floor but
+    # below soliton_frac * B2_ref = 0.1 -- only the anchor arm rejects it.
+    snaps, centers = breathing_modulated_field()
+    ripple = 2.4
+    snaps_r = np.array([s + np.sqrt(0.06) / np.cosh(
+        _wrap(THETA - ripple) / SECH_W) for s in snaps])
+    with_anchor = count_solitons_windowed(snaps_r, cluster_tol_rad=0.05,
+                                          delta_omega=DELTA_OMEGA_TEST,
+                                          gamma=GAMMA_TEST)
+    assert with_anchor["count"] == 5              # ripple below the anchor
+    no_anchor = count_solitons_windowed(snaps_r, cluster_tol_rad=0.05)
+    assert no_anchor["count"] == 6                # bg floor alone admits it
+
+
+def test_rel_height_candidate_is_deprecated_and_ignored():
+    snaps, _ = breathing_modulated_field()
+    with pytest.warns(DeprecationWarning, match="rel_height_candidate"):
+        res = count_solitons_windowed(snaps, cluster_tol_rad=0.05,
+                                      rel_height_candidate=0.25,
+                                      delta_omega=DELTA_OMEGA_TEST,
+                                      gamma=GAMMA_TEST)
+    assert res["count"] == 5                      # ignored, not applied
 
 
 # ---------------------------------------------------------------------------

@@ -134,10 +134,15 @@ breathers -- was forensically confirmed as a pure counting artifact
 ceiling, comb energy continuous to << 1 soliton quantum through every count
 dip).  ``soliton_count`` is now the POSITION-PERSISTENCE count over the
 hold's in-window snapshots (:func:`analysis.dks_access
-.count_solitons_windowed`): per-snapshot candidate peaks at a LOW relative
-threshold with an absolute CW-background floor, clustered circularly across
-snapshots, a cluster counting as a soliton iff it appears in >= half the
-snapshots.  The label arm of the gate now uses the MODE of the solver's
+.count_solitons_windowed`): per-snapshot candidate peaks above
+``max(bg_floor_multiple * median(|E|^2), soliton_frac * B2_ref)`` with
+``B2_ref = 2*|delta_omega|/gamma`` the analytic soliton peak power at the
+hold's detuning (v2 physics anchor -- the counter's original 0.25-of-
+momentary-max relative arm was removed after the Stage-B forensics verdict
+RELATIVE-THRESHOLD COUPLING CONFIRMED: any momentary-max term couples one
+soliton's detectability to its siblings' breathing phases), clustered
+circularly across snapshots, a cluster counting as a soliton iff it appears
+in >= half the snapshots.  The label arm of the gate now uses the MODE of the solver's
 per-snapshot ``label_history`` over the same window instead of the end field
 alone (Turing rolls / MI combs are also position-persistent -- the label
 gate, not the counter, keeps them at count 0), with the contrast fallback
@@ -269,6 +274,7 @@ from analysis.dks_access import (  # noqa: E402  (needs the sys.path insert)
     COUNT_BG_FLOOR_MULTIPLE,
     COUNT_MIN_PERSISTENCE,
     COUNT_REL_HEIGHT_CANDIDATE,
+    COUNT_SOLITON_FRAC,
     COUNT_TOL_MIN_CELLS,
     COUNT_TOL_WIDTHS,
     LABEL_SINGLE_SOLITON,
@@ -606,7 +612,7 @@ def run_detuning_sweep(cav, cfg: SweepConfig, *, config_path) -> dict:
                           else cav.fsr_hz)
     # Windowed-counter parameters actually used (schema-v4 provenance).
     out["count_min_persistence"] = float(COUNT_MIN_PERSISTENCE)
-    out["count_rel_height_candidate"] = float(COUNT_REL_HEIGHT_CANDIDATE)
+    out["count_soliton_frac"] = float(COUNT_SOLITON_FRAC)
     out["count_bg_floor_multiple"] = float(COUNT_BG_FLOOR_MULTIPLE)
     out["seed_metrics"] = seed_metrics
     return out
@@ -781,7 +787,7 @@ _NPZ_V3_INT_KEYS = ("schema_version", "n_solitons_seeded", "position_seed")
 NPZ_SCHEMA_VERSION = 4
 _NPZ_V4_STEP_KEYS = ("soliton_count_end_snapshot", "count_agreement")
 _NPZ_V4_FLOAT_KEYS = ("count_min_persistence", "count_rel_height_candidate",
-                      "count_bg_floor_multiple")
+                      "count_bg_floor_multiple", "count_soliton_frac")
 
 
 def save_sweep_npz(path: Path, sweep: dict, cfg: SweepConfig, *,
@@ -1154,19 +1160,38 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
         }
         if "count_agreement" in sweep:
             agree = np.asarray(sweep["count_agreement"], dtype=float)[order]
+            # v2 sweeps carry count_soliton_frac (the physics anchor); pre-fix
+            # v4 files carry count_rel_height_candidate (the removed relative
+            # arm) -- the method name and parameter set follow the file.
+            v2 = "count_soliton_frac" in sweep
+            counting_params = {
+                "min_persistence": sweep.get("count_min_persistence"),
+                "bg_floor_multiple": sweep.get("count_bg_floor_multiple"),
+                "cluster_tol_rad": "per hold: max(10 * sqrt(d2_local / "
+                                   "(2*delta_omega)), 8 * 2*pi / n_tau)",
+                "label_gate": "mode of solver label_history over the "
+                              "in-window snapshots (+ documented "
+                              "contrast-floor fallback)",
+            }
+            if v2:
+                counting_params["soliton_frac"] = sweep.get(
+                    "count_soliton_frac")
+                counting_params["physics_anchor"] = (
+                    "candidate floor = max(bg_floor_multiple * median(|E|^2), "
+                    "soliton_frac * B2_ref), B2_ref = 2*|delta_omega|/gamma "
+                    "(the analytic single-soliton peak power at the hold's "
+                    "detuning). The momentary-max relative arm was REMOVED: "
+                    "it coupled each soliton's detectability to its siblings' "
+                    "breathing phases (staircase_forensics.md, 4-F end-"
+                    "snapshot artifact -> 5-D RELATIVE-THRESHOLD COUPLING "
+                    "CONFIRMED).")
+            else:
+                counting_params["rel_height_candidate"] = sweep.get(
+                    "count_rel_height_candidate")
             block["staircase"]["counting"] = {
-                "method": "position_persistence",
-                "parameters": {
-                    "min_persistence": sweep.get("count_min_persistence"),
-                    "rel_height_candidate": sweep.get(
-                        "count_rel_height_candidate"),
-                    "bg_floor_multiple": sweep.get("count_bg_floor_multiple"),
-                    "cluster_tol_rad": "per hold: max(10 * sqrt(d2_local / "
-                                       "(2*delta_omega)), 8 * 2*pi / n_tau)",
-                    "label_gate": "mode of solver label_history over the "
-                                  "in-window snapshots (+ documented "
-                                  "contrast-floor fallback)",
-                },
+                "method": ("position_persistence_v2_physics_anchor" if v2
+                           else "position_persistence"),
+                "parameters": counting_params,
                 "count_agreement": {
                     "median": float(np.median(agree)),
                     "min": float(np.min(agree)),
@@ -1179,10 +1204,16 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
                                      "(old end-of-hold single-snapshot "
                                      "count, old gate) kept in the npz",
                 "forensics": "analysis/results/staircase_forensics.md -- "
-                             "VERDICT: counting artifact (positions persist "
-                             "at the measurement ceiling; comb energy "
-                             "continuous to << 1 quantum through every "
-                             "count dip)",
+                             "the full chain: 4-F (end-snapshot flicker = "
+                             "counting artifact) -> 5-R (snapshot starvation "
+                             "FALSIFIED: n_in = 8, agreement quantized in "
+                             "eighths) -> 5-D Stage A (missing solitons "
+                             "persist in position: detection dropout) -> 5-D "
+                             "Stage B (RELATIVE-THRESHOLD COUPLING CONFIRMED: "
+                             "victims pass the absolute floor in 100% of "
+                             "snapshots at 23-42x background, rejected only "
+                             "by the momentary-max arm) -> 5-X (this v2 "
+                             "physics-anchored rule)",
             }
         block["primary_observable_decision"] = {
             "rule": ("P_comb is adopted as the PLOTTED primary ONLY if its "
@@ -1569,9 +1600,12 @@ def run_robustness(base_cfg: SweepConfig, *, config_path) -> dict:
                           "(ii) hold_rt 2000->1600, (iii) n_steps doubled "
                           "(detuning spacing halved)"),
         "counter": ("hardened position-persistence windowed counter "
-                    "(count_solitons_windowed) throughout; detect_power_steps, "
-                    "the 1-sample alignment tolerance and the monotonicity gate "
-                    "are unchanged"),
+                    "(count_solitons_windowed, v2 physics anchor: candidate "
+                    "floor = max(bg_floor_multiple * median, soliton_frac * "
+                    "B2_ref) -- the momentary-max relative arm was removed "
+                    "per the 5-D coupling verdict) throughout; "
+                    "detect_power_steps, the 1-sample alignment tolerance and "
+                    "the monotonicity gate are unchanged"),
         "invariants": {
             "structure": (">= 2 matched (state-verified) steps AND soliton_count "
                           "monotone non-increasing along the descending sweep "
@@ -1613,7 +1647,7 @@ def _append_provenance_robustness(block: dict) -> None:
     if path.exists():
         with open(path) as f:
             data = json.load(f)
-    data[ROBUSTNESS_JSON_KEY] = {
+    entry = {
         "all_pass": block["all_pass"],
         "generated_utc": block["generated_utc"],
         "perturbations": block["perturbations"],
@@ -1629,6 +1663,12 @@ def _append_provenance_robustness(block: dict) -> None:
              "npz": v.get("npz")}
             for v in block["variants"]],
     }
+    # Prior mirrors are preserved under "history" (oldest first), never
+    # deleted -- failed runs are findings and stay part of the record.
+    prior = data.get(ROBUSTNESS_JSON_KEY)
+    if prior is not None:
+        entry["history"] = prior.pop("history", []) + [prior]
+    data[ROBUSTNESS_JSON_KEY] = entry
     with open(path, "w") as f:
         json.dump(data, f, indent=2, default=float)
 
@@ -1773,7 +1813,12 @@ def run_diagnose_counting(name: str, *, config_path) -> dict:
     cfg = SweepConfig(**json.loads(str(d["sweep_config_json"])))
     cav = attach_dispersion(load_cavity_params(), cfg.n_tau)
     kappa, n_tau = cav.kappa, int(cfg.n_tau)
+    # abs/phys are the two arms of the CURRENT (v2 physics-anchored) rule:
+    # accepted iff local max >= max(abs_t, phys_t) <=> above_abs AND
+    # above_phys.  rel is the REMOVED legacy relative arm, recorded only as a
+    # before/after reference trace (it no longer gates anything).
     rel_k, abs_k = COUNT_REL_HEIGHT_CANDIDATE, COUNT_BG_FLOOR_MULTIPLE
+    frac_k = COUNT_SOLITON_FRAC
     n_sol = int(cfg.n_solitons)
 
     print(f"[diagnose] {name}: reproduce config verbatim "
@@ -1826,15 +1871,21 @@ def run_diagnose_counting(name: str, *, config_path) -> dict:
         b2 = 2.0 * dweff_mean / cav.gamma
 
         n_in = int(in_snaps.shape[0])
+        # The counter's anchor uses the NOMINAL hold detuning (what the driver
+        # passes as delta_omega); b2 above keeps the effective-detuning value
+        # as the physics reference column.
+        phys_t = frac_k * (2.0 * (dwk * kappa) / cav.gamma)
         smax = np.empty(n_in)
         medbg = np.empty(n_in)
         # per persistent cluster + one missing slot
         cl_lmax = np.full((n_in, n_sol), np.nan)
         cl_rel = np.zeros((n_in, n_sol), bool)
         cl_abs = np.zeros((n_in, n_sol), bool)
+        cl_phys = np.zeros((n_in, n_sol), bool)
         ms_lmax = np.full(n_in, np.nan)
         ms_rel = np.zeros(n_in, bool)
         ms_abs = np.zeros(n_in, bool)
+        ms_phys = np.zeros(n_in, bool)
         for s in range(n_in):
             p = np.abs(in_snaps[s]) ** 2
             smax[s] = float(p.max())
@@ -1846,18 +1897,21 @@ def run_diagnose_counting(name: str, *, config_path) -> dict:
                 cl_lmax[s, ci] = lm
                 cl_rel[s, ci] = lm >= rel_t
                 cl_abs[s, ci] = lm >= abs_t
+                cl_phys[s, ci] = lm >= phys_t
             if np.isfinite(miss_angle):
                 lm = _diag_local_max(p, miss_angle, tol, n_tau)
                 ms_lmax[s] = lm
                 ms_rel[s] = lm >= rel_t
                 ms_abs[s] = lm >= abs_t
+                ms_phys[s] = lm >= phys_t
         rows.append(dict(
             dw=float(dwk), dweff=dweff_mean, b2=float(b2),
+            phys_t=float(phys_t),
             count=int(wc["count"]), agree=float(wc["count_agreement"]),
             tol=tol, kind=kind, miss_angle=float(miss_angle),
             n_cluster=len(clusters), smax=smax, medbg=medbg,
-            cl_lmax=cl_lmax, cl_rel=cl_rel, cl_abs=cl_abs,
-            ms_lmax=ms_lmax, ms_rel=ms_rel, ms_abs=ms_abs))
+            cl_lmax=cl_lmax, cl_rel=cl_rel, cl_abs=cl_abs, cl_phys=cl_phys,
+            ms_lmax=ms_lmax, ms_rel=ms_rel, ms_abs=ms_abs, ms_phys=ms_phys))
         if kind:
             frac_relvic = float(np.mean(ms_abs & ~ms_rel)) if np.isfinite(
                 miss_angle) else float("nan")
@@ -1891,14 +1945,18 @@ def run_diagnose_counting(name: str, *, config_path) -> dict:
         "snapshot_max": stack("smax"), "median_bg": stack("medbg"),
         "rel_thresh": COUNT_REL_HEIGHT_CANDIDATE * stack("smax"),
         "abs_thresh": COUNT_BG_FLOOR_MULTIPLE * stack("medbg"),
+        "phys_thresh": np.array([r["phys_t"] for r in rows]),
         "cluster_local_max": stack("cl_lmax"),
         "cluster_above_rel": stack("cl_rel"),
         "cluster_above_abs": stack("cl_abs"),
+        "cluster_above_phys": stack("cl_phys"),
         "missing_local_max": stack("ms_lmax"),
         "missing_above_rel": stack("ms_rel"),
         "missing_above_abs": stack("ms_abs"),
+        "missing_above_phys": stack("ms_phys"),
         "rel_height_candidate": float(COUNT_REL_HEIGHT_CANDIDATE),
         "bg_floor_multiple": float(COUNT_BG_FLOOR_MULTIPLE),
+        "soliton_frac": float(COUNT_SOLITON_FRAC),
         "min_persistence": float(COUNT_MIN_PERSISTENCE),
         "n_in_snapshots": int(n_in),
         "early_stop_over_kappa": float(dw_stop),
@@ -2013,7 +2071,16 @@ def main() -> None:
         # Record the full result (JSON block + provenance mirror) BEFORE any
         # escalation, so the pass/fail record is complete even on failure; these
         # are separate keys and never modify the primary soliton_step block.
-        _update_json(RESULTS_DIR / METRICS_JSON, ROBUSTNESS_JSON_KEY, block)
+        # Prior runs are preserved under "history" (oldest first), never
+        # deleted -- the failed starved-counter/coupling records are findings
+        # and stay part of the artifact.
+        metrics_path = RESULTS_DIR / METRICS_JSON
+        if metrics_path.exists():
+            with open(metrics_path) as f:
+                prior = json.load(f).get(ROBUSTNESS_JSON_KEY)
+            if prior is not None:
+                block["history"] = prior.pop("history", []) + [prior]
+        _update_json(metrics_path, ROBUSTNESS_JSON_KEY, block)
         _append_provenance_robustness(block)
         print(f"\n[robustness] json  -> {RESULTS_DIR / METRICS_JSON} "
               f"({ROBUSTNESS_JSON_KEY})")
