@@ -269,6 +269,8 @@ from analysis.dks_access import (  # noqa: E402  (needs the sys.path insert)
     COUNT_BG_FLOOR_MULTIPLE,
     COUNT_MIN_PERSISTENCE,
     COUNT_REL_HEIGHT_CANDIDATE,
+    COUNT_TOL_MIN_CELLS,
+    COUNT_TOL_WIDTHS,
     LABEL_SINGLE_SOLITON,
     PIN_W,
     PRODUCTION_NUMERICS,
@@ -505,6 +507,13 @@ def run_detuning_sweep(cav, cfg: SweepConfig, *, config_path) -> dict:
         # HARDENED per-hold soliton count: position persistence over the
         # in-window snapshots (the forensics verdict on the committed sweep --
         # counting artifact -- keyed on the end-of-hold single-snapshot count).
+        # NON-CIRCULARITY GUARD: the counter is fed ONLY this hold's in-window
+        # snapshots -- no cluster angles carried from a neighbouring hold, no
+        # "previous count" prior, no monotonic constraint.  The count must stay
+        # memoryless per hold, or the monotonicity gate
+        # (validate_staircase_alignment) it feeds would be measuring an answer
+        # that partly inherited its neighbour's.  Any future cross-hold soliton
+        # tracking must be a SEPARATE diagnostic column, never the counted value.
         wc = count_solitons_windowed(snaps[in_window],
                                      delta_omega=dwk * kappa, cav=cav)
         # Label gate on the WINDOW: mode of the solver's per-snapshot
@@ -1644,6 +1653,258 @@ def _abort_on_failed_robustness(block: dict) -> None:
     sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# Stage-B instrumented diagnostic (--diagnose-counting): observe the counter's
+# per-snapshot detection inputs at the robustness failing holds to test the
+# relative-threshold coupling hypothesis (a trough-phase soliton rejected by
+# rel_height_candidate * snapshot_max when a sibling is at crest).  Observes
+# count_solitons_windowed; changes NO counting logic, threshold, or gate.
+#
+# NON-CIRCULARITY GUARD (invariant, enforced by construction here and required
+# of any future change): the per-hold soliton count MUST be memoryless -- the
+# counter is fed ONLY this hold's in-window snapshots, with no carried-over
+# cluster angles from an adjacent hold, no "previous count" prior, and no
+# monotonic constraint.  The monotonicity GATE
+# (validate_staircase_alignment) is only meaningful because each hold's count
+# is measured independently; a count that inherited a neighbour's answer could
+# never expose the monotonicity break this whole investigation rests on.  The
+# flank-recovered "missing angle" instrumented below is a DIAGNOSTIC-ONLY probe
+# of a known dropout location -- it is never fed back into the counted value.
+# ---------------------------------------------------------------------------
+DIAGNOSE_EARLY_STOP_KAPPA = 0.3   # dw_stop override = lowest failing hold - this
+
+
+def _diag_unmatched(src, dst, tol: float = 0.05) -> list:
+    """dst angles not covered by any src angle within ``tol`` (circular, 1:1)."""
+    src = [float(x) for x in src]
+    dst = [float(x) for x in dst]
+    used = set()
+    for a in src:
+        best, bd = None, 1e9
+        for k, b in enumerate(dst):
+            if k in used:
+                continue
+            dd = abs(float(np.angle(np.exp(1j * (a - b)))))
+            if dd < bd:
+                bd, best = dd, k
+        if best is not None and bd <= tol:
+            used.add(best)
+    return [dst[k] for k in range(len(dst)) if k not in used]
+
+
+def _diag_cluster_tol_rad(cav, delta_omega, n_tau) -> float:
+    """The counter's clustering tolerance at this hold (replicated, read-only).
+
+    Mirrors :func:`count_solitons_windowed`'s default tolerance EXACTLY --
+    ``max(COUNT_TOL_WIDTHS * w, COUNT_TOL_MIN_CELLS * 2*pi/n_tau)`` with
+    ``w = sqrt(d2 / (2|delta_omega|))`` -- so the local-max search window
+    matches the counter's own clustering scale; the counter is untouched.
+    """
+    d2 = cav.d2_local if cav.d2_local is not None else cav.d2
+    w = float(np.sqrt(d2 / (2.0 * abs(float(delta_omega)))))
+    return float(max(COUNT_TOL_WIDTHS * w,
+                     COUNT_TOL_MIN_CELLS * 2.0 * np.pi / n_tau))
+
+
+def _diag_local_max(power, angle, tol_rad, n_tau) -> float:
+    """Max ``|E|^2`` within +/- ``tol_rad`` of ``angle`` on the ring (circular)."""
+    center = int(round(float(angle) * n_tau / (2.0 * np.pi))) % n_tau
+    half = max(1, int(round(tol_rad * n_tau / (2.0 * np.pi))))
+    idx = (center + np.arange(-half, half + 1)) % n_tau
+    return float(np.asarray(power)[idx].max())
+
+
+def _variant_failing_holds(name: str) -> dict:
+    """Failing holds of a committed variant npz: ``{dw: (kind, missing_angle)}``.
+
+    ``kind`` in ``{'mono', 'agree0'}``; ``missing_angle`` is the circular-mean
+    flank-recovered angle of the dropped soliton at a monotonicity hold (NaN
+    for agree0 holds, where no cluster is dropped).  Read-only on the committed
+    variant npz -- this only tells the diagnostic WHERE to look; it never feeds
+    the counter.
+    """
+    d = np.load(RESULTS_DIR / ROBUSTNESS_DIRNAME / f"{name}.npz",
+                allow_pickle=False)
+    order = np.argsort(d["dw_over_kappa"])
+    dw = d["dw_over_kappa"][order]
+    c = d["soliton_count"][order].astype(int)
+    ca = d["count_agreement"][order].astype(float)
+    pos = d["peak_positions_rad"][order]
+    out = {}
+    for j in (np.nonzero(np.diff(c) < 0)[0] + 1):
+        if j == 0 or j + 1 >= c.size:
+            continue
+        ev = pos[j][np.isfinite(pos[j])]
+        mb = _diag_unmatched(ev, pos[j - 1][np.isfinite(pos[j - 1])])
+        ma = _diag_unmatched(ev, pos[j + 1][np.isfinite(pos[j + 1])])
+        if mb and ma:
+            angle = float(np.angle(np.exp(1j * mb[0]) + np.exp(1j * ma[0]))
+                          ) % (2.0 * np.pi)
+        elif mb or ma:
+            angle = float((mb or ma)[0])
+        else:
+            angle = float("nan")
+        out[float(dw[j])] = ("mono", angle)
+    for j in np.nonzero((c >= 1) & (ca == 0.0))[0]:
+        out.setdefault(float(dw[j]), ("agree0", float("nan")))
+    return out
+
+
+def run_diagnose_counting(name: str, *, config_path) -> dict:
+    """Instrumented re-run of a named variant to probe the detection inputs.
+
+    Reproduces the variant's config VERBATIM (from its committed npz's
+    ``sweep_config_json``), warm-continues DOWN to an early stop
+    (:data:`DIAGNOSE_EARLY_STOP_KAPPA` below the lowest failing hold), and
+    records, per hold and per in-window snapshot: ``snapshot_max``, median
+    background, the rel/abs candidate thresholds, the analytic CW background
+    ``B^2 = 2*delta_omega_eff/gamma``, and -- for every persistent cluster
+    (plus, at a monotonicity hold, the flank-recovered MISSING soliton) -- the
+    local ``|E|^2`` max within ``cluster_tol`` and the booleans ``above_rel`` /
+    ``above_abs``.  ``count_solitons_windowed`` is called exactly as the driver
+    calls it and only observed.  Returns the stacked sidecar dict.
+    """
+    failing = _variant_failing_holds(name)
+    if not failing:
+        raise RuntimeError(f"{name}: no failing holds to diagnose")
+    dw_stop = min(failing) - DIAGNOSE_EARLY_STOP_KAPPA
+    d = np.load(RESULTS_DIR / ROBUSTNESS_DIRNAME / f"{name}.npz",
+                allow_pickle=False)
+    cfg = SweepConfig(**json.loads(str(d["sweep_config_json"])))
+    cav = attach_dispersion(load_cavity_params(), cfg.n_tau)
+    kappa, n_tau = cav.kappa, int(cfg.n_tau)
+    rel_k, abs_k = COUNT_REL_HEIGHT_CANDIDATE, COUNT_BG_FLOOR_MULTIPLE
+    n_sol = int(cfg.n_solitons)
+
+    print(f"[diagnose] {name}: reproduce config verbatim "
+          f"(seed={cfg.position_seed}, hold_rt={cfg.hold_rt}, "
+          f"n_steps={cfg.n_steps}); failing holds "
+          f"{sorted(round(k, 3) for k in failing)}; early stop dw>={dw_stop:.3f}k")
+    seed_field = sech_soliton_seed(
+        cfg.dw_start_kappa * kappa, cav, n_tau=n_tau, pin=cfg.pin_w,
+        n_solitons=n_sol, position_seed=int(cfg.position_seed),
+        position_jitter_frac=float(cfg.position_jitter_frac))
+    sol0 = _run(cfg.dw_start_kappa * kappa, int(cfg.settle_rt), cav,
+                e0=seed_field, seed=int(cfg.seed), n_tau=n_tau, pin=cfg.pin_w,
+                snapshot_interval=int(cfg.settle_rt), config_path=config_path,
+                **PRODUCTION_NUMERICS)
+    e_prev = np.asarray(sol0["e_final"])[0]
+    dt_prev = float(np.asarray(sol0["delta_t_final"]).reshape(-1)[0])
+    n_settled = count_temporal_peaks(e_prev)
+    if n_settled != n_sol:
+        raise RuntimeError(f"{name}: settled {n_settled} != {n_sol} solitons")
+
+    snap_int = max(int(cfg.hold_rt) // 32, 1)
+    rows = []
+    for i, dwk in enumerate(cfg.detunings_kappa()):
+        if dwk < dw_stop - 1e-9:
+            break
+        sol = _run(dwk * kappa, int(cfg.hold_rt), cav, e0=e_prev,
+                   delta_t0=dt_prev, seed=int(cfg.seed), n_tau=n_tau,
+                   pin=cfg.pin_w, snapshot_interval=snap_int,
+                   config_path=config_path, **PRODUCTION_NUMERICS)
+        u_hist = np.asarray(sol["U_int_history"])[0]
+        dweff_hist = np.asarray(sol["delta_omega_eff_history"])[0]
+        e_final = np.asarray(sol["e_final"])[0]
+        dt_final = float(np.asarray(sol["delta_t_final"]).reshape(-1)[0])
+        u_avg = hold_window_average(u_hist, avg_frac=cfg.avg_frac)
+        dweff_mean = float(np.mean(dweff_hist[u_avg["i_start"]:]))
+        snaps = np.asarray(sol["E_snapshots"])[0]
+        snap_rt = np.arange(snaps.shape[0]) * snap_int
+        in_window = snap_rt >= u_avg["i_start"]
+        if not in_window.any():
+            in_window[-1] = True
+        in_snaps = snaps[in_window]
+        # Memoryless: only THIS hold's snapshots go to the counter (guard above).
+        wc = count_solitons_windowed(in_snaps, delta_omega=dwk * kappa, cav=cav)
+        clusters = list(np.asarray(wc["cluster_angles_rad"], dtype=float))
+
+        fkey = next((k for k in failing if abs(k - float(dwk)) < 1e-6), None)
+        kind, miss_angle = failing.get(fkey, ("", float("nan"))) if fkey \
+            else ("", float("nan"))
+        tol = _diag_cluster_tol_rad(cav, dwk * kappa, n_tau)
+        b2 = 2.0 * dweff_mean / cav.gamma
+
+        n_in = int(in_snaps.shape[0])
+        smax = np.empty(n_in)
+        medbg = np.empty(n_in)
+        # per persistent cluster + one missing slot
+        cl_lmax = np.full((n_in, n_sol), np.nan)
+        cl_rel = np.zeros((n_in, n_sol), bool)
+        cl_abs = np.zeros((n_in, n_sol), bool)
+        ms_lmax = np.full(n_in, np.nan)
+        ms_rel = np.zeros(n_in, bool)
+        ms_abs = np.zeros(n_in, bool)
+        for s in range(n_in):
+            p = np.abs(in_snaps[s]) ** 2
+            smax[s] = float(p.max())
+            medbg[s] = float(np.median(p))
+            rel_t = rel_k * smax[s]
+            abs_t = abs_k * medbg[s]
+            for ci, ang in enumerate(clusters[:n_sol]):
+                lm = _diag_local_max(p, ang, tol, n_tau)
+                cl_lmax[s, ci] = lm
+                cl_rel[s, ci] = lm >= rel_t
+                cl_abs[s, ci] = lm >= abs_t
+            if np.isfinite(miss_angle):
+                lm = _diag_local_max(p, miss_angle, tol, n_tau)
+                ms_lmax[s] = lm
+                ms_rel[s] = lm >= rel_t
+                ms_abs[s] = lm >= abs_t
+        rows.append(dict(
+            dw=float(dwk), dweff=dweff_mean, b2=float(b2),
+            count=int(wc["count"]), agree=float(wc["count_agreement"]),
+            tol=tol, kind=kind, miss_angle=float(miss_angle),
+            n_cluster=len(clusters), smax=smax, medbg=medbg,
+            cl_lmax=cl_lmax, cl_rel=cl_rel, cl_abs=cl_abs,
+            ms_lmax=ms_lmax, ms_rel=ms_rel, ms_abs=ms_abs))
+        if kind:
+            frac_relvic = float(np.mean(ms_abs & ~ms_rel)) if np.isfinite(
+                miss_angle) else float("nan")
+            print(f"[diagnose] {name} FAILING {kind} @ {dwk:.3f}k: count="
+                  f"{wc['count']} agree={wc['count_agreement']:.3f} "
+                  + (f"missing@{miss_angle:.3f} rel-victim frac={frac_relvic:.2f} "
+                     f"min|E|^2/bg="
+                     f"{np.nanmin(ms_lmax)/np.median(medbg):.1f}"
+                     if np.isfinite(miss_angle) else "(agree0: see clusters)"))
+        e_prev, dt_prev = e_final, dt_final
+
+    n_in = rows[0]["smax"].size
+    stack = lambda key: np.array([r[key] for r in rows])
+    out = {
+        "variant": name,
+        "sweep_config_json": json.dumps(cfg.as_dict()),
+        "dw_over_kappa": stack("dw"), "dw_eff_over_kappa":
+            np.array([r["dweff"] for r in rows]) / kappa,
+        "B2_ref": stack("b2"), "soliton_count": stack("count"),
+        "count_agreement": stack("agree"), "cluster_tol_rad": stack("tol"),
+        "kind": np.array([r["kind"] for r in rows]),
+        "missing_angle_rad": stack("miss_angle"),
+        "n_cluster": stack("n_cluster"),
+        "snapshot_max": stack("smax"), "median_bg": stack("medbg"),
+        "rel_thresh": COUNT_REL_HEIGHT_CANDIDATE * stack("smax"),
+        "abs_thresh": COUNT_BG_FLOOR_MULTIPLE * stack("medbg"),
+        "cluster_local_max": stack("cl_lmax"),
+        "cluster_above_rel": stack("cl_rel"),
+        "cluster_above_abs": stack("cl_abs"),
+        "missing_local_max": stack("ms_lmax"),
+        "missing_above_rel": stack("ms_rel"),
+        "missing_above_abs": stack("ms_abs"),
+        "rel_height_candidate": float(COUNT_REL_HEIGHT_CANDIDATE),
+        "bg_floor_multiple": float(COUNT_BG_FLOOR_MULTIPLE),
+        "min_persistence": float(COUNT_MIN_PERSISTENCE),
+        "n_in_snapshots": int(n_in),
+        "early_stop_over_kappa": float(dw_stop),
+    }
+    return out
+
+
+def save_diagnose_npz(path: Path, sidecar: dict) -> None:
+    """Persist the Stage-B instrumentation sidecar (diagnose_{variant}.npz)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, **sidecar)
+
+
 def _abort_on_failed_validation(exc: StaircaseValidationError,
                                 npz_note: str) -> None:
     """Print the failure + the canonical escalation ladder and exit nonzero.
@@ -1694,10 +1955,38 @@ def main() -> None:
                          "variant_{i}.npz (data only, no figure) and the "
                          "staircase_robustness JSON/provenance blocks, never "
                          "touching the primary artifacts")
+    ap.add_argument("--diagnose-counting", dest="diagnose_variant",
+                    metavar="VARIANT", default=None,
+                    help="Stage-B instrumented re-run of a named robustness "
+                         "variant (e.g. variant_1): reproduces its config "
+                         "verbatim, warm-continues to an early stop below the "
+                         "lowest failing hold, and records the counter's "
+                         "per-snapshot detection inputs to "
+                         "results/robustness/diagnose_{VARIANT}.npz. Observes "
+                         "count_solitons_windowed; changes no counting logic")
     args = ap.parse_args()
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     t_start = time.time()
+
+    if args.diagnose_variant:
+        name = args.diagnose_variant
+        noise_cfg = write_noise_off_config(CONFIG_PATH)
+        try:
+            print(f"[diagnose] deterministic (noise-off) config -> {noise_cfg}")
+            sidecar = run_diagnose_counting(name, config_path=noise_cfg)
+        finally:
+            try:
+                noise_cfg.unlink()
+            except OSError:
+                pass
+        out = RESULTS_DIR / ROBUSTNESS_DIRNAME / f"diagnose_{name}.npz"
+        save_diagnose_npz(out, sidecar)
+        print(f"[diagnose] sidecar -> {out} "
+              f"({sidecar['dw_over_kappa'].size} holds, "
+              f"{sidecar['n_in_snapshots']} in-window snapshots/hold) "
+              f"({time.time() - t_start:.1f}s)")
+        return
 
     if args.robustness:
         base_cfg = load_accepted_config(RESULTS_DIR / SWEEP_NPZ)

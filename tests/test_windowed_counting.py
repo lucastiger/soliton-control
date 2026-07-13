@@ -199,6 +199,25 @@ def test_count_agreement_quantization_signature():
     assert _on_grid(eighths, 2) is False                # not halves {0,0.5,1}
 
 
+def test_victim_stats_separates_coupling_from_dimming():
+    # The Stage-B discriminator: a rel-VICTIM passes the absolute floor but
+    # fails the relative one; genuine dimming fails the absolute floor.
+    from analysis.staircase_forensics import _victim_stats
+    bg = np.ones(8)
+    # coupling: passes abs every snapshot, fails rel in 6/8 -> dropped by rel
+    coup = _victim_stats(above_rel=[1, 1, 0, 0, 0, 0, 0, 0],
+                         above_abs=[1, 1, 1, 1, 1, 1, 1, 1],
+                         local_max=np.full(8, 3.0), median_bg=bg, b2=1.0)
+    assert coup["abs_pass"] == 1.0 and coup["detected"] == 0.25
+    assert coup["rel_victim"] == 0.75 and coup["fails_both"] == 0.0
+    # dimming: fails the absolute floor in the majority of snapshots
+    dim = _victim_stats(above_rel=[1, 1, 1, 1, 1, 1, 1, 1],
+                        above_abs=[1, 1, 0, 0, 0, 0, 0, 0],
+                        local_max=np.array([3, 3, .5, .5, .5, .5, .5, .5]),
+                        median_bg=bg, b2=1.0)
+    assert dim["fails_both"] == 0.75 and dim["abs_pass"] == 0.25
+
+
 def test_detectability_missing_cluster_and_nn_rank():
     # A soliton present in the flank but dropped at the event: greedy match
     # against the flank leaves exactly that angle unmatched (a dropout).

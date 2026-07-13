@@ -868,6 +868,139 @@ def detectability_forensics() -> int:
     return 0
 
 
+def _victim_stats(above_rel, above_abs, local_max, median_bg, b2):
+    """Per-snapshot detection stats for one soliton across a hold's window.
+
+    ``detected`` (== persistence for this soliton) is passing the candidate
+    floor ``max(rel_thresh, abs_thresh)`` -> above_rel AND above_abs.  A
+    rel-VICTIM snapshot passes the ABSOLUTE floor but fails the RELATIVE one
+    (above_abs AND NOT above_rel): it would have counted under the absolute
+    floor alone and is rejected only because a sibling's crest lifted
+    ``snapshot_max``.
+    """
+    ar = np.asarray(above_rel, bool)
+    aa = np.asarray(above_abs, bool)
+    lm = np.asarray(local_max, float)
+    return dict(
+        abs_pass=float(np.mean(aa)),
+        rel_fail=float(np.mean(~ar)),
+        detected=float(np.mean(ar & aa)),
+        rel_victim=float(np.mean(aa & ~ar)),
+        fails_both=float(np.mean(~aa)),
+        min_over_bg=float(np.nanmin(lm) / max(np.median(median_bg), 1e-300)),
+        min_over_b2=float(np.nanmin(lm) / max(abs(b2), 1e-300)))
+
+
+def diagnose_report() -> int:
+    """Stage B (B2/B3): read the instrumented sidecars and rule on the mechanism.
+
+    For every failing hold in ``diagnose_{variant}.npz`` picks the victim
+    soliton (the flank-recovered MISSING one at a monotonicity/undercount hold;
+    the lowest-persistence cluster at an agreement==0 hold), tabulates its
+    rel-victim / genuine-dim statistics, and appends a "Detectability (Stage B)"
+    verdict to the report: COUPLING CONFIRMED, GENUINE DIMMING, or MIXED.
+    """
+    sidecars = sorted((RESULTS_DIR / "robustness").glob("diagnose_*.npz"))
+    if not sidecars:
+        print("[diagnose-report] no diagnose_*.npz found -- run "
+              "--diagnose-counting first.")
+        return 2
+    md = ["", "## Detectability (Stage B: instrumented)", "",
+          f"Generated {_dt.datetime.now(_dt.timezone.utc).isoformat()} by "
+          f"`analysis/staircase_forensics.py --diagnose-report`. Per failing "
+          f"hold the VICTIM soliton (missing one at an undercount hold; "
+          f"lowest-persistence cluster at an agreement==0 hold) is scored: a "
+          f"rel-VICTIM snapshot passes the absolute floor but fails the "
+          f"relative one (`rel_height_candidate * snapshot_max`), so it is "
+          f"rejected only because a sibling's crest lifted `snapshot_max`.", ""]
+    md.append("| variant | dw/k | kind | victim | abs pass | rel-victim frac "
+              "| fails-both | detected (persist.) | min|E|²/bg | min|E|²/B² | "
+              "class |")
+    md.append("|---|---|---|---|---|---|---|---|---|---|---|")
+
+    mono_classes, all_classes = [], []
+    for sc in sidecars:
+        d = np.load(sc, allow_pickle=False)
+        name = str(d["variant"])
+        dw = d["dw_over_kappa"]
+        kind = d["kind"].astype(str)
+        b2 = d["B2_ref"]
+        medbg = d["median_bg"]
+        fails = np.nonzero(kind != "")[0]
+        for j in fails:
+            if kind[j] == "mono":
+                st = _victim_stats(d["missing_above_rel"][j],
+                                   d["missing_above_abs"][j],
+                                   d["missing_local_max"][j], medbg[j], b2[j])
+                victim = f"missing@{d['missing_angle_rad'][j]:.3f}"
+            else:  # agree0: lowest-persistence real cluster
+                ncl = int(d["n_cluster"][j])
+                det = [float(np.mean(d["cluster_above_rel"][j, :, c]
+                                     & d["cluster_above_abs"][j, :, c]))
+                       for c in range(ncl)]
+                c = int(np.argmin(det)) if det else 0
+                st = _victim_stats(d["cluster_above_rel"][j, :, c],
+                                   d["cluster_above_abs"][j, :, c],
+                                   d["cluster_local_max"][j, :, c],
+                                   medbg[j], b2[j])
+                victim = f"cluster {c} (min persist.)"
+            # classify: coupling = passes abs a lot but the relative floor is
+            # what suppresses it; dimming = fails the absolute floor itself.
+            if st["abs_pass"] >= 0.9 and st["rel_victim"] > 0.0 and (
+                    kind[j] != "mono" or st["detected"] < 0.5):
+                cls = "coupling"
+            elif st["fails_both"] > 0.5:
+                cls = "dimming"
+            else:
+                cls = "mixed"
+            all_classes.append(cls)
+            if kind[j] == "mono":
+                mono_classes.append(cls)
+            md.append(f"| {name} | {dw[j]:.3f} | {kind[j]} | {victim} | "
+                      f"{st['abs_pass']:.2f} | {st['rel_victim']:.2f} | "
+                      f"{st['fails_both']:.2f} | {st['detected']:.2f} | "
+                      f"{st['min_over_bg']:.1f} | {st['min_over_b2']:.2f} | "
+                      f"**{cls}** |")
+
+    # ---- Verdict (B3) -------------------------------------------------------
+    # The count DEFECT (monotonicity break) is the undercount holds; the verdict
+    # is keyed on them (where a soliton is actually dropped, so "persistence <
+    # 0.5" is meaningful). agree0 holds corroborate the same mechanism without
+    # a full drop.
+    key = mono_classes if mono_classes else all_classes
+    if key and all(c == "coupling" for c in key) and all(
+            c != "dimming" for c in all_classes):
+        verdict = "RELATIVE-THRESHOLD COUPLING CONFIRMED"
+    elif key and all(c == "dimming" for c in key):
+        verdict = "GENUINE DIMMING"
+    else:
+        verdict = "MIXED/INCONCLUSIVE"
+    md.append("")
+    md.append(f"**STAGE-B VERDICT: {verdict}**")
+    md.append("")
+    md.append("- Rule: COUPLING iff at every undercount hold the missing "
+              "soliton passes the ABSOLUTE floor in >= 90% of snapshots yet is "
+              "dropped (persistence < 0.5) by the RELATIVE floor "
+              "(`rel_height_candidate * snapshot_max`); GENUINE DIMMING iff it "
+              "fails the absolute floor in the majority of snapshots; MIXED "
+              "otherwise. agree0 holds corroborate (same mechanism, victim "
+              "kept above 0.5).")
+    md.append("- No fix applied: this diagnosis is the deliverable. Any "
+              "remedy (e.g. dropping the coupled relative arm of the candidate "
+              "floor) is a separate, gated change -- not made here.")
+    md.append("")
+
+    out = RESULTS_DIR / REPORT_MD
+    prior = out.read_text(encoding="utf-8") if out.exists() else ""
+    marker = "\n## Detectability (Stage B: instrumented)"
+    if marker in prior:
+        prior = prior[:prior.index(marker)].rstrip() + "\n"
+    out.write_text(prior.rstrip() + "\n" + "\n".join(md) + "\n", encoding="utf-8")
+    print(f"[diagnose-report] STAGE-B VERDICT: {verdict}")
+    print(f"[diagnose-report] report -> {out}")
+    return 0
+
+
 def main() -> None:
     import argparse
     ap = argparse.ArgumentParser(description=__doc__)
@@ -881,11 +1014,17 @@ def main() -> None:
                          "cluster position persistence at monotonicity events, "
                          "seed nearest-neighbour ranking, agreement==0 "
                          "categorisation; appends a section and gates Stage B")
+    ap.add_argument("--diagnose-report", action="store_true",
+                    help="Stage B (B2/B3): read results/robustness/diagnose_*"
+                         ".npz and append the COUPLING/DIMMING/MIXED verdict "
+                         "to staircase_forensics.md")
     args = ap.parse_args()
     if args.starvation:
         sys.exit(starvation_forensics())
     if args.detectability:
         sys.exit(detectability_forensics())
+    if args.diagnose_report:
+        sys.exit(diagnose_report())
 
     sweep, cfg, audit_lines, missing = load_and_audit()
     for ln in audit_lines:

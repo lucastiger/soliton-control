@@ -566,6 +566,15 @@ def count_solitons_windowed(snapshots, *, rel_height_candidate=COUNT_REL_HEIGHT_
     position-persistent); keeping such states at ``soliton_count = 0`` is the
     caller's LABEL gate's job, not this counter's.
 
+    NON-CIRCULARITY INVARIANT (do not break): this count is MEMORYLESS per
+    hold -- it depends only on the ``snapshots`` passed for a single hold, with
+    no cluster angles carried in from an adjacent hold, no "previous count"
+    prior, and no monotonic constraint.  The driver's monotonicity gate
+    (``validate_staircase_alignment``) is only meaningful because each hold's
+    count is measured independently; a count that inherited a neighbour's answer
+    could never expose a monotonicity break.  Any future cross-hold soliton
+    tracking must be a SEPARATE diagnostic column, never the counted value.
+
     Returns ``{"count", "cluster_angles_rad" (sorted, one per ACCEPTED
     cluster), "per_snapshot_counts" (accepted candidates per snapshot),
     "count_agreement" (fraction of snapshots whose raw candidate count equals
