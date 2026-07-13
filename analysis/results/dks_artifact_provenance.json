@@ -1,6 +1,6 @@
 {
   "script": "scripts/regenerate_dks_artifacts.py",
-  "generated_unix_time": 1783845128,
+  "generated_unix_time": 1783937766,
   "pin_w": 0.214,
   "numerics": {
     "n_substeps": 4,
