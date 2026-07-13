@@ -292,6 +292,7 @@
     "provenance": {
       "driver": "analysis/run_detuning_sweep.py",
       "sweep_data": "detuning_sweep.npz",
+      "sweep_npz_sha256": "fe7b6789daac517ba6b50b206cebc63e7825309a95ed579c937a62907e3b2491",
       "figure": "soliton_steps.png",
       "config_file": "sin_params.yaml",
       "config_sha256": "c5adc61ccb056ce6061455586622fccb92771ddbab473701f77de0a735f04d61",
@@ -315,7 +316,7 @@
         "position_seed": 1,
         "position_jitter_frac": 0.25
       },
-      "generated_utc": "2026-07-13T10:14:44.310936+00:00"
+      "generated_utc": "2026-07-13T19:12:58.618768+00:00"
     },
     "any_soliton_region_over_kappa": [
       6.199999999999999,

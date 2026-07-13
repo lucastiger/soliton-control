@@ -765,6 +765,29 @@ def _update_json(json_path: Path, key: str, block: dict) -> None:
         json.dump(data, f, indent=2, default=float)
 
 
+def _refresh_sweep_npz_hash() -> None:
+    """Re-stamp the saved sweep npz's sha256 into the JSON staircase block.
+
+    On a fresh solver run :func:`render_and_report` runs BEFORE
+    :func:`save_sweep_npz` (the validation gate decides the
+    ``staircase_validated`` flag the npz carries), so the ``sweep_npz_sha256``
+    recorded at render time refers to the PREVIOUS npz (or is None).  Called
+    after the save so the provenance always hashes the file the block
+    describes; touches ONLY that one field.
+    """
+    json_path = RESULTS_DIR / METRICS_JSON
+    if not json_path.exists():
+        return
+    with open(json_path) as f:
+        data = json.load(f)
+    block = data.get("soliton_step")
+    if not isinstance(block, dict) or "provenance" not in block:
+        return
+    block["provenance"]["sweep_npz_sha256"] = _sha256(RESULTS_DIR / SWEEP_NPZ)
+    with open(json_path, "w") as f:
+        json.dump(data, f, indent=2, default=float)
+
+
 # Per-step arrays that every sweep npz carries (legacy schema, still written).
 _NPZ_BASE_KEYS = ("dw_over_kappa", "dw_rad_s", "dw_eff_over_kappa", "P_intra",
                   "P_intra_std", "U_int", "U_int_std", "P_trans", "P_trans_std",
@@ -1008,9 +1031,18 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
                              "$P_\\mathrm{trans}/P_\\mathrm{in}$"),
         smooth_window=cfg.smooth_display)
 
+    # Staleness guard: the sha256 of the sweep npz this block was rendered
+    # from, so a regenerated npz with a stale JSON is detectable
+    # (tests/test_soliton_staircase.py pins it).  On --render-only the
+    # committed npz IS the input; on a fresh solver run the npz is (re)written
+    # AFTER rendering, so main() refreshes this field post-save
+    # (_refresh_sweep_npz_hash).
+    sweep_npz_path = RESULTS_DIR / SWEEP_NPZ
     provenance = {
         "driver": "analysis/run_detuning_sweep.py",
         "sweep_data": SWEEP_NPZ,
+        "sweep_npz_sha256": (_sha256(sweep_npz_path)
+                             if sweep_npz_path.exists() else None),
         "figure": STEPS_PNG,
         "config_file": str(CONFIG_PATH.name),
         "config_sha256": _sha256(CONFIG_PATH),
@@ -2138,6 +2170,10 @@ def main() -> None:
         validation_error = exc
     save_sweep_npz(RESULTS_DIR / SWEEP_NPZ, sweep, cfg,
                    staircase_validated=validation_error is None)
+    if validation_error is None:
+        # the JSON block was rendered before this save; re-stamp the hash of
+        # the npz it now describes (see _refresh_sweep_npz_hash).
+        _refresh_sweep_npz_hash()
     print(f"[sweep] data -> {RESULTS_DIR / SWEEP_NPZ} "
           f"(staircase_validated={validation_error is None})")
     if validation_error is not None:
