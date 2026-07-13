@@ -1868,6 +1868,13 @@ def run_diagnose_counting(name: str, *, config_path) -> dict:
                      f"{np.nanmin(ms_lmax)/np.median(medbg):.1f}"
                      if np.isfinite(miss_angle) else "(agree0: see clusters)"))
         e_prev, dt_prev = e_final, dt_final
+        # Each hold compiles a fresh XLA executable (the scan-time labeler is a
+        # static jit arg keyed on the hold's max|delta_omega|), so the JIT cache
+        # grows ~O(100 MB)/hold; drop dead compilations every 10 holds to keep
+        # memory flat over the long warm-continuation (identical to the primary
+        # sweep loop; frees only dead compilations -- numerics unchanged).
+        if (i + 1) % 10 == 0:
+            jax.clear_caches()
 
     n_in = rows[0]["smax"].size
     stack = lambda key: np.array([r[key] for r in rows])
