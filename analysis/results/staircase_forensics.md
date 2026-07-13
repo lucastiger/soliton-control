@@ -190,4 +190,38 @@ Generated 2026-07-13T05:26:41.654287+00:00 by `analysis/staircase_forensics.py -
 
 - Rule: COUPLING iff at every undercount hold the missing soliton passes the ABSOLUTE floor in >= 90% of snapshots yet is dropped (persistence < 0.5) by the RELATIVE floor (`rel_height_candidate * snapshot_max`); GENUINE DIMMING iff it fails the absolute floor in the majority of snapshots; MIXED otherwise. agree0 holds corroborate (same mechanism, victim kept above 0.5).
 - No fix applied: this diagnosis is the deliverable. Any remedy (e.g. dropping the coupled relative arm of the candidate floor) is a separate, gated change -- not made here.
+## Step-quanta (offline)
+
+Generated 2026-07-13T23:50:01.064293+00:00 by `analysis/staircase_forensics.py --stepquanta` (offline; no solver run; read-only on the committed artifacts). Confirms or refutes the split-step diagnosis behind the failing `tests/test_soliton_staircase.py::test_step_heights_quantized` (Part 2i).
+
+- npz: `detuning_sweep.npz`  sha256 `fe7b6789daac517b...`
+- primary observable (from the staircase JSON block): `P_comb`; detector k = 6, match tol = 1 sample; robust sigma = 7.880e-04
+- recomputation MATCHES the committed alignment: 4 matched, 64 unmatched steps, 0 unmatched transitions (the artifact is self-consistent -- Part 2b holds).
+
+### Matched steps above the 1->0 edge, with adjacent unmatched discontinuities (within tol)
+
+| matched edge | dw_mid (k) | transition | delta_n | matched step_dy | |per-quantum| | adjacent unmatched (edge, dw_mid, step_dy, sign) |
+|---|---|---|---|---|---|---|
+| 29 | 6.2375 | 3->1 | 2 | +0.34604 | 0.17302 | 30 @ 6.262k -0.01299 (-, OPP) |
+| 32 | 6.3125 | 4->3 | 1 | +0.05683 | 0.05683 | 31 @ 6.287k +0.01119 (+, same); 33 @ 6.337k +0.10272 (+, same) |
+| 40 | 6.5125 | 5->4 | 1 | +0.16929 | 0.16929 | 39 @ 6.487k -0.03235 (-, OPP); 41 @ 6.537k +0.06142 (+, same) |
+
+### Failing pair (Part 2i)
+
+- reference 5->4 step_dy **+0.16929** (edge 40, 6.5125k)
+- short 4->3 matched step_dy **+0.05683** (edge 32, 6.3125k)
+- dominant adjacent same-sign unmatched discontinuity **+0.10272** (edge 33, 6.3375k)
+- sum (short + dominant adjacent) = **0.15955**
+- ratio BEFORE aggregation (0.05683 vs 0.16929): **2.979** (> 2 -> the test fails)
+- ratio AFTER aggregation (0.15955 vs 0.16929): **1.061**; vs the merged 3->1 per-quantum 0.17302: **1.084**
+- adjacent same-sign unmatched discontinuities to the 4->3 edge: **2** (edge 31, +0.01119), (edge 33, +0.10272)
+- the reference 5->4 edge is itself flanked by 1 same-sign unmatched discontinuity(ies) (edge 41, +0.06142) -- plateau ripple fragments steps, so an adjacent same-sign unmatched neighbour is not a unique split-partner signal.
+
+### Verdict
+
+Rule: **SPLIT-STEP CONFIRMED** iff the 4->3 matched edge has exactly one adjacent (within tol_samples), same-sign, otherwise-unmatched discontinuity AND the sum brings all per-quantum magnitudes within a factor of 2; **NOT A SPLIT STEP** iff the adjacent discontinuity is opposite-sign, absent, or the aggregated magnitudes still exceed a factor of 2 (genuine non-quantization / a merged-annihilation issue -- a real physics finding); **AMBIGUOUS** otherwise.
+
+**VERDICT: AMBIGUOUS** -- aggregating the dominant adjacent same-sign discontinuity (edge 33, +0.10272) restores quantization (ratio 1.061 <= 2), so the split direction is supported -- but the strict split-step criterion is NOT met: the 4->3 edge has 2 same-sign adjacent unmatched discontinuities, not exactly one, and the reference edge is itself flanked by a same-sign neighbour (plateau ripple fragments multiple steps, so 'adjacent same-sign unmatched' is not a unique split signal)
+
+No fix applied: this diagnosis is the deliverable. Any remedy (aggregating split matched+adjacent discontinuities before the quantization check, a plateau-level step-height measure, or accepting the merged-annihilation reference) is a separate, gated change -- not made here.
 
