@@ -192,7 +192,7 @@ Generated 2026-07-13T05:26:41.654287+00:00 by `analysis/staircase_forensics.py -
 - No fix applied: this diagnosis is the deliverable. Any remedy (e.g. dropping the coupled relative arm of the candidate floor) is a separate, gated change -- not made here.
 ## Step-quanta (offline)
 
-Generated 2026-07-14T00:04:18.287010+00:00 by `analysis/staircase_forensics.py --stepquanta` (offline; no solver run; read-only on the committed artifacts). Confirms or refutes the split-step diagnosis behind the failing `tests/test_soliton_staircase.py::test_step_heights_quantized` (Part 2i).
+Generated 2026-07-14T04:48:44.316421+00:00 by `analysis/staircase_forensics.py --stepquanta` (offline; no solver run; read-only on the committed artifacts). Confirms or refutes the split-step diagnosis behind the failing `tests/test_soliton_staircase.py::test_step_heights_quantized` (Part 2i).
 
 - npz: `detuning_sweep.npz`  sha256 `fe7b6789daac517b...`
 - primary observable (from the staircase JSON block): `P_comb`; detector k = 6, match tol = 1 sample; robust sigma = 7.880e-04
@@ -228,7 +228,7 @@ No fix applied: this diagnosis is the deliverable. Any remedy (aggregating split
 
 ## Plateau-bounded aggregation (offline)
 
-Generated 2026-07-14T00:04:18.287699+00:00 by `analysis/staircase_forensics.py --stepquanta` (offline; no solver run; read-only on the committed artifacts). Tests a PHYSICALLY BOUNDED aggregation rule for the Part 2i step heights: the AMBIGUOUS verdict above showed that 'exactly one adjacent same-sign unmatched discontinuity' is not a valid split-partner signal (plateau ripple scatters same-sign unmatched neighbours around most edges), so aggregation is bounded here by the COUNT STRUCTURE (plateaus), not a neighbour radius.
+Generated 2026-07-14T04:48:44.317081+00:00 by `analysis/staircase_forensics.py --stepquanta` (offline; no solver run; read-only on the committed artifacts). Tests a PHYSICALLY BOUNDED aggregation rule for the Part 2i step heights: the AMBIGUOUS verdict above showed that 'exactly one adjacent same-sign unmatched discontinuity' is not a valid split-partner signal (plateau ripple scatters same-sign unmatched neighbours around most edges), so aggregation is bounded here by the COUNT STRUCTURE (plateaus), not a neighbour radius.
 
 - primary observable `P_comb`; detector k = 6, match tol = 1; robust sigma = 7.880e-04; npz sha256 `fe7b6789daac517b...` (recomputation matches committed).
 - soliton_count plateaus (count: idx range): 0:[0,27], 1:[28,29], 3:[30,32], 4:[33,40], 5:[41,260]

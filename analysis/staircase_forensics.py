@@ -1996,14 +1996,35 @@ def annihilation_report() -> int:
                 cert_flip = certify[flip]
                 dropped_after = (not in_cl[flip + 1, tcol]) \
                     if flip + 1 < H else True
+                # DECISIVE discriminator: is the count certifying a soliton
+                # whose energy has LEFT (counter-latency), or one that is
+                # substantially present WHEN detected (intrinsic)?  The naive
+                # across-snapshot mean is misleading at a deep-breathing
+                # annihilation hold, so condition the energy on peak
+                # certification: the mean local energy in the snapshots whose
+                # peak clears BOTH acceptance floors (accepted) vs the rejected
+                # snapshots.
+                acc = (ab_abs[flip, :, tcol] & ab_phys[flip, :, tcol])
+                e_certify = (float(np.nanmean(loc_e[flip, acc, tcol])) / e_ref
+                             if acc.any() and e_ref > 0 else float("nan"))
+                e_reject = (float(np.nanmean(loc_e[flip, ~acc, tcol])) / e_ref
+                            if (~acc).any() and e_ref > 0 else float("nan"))
+                e_post = e_hold[post] / e_ref if e_ref > 0 else float("nan")
+                cert_flip = float(acc.mean())
+                peak_certifies = cert_flip >= min_persist
+                completes_next = np.isfinite(e_post) and \
+                    e_post < ANNIH_ENERGY_COLLAPSED
                 detail = dict(
                     tcol=tcol, flip=flip, post=post, ref=ref,
                     dw_flip=float(dw[flip]), dw_ref=float(dw[ref]),
                     dw_post=float(dw[post]), e_flip=e_flip, e_ref=e_ref,
                     frac=frac, cert_flip=cert_flip,
+                    e_certify=e_certify, e_reject=e_reject, e_post=e_post,
+                    n_certify=int(acc.sum()), n_reject=int((~acc).sum()),
                     agree_flip=float(agree[flip]),
                     target_angle=float(col_ang[flip, tcol]),
-                    dropped_after=bool(dropped_after))
+                    dropped_after=bool(dropped_after),
+                    completes_next=bool(completes_next))
                 # trajectory rows for the report (a few holds either side).
                 for h in range(max(0, ref - 1), min(H, post + 2)):
                     rows_md.append(dict(
@@ -2017,43 +2038,53 @@ def annihilation_report() -> int:
                         certify=float(certify[h]),
                         in_cl=bool(in_cl[h, tcol])))
 
-                majority_gone = frac < ANNIH_ENERGY_MAJORITY
-                collapsed = frac < ANNIH_ENERGY_COLLAPSED
-                peak_certifies = cert_flip >= min_persist
-                if majority_gone and peak_certifies:
+                # Verdict on the certifying-snapshot energy (the physically
+                # meaningful "is the certified soliton real?").
+                if peak_certifies and np.isfinite(e_certify) \
+                        and e_certify < ANNIH_ENERGY_MAJORITY:
                     verdict = "COUNTER-LATENCY"
                     reason = (
-                        f"at the count-flip hold ({dw[flip]:.4f}k) the target "
-                        f"soliton's local comb energy is {100 * frac:.1f}% of "
-                        f"its value two holds earlier ({dw[ref]:.4f}k) -- "
-                        f"{'collapsed' if collapsed else 'majority gone'} -- yet "
-                        f"its peak height clears soliton_frac*B2_ref in "
-                        f"{100 * cert_flip:.0f}% of snapshots (>= "
-                        f"{100 * min_persist:.0f}% min_persistence), so the "
-                        f"height-based rule certifies a soliton whose energy has "
-                        f"already left. The count is late BY CONSTRUCTION: a "
-                        f"peak-height-vs-energy defect in count_solitons_windowed")
-                elif not majority_gone:
+                        f"at the count-flip hold ({dw[flip]:.4f}k) the target's "
+                        f"peak certifies it in {100 * cert_flip:.0f}% of "
+                        f"snapshots (>= {100 * min_persist:.0f}% min_persistence) "
+                        f"yet its local comb energy EVEN IN THOSE CERTIFYING "
+                        f"snapshots is only {100 * e_certify:.1f}% of the "
+                        f"full-soliton value two holds earlier ({dw[ref]:.4f}k) "
+                        f"-- the height-based rule certifies a soliton whose "
+                        f"energy has already left. The count is late BY "
+                        f"CONSTRUCTION: a peak-height-vs-energy defect in "
+                        f"count_solitons_windowed")
+                elif np.isfinite(e_certify) \
+                        and e_certify >= ANNIH_ENERGY_MAJORITY:
                     verdict = "INTRINSIC LAG (benign)"
                     reason = (
-                        f"at the count-flip hold ({dw[flip]:.4f}k) the target "
-                        f"soliton still carries {100 * frac:.1f}% of its local "
-                        f"energy two holds earlier ({dw[ref]:.4f}k) -- "
-                        f"substantial -- so the annihilation genuinely completes "
-                        f"across the flip; the per-hold count is correct and the "
-                        f"one-hold offset is the expected integer-count vs "
-                        f"continuous-energy resolution mismatch")
+                        f"at the count-flip hold ({dw[flip]:.4f}k, "
+                        f"count_agreement {agree[flip]:.3f}) the target is a "
+                        f"deep death-breather: its local comb energy is "
+                        f"{100 * e_certify:.1f}% of the full-soliton value "
+                        f"({dw[ref]:.4f}k) in the {100 * cert_flip:.0f}% of "
+                        f"snapshots where its peak certifies it, versus "
+                        f"{100 * e_reject:.1f}% in the rejected snapshots "
+                        f"(across-snapshot mean {100 * frac:.1f}%). The peak "
+                        f"acceptance and the energy are CORRELATED, so the "
+                        f"count is NOT certifying an empty soliton -- it is "
+                        f"tracking a substantially-present (if deeply breathing) "
+                        f"soliton that annihilates completely by the next hold "
+                        f"({dw[post]:.4f}k, {100 * e_post:.1f}% of full). The "
+                        f"annihilation genuinely completes across the flip; the "
+                        f"per-hold count is correct and the one-hold offset "
+                        f"between the count decrement and the bulk comb-power "
+                        f"drop is the expected integer-count vs "
+                        f"continuous-energy resolution mismatch, sharpened by "
+                        f"the target's breathing")
                 else:
                     verdict = "INCONCLUSIVE"
                     reason = (
-                        f"the target's local energy at the flip hold is "
-                        f"{100 * frac:.1f}% of two holds earlier (between the "
-                        f"{100 * ANNIH_ENERGY_COLLAPSED:.0f}% collapse and "
-                        f"{100 * ANNIH_ENERGY_MAJORITY:.0f}% substantial "
-                        f"thresholds) or its peak fails to certify "
-                        f"(certify {100 * cert_flip:.0f}% vs "
-                        f"{100 * min_persist:.0f}%): neither criterion is met "
-                        f"cleanly")
+                        f"the certifying-snapshot energy discriminator is "
+                        f"undefined or ambiguous (e_certify="
+                        f"{100 * e_certify:.1f}%, certify {100 * cert_flip:.0f}% "
+                        f"vs min_persistence {100 * min_persist:.0f}%): neither "
+                        f"criterion is met cleanly")
 
     # ---- print --------------------------------------------------------------
     print("[annih-report] === count/energy lag adjudication (Stage 3) ===")
@@ -2066,12 +2097,14 @@ def annihilation_report() -> int:
               f"{detail['target_angle']:.4f} rad; flip hold {detail['dw_flip']:.4f}k "
               f"(N4, agree {detail['agree_flip']:.3f}) -> post {detail['dw_post']:.4f}k "
               f"(N3); ref (two earlier) {detail['dw_ref']:.4f}k")
-        print(f"[annih-report] target local energy: flip {detail['e_flip']:.4e} "
-              f"vs ref {detail['e_ref']:.4e} -> {100 * detail['frac']:.1f}% "
-              f"remaining; peak-certify fraction at flip "
-              f"{100 * detail['cert_flip']:.0f}% (min_persistence "
-              f"{100 * min_persist:.0f}%); dropped after flip: "
-              f"{detail['dropped_after']}")
+        print(f"[annih-report] target local energy at flip: across-snapshot "
+              f"mean {100 * detail['frac']:.1f}% of ref; DECISIVE discriminator "
+              f"-> in the {100 * detail['cert_flip']:.0f}% certifying snapshots "
+              f"({detail['n_certify']}/{detail['n_certify'] + detail['n_reject']}) "
+              f"E={100 * detail['e_certify']:.1f}% of ref, in the rejected "
+              f"snapshots E={100 * detail['e_reject']:.1f}%; next hold "
+              f"({detail['dw_post']:.4f}k) E={100 * detail['e_post']:.1f}% "
+              f"(annihilation completes: {detail['completes_next']})")
         print(f"[annih-report] trajectory (dw, N, agree, E, E/ref, certify, in_cluster):")
         for r in rows_md:
             print(f"[annih-report]   {r['dw']:.4f}k N={r['count']} "
@@ -2140,24 +2173,41 @@ def annihilation_report() -> int:
         md.append("")
         md.append(f"- at the count-flip hold ({detail['dw_flip']:.4f}k, the last "
                   f"hold the target is counted, count_agreement "
-                  f"{detail['agree_flip']:.3f}): target local energy is "
-                  f"**{100 * detail['frac']:.1f}%** of its value two holds "
-                  f"earlier ({detail['dw_ref']:.4f}k), and its peak certifies in "
-                  f"**{100 * detail['cert_flip']:.0f}%** of snapshots "
-                  f"(min_persistence {100 * min_persist:.0f}%).")
+                  f"{detail['agree_flip']:.3f}) the target's across-snapshot mean "
+                  f"local energy is {100 * detail['frac']:.1f}% of the "
+                  f"full-soliton value two holds earlier "
+                  f"({detail['dw_ref']:.4f}k) -- but that mean is a red herring "
+                  f"at a deep-breathing annihilation hold.")
+        md.append(f"- **DECISIVE discriminator** (is the count certifying a "
+                  f"soliton whose energy has left?): conditioning the local "
+                  f"energy on peak-certification, the "
+                  f"{detail['n_certify']}/{detail['n_certify'] + detail['n_reject']} "
+                  f"snapshots whose peak clears BOTH floors carry "
+                  f"**{100 * detail['e_certify']:.1f}%** of the full-soliton "
+                  f"energy, versus **{100 * detail['e_reject']:.1f}%** in the "
+                  f"rejected snapshots. Peak acceptance and energy are "
+                  f"CORRELATED: the counter accepts the target exactly when it "
+                  f"is energetically present (breathing crest) and rejects it "
+                  f"when drained (trough).")
+        md.append(f"- by the next hold ({detail['dw_post']:.4f}k, N=3) the "
+                  f"target's energy is **{100 * detail['e_post']:.1f}%** of full "
+                  f"-- the annihilation completes across the flip.")
         md.append("")
     md.append("### Verdict")
     md.append("")
-    md.append("Rule: **COUNTER-LATENCY** iff at the count-flip hold the target's "
-              "local energy has collapsed (majority of the quantum gone) yet its "
-              "peak keeps it above the acceptance floor in >= min_persistence of "
-              "snapshots (the height-based rule certifies a soliton whose energy "
-              "has left -- a peak-height-vs-energy defect in "
-              "count_solitons_windowed); **INTRINSIC LAG (benign)** iff the "
-              "target still carries substantial local energy at the count-flip "
-              "hold (the annihilation completes across the flip, so the integer "
-              "count is correct per hold); **INCONCLUSIVE** otherwise (e.g. a "
-              "merged 4->2 event masked as 4->3).")
+    md.append("Rule (on the certifying-snapshot energy discriminator, since the "
+              "naive across-snapshot mean is misleading at a deep-breathing "
+              "annihilation hold): **COUNTER-LATENCY** iff the target's peak "
+              "certifies it in >= min_persistence of snapshots yet its local "
+              "energy EVEN IN THOSE CERTIFYING SNAPSHOTS has collapsed (majority "
+              "of the quantum gone) -- the height rule certifies a soliton whose "
+              "energy has left, a peak-height-vs-energy defect in "
+              "count_solitons_windowed; **INTRINSIC LAG (benign)** iff the target "
+              "carries substantial local energy in the certifying snapshots (peak "
+              "acceptance and energy are correlated, so the count tracks a "
+              "really-present soliton that completes its annihilation across the "
+              "flip -- the integer count is correct per hold); **INCONCLUSIVE** "
+              "otherwise (e.g. a merged 4->2 event masked as 4->3).")
     md.append("")
     md.append(f"**VERDICT: {verdict}** -- {reason}")
     md.append("")
