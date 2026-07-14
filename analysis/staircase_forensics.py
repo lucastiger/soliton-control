@@ -1177,6 +1177,144 @@ def _aggregate_window(e_m, delta_n, matched_dy, counts, um_map, matched_edges,
     return abs(total), abs(total) / max(int(delta_n), 1), win
 
 
+# --- count/energy lag Stage 1 precondition (offline) -----------------------
+ANNIH_MATCH_TOL_RAD = 0.05        # circular cluster-match tolerance (the brief)
+
+
+def _annihilation_precondition(sweep, metrics):
+    """Stage 1 (offline): locate the 4->3 annihilation holds and name the target.
+
+    Recomputes the alignment exactly as Part 2b, finds the matched 4->3
+    transition edge ``e`` (ascending), and inspects holds ``e-1, e, e+1, e+2``
+    (the 31/32/33/34 holds of the committed sweep).  The TARGET soliton is the
+    persistent cluster present at hold ``e+1`` (the last N=4 hold before the
+    count drops) that is absent at hold ``e`` (the first N=3 hold), matched
+    circularly at ``ANNIH_MATCH_TOL_RAD``.  Its nearest-neighbour separation
+    rank (both among the hold-``e+1`` clusters and, via the rigid-rotation
+    cyclic map, among ``seed_positions_rad``) is reported.  Read-only.
+
+    Returns a dict with the per-hold observables, the target angle/identity and
+    a ``status`` in {"ok", "inconclusive"} (inconclusive when the clean 4->3
+    matched edge is not present, or the disappearing cluster is not a single
+    localized soliton -- e.g. a merged 4->2 event).
+    """
+    from analysis.spectral_metrics import (DEFAULT_STEP_K, detect_power_steps,
+                                           match_steps_to_transitions,
+                                           soliton_count_transitions)
+    stair = metrics["soliton_step"]["staircase"]
+    primary = stair["primary_observable"]["chosen"]
+    order = np.argsort(sweep["dw_over_kappa"])
+    dwk = np.asarray(sweep["dw_over_kappa"])[order]
+    counts = np.asarray(sweep["soliton_count"], dtype=int)[order]
+    ce = np.asarray(sweep["soliton_count_end_snapshot"], dtype=int)[order]
+    ca = np.asarray(sweep["count_agreement"], dtype=float)[order]
+    Pc = np.asarray(sweep["P_comb"], dtype=float)[order]
+    Pcs = np.asarray(sweep["P_comb_std"], dtype=float)[order]
+    br = np.asarray(sweep["breathing_relstd"], dtype=float)[order]
+    pos = np.asarray(sweep["peak_positions_rad"], dtype=float)[order]
+    y = np.asarray(sweep[primary], dtype=float)[order]
+    y = y / float(np.max(y))
+    k_json = metrics["soliton_step"]["power_trace_discontinuities"].get("k")
+    k_used = float(k_json) if k_json is not None else DEFAULT_STEP_K
+    tol = int(stair.get("match_tol_samples", 1))
+    steps = detect_power_steps(dwk, y, k=k_used)
+    align = match_steps_to_transitions(
+        steps, soliton_count_transitions(dwk, counts), tol_samples=tol)
+    e43 = [m for m in align["matched"]
+           if m["n_high_side"] == 4 and m["n_low_side"] == 3
+           and m["delta_n"] == 1]
+    persistence_stored = "persistence_fractions" in sweep
+
+    if not e43 or e43[0]["step_edge_index"] + 2 >= counts.size \
+            or e43[0]["step_edge_index"] - 1 < 0:
+        return {"status": "inconclusive",
+                "why": ("no clean matched 4->3 (delta_n=1) transition with two "
+                        "flanking holds on each side"),
+                "primary": primary}
+    e = int(e43[0]["step_edge_index"])
+    holds = [e - 1, e, e + 1, e + 2]
+    seed = _finite_row(np.asarray(sweep["seed_positions_rad"], dtype=float))
+
+    a_pre = _finite_row(pos[e + 1])       # last N=4 hold before the drop
+    a_post = _finite_row(pos[e])          # first N=3 hold
+    target_list = _greedy_unmatched(a_post, a_pre, ANNIH_MATCH_TOL_RAD)
+    if len(target_list) != 1:
+        return {"status": "inconclusive",
+                "why": (f"{len(target_list)} clusters disappear across the "
+                        f"count drop (expected exactly one localized soliton; "
+                        f">1 suggests a merged annihilation masked as 4->3)"),
+                "primary": primary, "n_disappearing": len(target_list),
+                "disappearing_angles": [float(x) for x in target_list]}
+    target = float(target_list[0])
+
+    nn_pre = _nn_separations(a_pre)
+    t_nn = min(_circ_dist(target, b) for b in a_pre if _circ_dist(target, b) > 1e-9)
+    rank_pre = _rank_smallest(nn_pre, t_nn)
+    smap, _ = _cyclic_seed_index(a_pre, seed)
+    a_sorted = np.sort(a_pre)
+    mi = int(np.argmin(np.abs(_wrap(a_sorted - target))))
+    seed_idx = smap.get(mi)
+    nn_seed = _nn_separations(seed) if seed.size else []
+    rank_seed = (_rank_smallest(nn_seed, nn_seed[seed_idx])
+                 if (seed_idx is not None and nn_seed) else None)
+
+    hold_rows = []
+    for h in holds:
+        ang = np.sort(_finite_row(pos[h]))
+        hold_rows.append({
+            "idx": int(h), "dw": float(dwk[h]), "count": int(counts[h]),
+            "count_end_snapshot": int(ce[h]), "count_agreement": float(ca[h]),
+            "P_comb": float(Pc[h]), "P_comb_std": float(Pcs[h]),
+            "breathing_relstd": float(br[h]),
+            "angles": [float(x) for x in ang]})
+    return {
+        "status": "ok", "primary": primary, "edge": e,
+        "match_tol_samples": tol, "detector_k": k_used,
+        "flip_hold_idx": int(e + 1), "flip_hold_dw": float(dwk[e + 1]),
+        "post_hold_idx": int(e), "post_hold_dw": float(dwk[e]),
+        "target_angle": target, "target_nn_sep": float(t_nn),
+        "target_rank_pre": int(rank_pre), "n_pre": int(a_pre.size),
+        "target_seed_sorted_idx": (int(seed_idx) if seed_idx is not None
+                                   else None),
+        "target_seed_nn_rank": (int(rank_seed) if rank_seed is not None
+                                else None),
+        "n_seed": int(seed.size),
+        "seed_positions_rad": [float(x) for x in np.sort(seed)],
+        "persistence_fractions_stored": bool(persistence_stored),
+        "holds": hold_rows,
+    }
+
+
+def _print_precondition(pc):
+    """Print the Stage-1 precondition dict (shared by --stepquanta / report)."""
+    if pc["status"] != "ok":
+        print(f"[annih-precond] INCONCLUSIVE: {pc['why']}")
+        return
+    print(f"[annih-precond] 4->3 matched edge {pc['edge']} (ascending); "
+          f"count-flip hold {pc['flip_hold_idx']} @ {pc['flip_hold_dw']:.4f}k "
+          f"(last N=4) -> hold {pc['post_hold_idx']} @ {pc['post_hold_dw']:.4f}k "
+          f"(first N=3)")
+    print(f"[annih-precond] {'hold':>4} {'dw/k':>7} {'N':>2} {'Nend':>4} "
+          f"{'agree':>6} {'P_comb':>10} {'Pc_std':>9} {'brelstd':>8}  angles")
+    for h in pc["holds"]:
+        print(f"[annih-precond] {h['idx']:>4} {h['dw']:7.4f} {h['count']:>2} "
+              f"{h['count_end_snapshot']:>4} {h['count_agreement']:6.3f} "
+              f"{h['P_comb']:10.4e} {h['P_comb_std']:9.3e} "
+              f"{h['breathing_relstd']:8.4f}  "
+              f"{[round(a, 3) for a in h['angles']]}")
+    print(f"[annih-precond] TARGET soliton angle {pc['target_angle']:.4f} rad "
+          f"(present at hold {pc['flip_hold_idx']}, absent at hold "
+          f"{pc['post_hold_idx']}) -- localized to ONE cluster")
+    print(f"[annih-precond] target NN separation {pc['target_nn_sep']:.4f} rad, "
+          f"rank {pc['target_rank_pre']} of {pc['n_pre']} (1 = tightest / most "
+          f"strongly interacting); maps to seed sorted-idx "
+          f"{pc['target_seed_sorted_idx']}, seed-NN rank "
+          f"{pc['target_seed_nn_rank']} of {pc['n_seed']}")
+    print(f"[annih-precond] per-cluster persistence_fractions stored in npz: "
+          f"{pc['persistence_fractions_stored']} (count_agreement is stored; "
+          f"the per-cluster breakdown is the Stage-2 instrumented deliverable)")
+
+
 def step_quanta_forensics() -> int:
     """Confirm/refute the split-step diagnosis behind Part 2i, offline.
 
@@ -1744,6 +1882,300 @@ def step_quanta_forensics() -> int:
     out.write_text(prior.rstrip() + "\n" + "\n".join(md) + "\n\n"
                    + "\n".join(md2) + "\n", encoding="utf-8")
     print(f"[stepquanta] report -> {out}")
+
+    # Stage 1 precondition for the count/energy-lag investigation (offline;
+    # names the target soliton for the --diagnose-annihilation instrumented
+    # run). Printed here; the md "count/energy lag" section is written by
+    # --annihilation-report once the Stage-2 sidecar exists.
+    print("[stepquanta] === count/energy lag Stage 1 precondition ===")
+    _print_precondition(_annihilation_precondition(sweep, metrics))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# --annihilation-report mode (Stage 3): adjudicate the count/energy lag from
+# the committed diagnose_annih_4to3.npz sidecar (the Stage-2 instrumented run).
+# Read-only; appends a "count/energy lag" section and prints the verdict.
+# ---------------------------------------------------------------------------
+ANNIH_DIAG_NPZ = "diagnose_annih_4to3.npz"
+ANNIH_ENERGY_COLLAPSED = 0.15     # < this fraction of the two-holds-earlier
+#                                   local energy == "collapsed" (strong form)
+ANNIH_ENERGY_MAJORITY = 0.50      # < this fraction == "majority of the quantum
+#                                   gone" (the COUNTER-LATENCY energy criterion)
+
+
+def annihilation_report() -> int:
+    """Stage 3: adjudicate the count/energy lag from the instrumented sidecar.
+
+    Reads ``analysis/results/diagnose_annih_4to3.npz`` (the Stage-2
+    ``--diagnose-annihilation`` run), tracks the TARGET soliton's per-cluster
+    LOCAL comb energy across the holds around the 4->3 count flip, and applies
+    the verdict rule: COUNTER-LATENCY (the height-based acceptance rule
+    certifies a soliton whose energy has already left) vs INTRINSIC LAG (the
+    annihilation genuinely completes across the count-flip hold, so the integer
+    count is correct per hold) vs INCONCLUSIVE (a merged event, or the target
+    is not resolvable).  Read-only; appends the "count/energy lag" section to
+    the report and prints the verdict.  No fix.
+    """
+    diag_path = RESULTS_DIR / ANNIH_DIAG_NPZ
+    if not diag_path.exists():
+        print(f"[annih-report] missing {diag_path} -- run "
+              f"`analysis/run_detuning_sweep.py --diagnose-annihilation` first")
+        return 2
+    sc = np.load(diag_path, allow_pickle=False)
+
+    # committed-data precondition (for the target angle + hold context).
+    sweep, _ = load_sweep_npz(RESULTS_DIR / SWEEP_NPZ)
+    with open(RESULTS_DIR / METRICS_JSON) as f:
+        metrics = json.load(f)
+    pc = _annihilation_precondition(sweep, metrics)
+
+    # order holds by DESCENDING detuning (the physical sweep direction).
+    dw = np.asarray(sc["dw_over_kappa"], float)
+    o = np.argsort(dw)[::-1]
+    dw = dw[o]
+    count = np.asarray(sc["soliton_count"], int)[o]
+    agree = np.asarray(sc["count_agreement"], float)[o]
+    col_ang = np.asarray(sc["col_angles_rad"], float)[o]        # (H, n_sol)
+    in_cl = np.asarray(sc["in_cluster"], bool)[o]               # (H, n_sol)
+    loc_e = np.asarray(sc["local_energy_bgsub"], float)[o]      # (H, n_in, S)
+    loc_pk = np.asarray(sc["local_peak"], float)[o]
+    ab_abs = np.asarray(sc["above_abs"], bool)[o]
+    ab_phys = np.asarray(sc["above_phys"], bool)[o]
+    floor_phys = np.asarray(sc["floor_phys"], float)[o]
+    b2 = np.asarray(sc["B2_ref"], float)[o]
+    target_committed = float(sc["target_angle_committed_rad"])
+    min_persist = float(sc["min_persistence"])
+    modes_from_uint = float(sc["modes_from_uint"])
+    H = dw.size
+
+    # locate the 4->3 count flip: the highest-detuning hold at which the
+    # counter's count drops from 4 to 3 going down.
+    flips = [i for i in range(1, H) if count[i - 1] == 4 and count[i] == 3]
+    status = "ok"
+    why = ""
+    if not flips:
+        status, why = "inconclusive", ("no 4->3 count transition in the "
+                                       "instrumented window (the counter's "
+                                       "reproduced trace differs)")
+    merged = pc.get("status") == "inconclusive"
+    if merged:
+        status, why = "inconclusive", pc.get("why", "precondition inconclusive")
+
+    verdict = "INCONCLUSIVE"
+    reason = why
+    rows_md = []
+    detail = {}
+    if status == "ok":
+        post = flips[0]                      # first N=3 hold (lower detuning)
+        flip = post - 1                      # last N=4 hold == the count-flip
+        # target column: counted at the flip hold, dropped just after, nearest
+        # the committed target angle.
+        cand = [k for k in range(col_ang.shape[1])
+                if in_cl[flip, k] and np.isfinite(col_ang[flip, k])]
+        if not cand:
+            status, why = "inconclusive", "no counted cluster at the flip hold"
+        else:
+            tcol = min(cand, key=lambda k: _circ_dist(col_ang[flip, k],
+                                                      target_committed))
+            # per-hold target local energy (mean over in-window snapshots) and
+            # peak-certification fraction.
+            e_hold = np.array([float(np.nanmean(loc_e[h, :, tcol]))
+                               for h in range(H)])
+            certify = np.array([
+                float(np.mean(ab_abs[h, :, tcol] & ab_phys[h, :, tcol]))
+                for h in range(H)])
+            ref = flip - 2                    # two holds earlier (higher dw)
+            if ref < 0:
+                status, why = "inconclusive", ("fewer than two holds above the "
+                                               "flip in the window")
+            else:
+                e_flip = e_hold[flip]
+                e_ref = e_hold[ref]
+                frac = e_flip / e_ref if e_ref > 0 else float("nan")
+                cert_flip = certify[flip]
+                dropped_after = (not in_cl[flip + 1, tcol]) \
+                    if flip + 1 < H else True
+                detail = dict(
+                    tcol=tcol, flip=flip, post=post, ref=ref,
+                    dw_flip=float(dw[flip]), dw_ref=float(dw[ref]),
+                    dw_post=float(dw[post]), e_flip=e_flip, e_ref=e_ref,
+                    frac=frac, cert_flip=cert_flip,
+                    agree_flip=float(agree[flip]),
+                    target_angle=float(col_ang[flip, tcol]),
+                    dropped_after=bool(dropped_after))
+                # trajectory rows for the report (a few holds either side).
+                for h in range(max(0, ref - 1), min(H, post + 2)):
+                    rows_md.append(dict(
+                        dw=float(dw[h]), count=int(count[h]),
+                        agree=float(agree[h]),
+                        e=float(e_hold[h]),
+                        e_frac=float(e_hold[h] / e_ref) if e_ref > 0 else
+                        float("nan"),
+                        pk=float(np.nanmean(loc_pk[h, :, tcol])),
+                        floor_phys=float(floor_phys[h]),
+                        certify=float(certify[h]),
+                        in_cl=bool(in_cl[h, tcol])))
+
+                majority_gone = frac < ANNIH_ENERGY_MAJORITY
+                collapsed = frac < ANNIH_ENERGY_COLLAPSED
+                peak_certifies = cert_flip >= min_persist
+                if majority_gone and peak_certifies:
+                    verdict = "COUNTER-LATENCY"
+                    reason = (
+                        f"at the count-flip hold ({dw[flip]:.4f}k) the target "
+                        f"soliton's local comb energy is {100 * frac:.1f}% of "
+                        f"its value two holds earlier ({dw[ref]:.4f}k) -- "
+                        f"{'collapsed' if collapsed else 'majority gone'} -- yet "
+                        f"its peak height clears soliton_frac*B2_ref in "
+                        f"{100 * cert_flip:.0f}% of snapshots (>= "
+                        f"{100 * min_persist:.0f}% min_persistence), so the "
+                        f"height-based rule certifies a soliton whose energy has "
+                        f"already left. The count is late BY CONSTRUCTION: a "
+                        f"peak-height-vs-energy defect in count_solitons_windowed")
+                elif not majority_gone:
+                    verdict = "INTRINSIC LAG (benign)"
+                    reason = (
+                        f"at the count-flip hold ({dw[flip]:.4f}k) the target "
+                        f"soliton still carries {100 * frac:.1f}% of its local "
+                        f"energy two holds earlier ({dw[ref]:.4f}k) -- "
+                        f"substantial -- so the annihilation genuinely completes "
+                        f"across the flip; the per-hold count is correct and the "
+                        f"one-hold offset is the expected integer-count vs "
+                        f"continuous-energy resolution mismatch")
+                else:
+                    verdict = "INCONCLUSIVE"
+                    reason = (
+                        f"the target's local energy at the flip hold is "
+                        f"{100 * frac:.1f}% of two holds earlier (between the "
+                        f"{100 * ANNIH_ENERGY_COLLAPSED:.0f}% collapse and "
+                        f"{100 * ANNIH_ENERGY_MAJORITY:.0f}% substantial "
+                        f"thresholds) or its peak fails to certify "
+                        f"(certify {100 * cert_flip:.0f}% vs "
+                        f"{100 * min_persist:.0f}%): neither criterion is met "
+                        f"cleanly")
+
+    # ---- print --------------------------------------------------------------
+    print("[annih-report] === count/energy lag adjudication (Stage 3) ===")
+    if pc.get("status") == "ok":
+        print(f"[annih-report] target (committed) ~{target_committed:.4f} rad, "
+              f"seed sorted-idx {pc.get('target_seed_sorted_idx')}, seed-NN "
+              f"rank {pc.get('target_seed_nn_rank')} of {pc.get('n_seed')}")
+    if detail:
+        print(f"[annih-report] target column {detail['tcol']} @ "
+              f"{detail['target_angle']:.4f} rad; flip hold {detail['dw_flip']:.4f}k "
+              f"(N4, agree {detail['agree_flip']:.3f}) -> post {detail['dw_post']:.4f}k "
+              f"(N3); ref (two earlier) {detail['dw_ref']:.4f}k")
+        print(f"[annih-report] target local energy: flip {detail['e_flip']:.4e} "
+              f"vs ref {detail['e_ref']:.4e} -> {100 * detail['frac']:.1f}% "
+              f"remaining; peak-certify fraction at flip "
+              f"{100 * detail['cert_flip']:.0f}% (min_persistence "
+              f"{100 * min_persist:.0f}%); dropped after flip: "
+              f"{detail['dropped_after']}")
+        print(f"[annih-report] trajectory (dw, N, agree, E, E/ref, certify, in_cluster):")
+        for r in rows_md:
+            print(f"[annih-report]   {r['dw']:.4f}k N={r['count']} "
+                  f"agree={r['agree']:.3f} E={r['e']:.4e} "
+                  f"E/ref={100 * r['e_frac']:5.1f}% certify={100 * r['certify']:3.0f}% "
+                  f"{'IN' if r['in_cl'] else 'out'}")
+    print(f"[annih-report] VERDICT: {verdict} -- {reason}")
+
+    # ---- md section ---------------------------------------------------------
+    md = []
+    md.append("## Count/energy lag (offline)")
+    md.append("")
+    md.append(f"Generated {_dt.datetime.now(_dt.timezone.utc).isoformat()} by "
+              f"`analysis/staircase_forensics.py --annihilation-report` "
+              f"(offline adjudication of the Stage-2 instrumented run "
+              f"`analysis/run_detuning_sweep.py --diagnose-annihilation`, whose "
+              f"sidecar is `analysis/results/{ANNIH_DIAG_NPZ}`). Decides whether "
+              f"the 4->3 count/energy offset is COUNTER-LATENCY (the "
+              f"physics-anchored height rule holds a dying soliton above "
+              f"threshold one hold too long) or an INTRINSIC integer-count vs "
+              f"continuous-energy LAG.")
+    md.append("")
+    if pc.get("status") == "ok":
+        md.append(f"### Stage 1 precondition (committed npz)")
+        md.append("")
+        md.append(f"- 4->3 matched edge {pc['edge']}; count-flip hold "
+                  f"{pc['flip_hold_idx']} @ {pc['flip_hold_dw']:.4f}k (last N=4) "
+                  f"-> hold {pc['post_hold_idx']} @ {pc['post_hold_dw']:.4f}k "
+                  f"(first N=3).")
+        md.append(f"- TARGET soliton ~{pc['target_angle']:.4f} rad, localized to "
+                  f"ONE cluster; NN-separation rank {pc['target_rank_pre']} of "
+                  f"{pc['n_pre']} (1 = tightest); maps to seed sorted-idx "
+                  f"{pc['target_seed_sorted_idx']}, seed-NN rank "
+                  f"{pc['target_seed_nn_rank']} of {pc['n_seed']} -- the most "
+                  f"strongly interacting soliton.")
+        md.append("")
+        md.append("| hold | dw/k | N | N_end-snap | count_agreement | P_comb | "
+                  "breathing_relstd | cluster angles (rad) |")
+        md.append("|---|---|---|---|---|---|---|---|")
+        for h in pc["holds"]:
+            md.append(f"| {h['idx']} | {h['dw']:.4f} | {h['count']} | "
+                      f"{h['count_end_snapshot']} | {h['count_agreement']:.3f} | "
+                      f"{h['P_comb']:.4e} | {h['breathing_relstd']:.4f} | "
+                      f"{[round(a, 3) for a in h['angles']]} |")
+        md.append("")
+    if detail:
+        md.append("### Target soliton local-energy trajectory (instrumented)")
+        md.append("")
+        md.append("Local comb energy = angular integral of |E(theta)|^2 over "
+                  "+/- cluster_tol around the tracked cluster, background "
+                  "(angular median) subtracted, meaned over the in-window "
+                  "snapshots; E/ref is relative to the value two holds above the "
+                  "flip; certify = fraction of snapshots whose local peak clears "
+                  "BOTH acceptance floors (bg_floor_multiple*median AND "
+                  "soliton_frac*B2_ref).")
+        md.append("")
+        md.append("| dw/k | N (counter) | count_agreement | target local E | "
+                  "E/ref | mean local peak | soliton_frac*B2_ref | certify frac | "
+                  "counted? |")
+        md.append("|---|---|---|---|---|---|---|---|---|")
+        for r in rows_md:
+            md.append(f"| {r['dw']:.4f} | {r['count']} | {r['agree']:.3f} | "
+                      f"{r['e']:.4e} | {100 * r['e_frac']:.1f}% | {r['pk']:.4e} | "
+                      f"{r['floor_phys']:.4e} | {100 * r['certify']:.0f}% | "
+                      f"{'yes' if r['in_cl'] else 'no'} |")
+        md.append("")
+        md.append(f"- at the count-flip hold ({detail['dw_flip']:.4f}k, the last "
+                  f"hold the target is counted, count_agreement "
+                  f"{detail['agree_flip']:.3f}): target local energy is "
+                  f"**{100 * detail['frac']:.1f}%** of its value two holds "
+                  f"earlier ({detail['dw_ref']:.4f}k), and its peak certifies in "
+                  f"**{100 * detail['cert_flip']:.0f}%** of snapshots "
+                  f"(min_persistence {100 * min_persist:.0f}%).")
+        md.append("")
+    md.append("### Verdict")
+    md.append("")
+    md.append("Rule: **COUNTER-LATENCY** iff at the count-flip hold the target's "
+              "local energy has collapsed (majority of the quantum gone) yet its "
+              "peak keeps it above the acceptance floor in >= min_persistence of "
+              "snapshots (the height-based rule certifies a soliton whose energy "
+              "has left -- a peak-height-vs-energy defect in "
+              "count_solitons_windowed); **INTRINSIC LAG (benign)** iff the "
+              "target still carries substantial local energy at the count-flip "
+              "hold (the annihilation completes across the flip, so the integer "
+              "count is correct per hold); **INCONCLUSIVE** otherwise (e.g. a "
+              "merged 4->2 event masked as 4->3).")
+    md.append("")
+    md.append(f"**VERDICT: {verdict}** -- {reason}")
+    md.append("")
+    md.append("No fix applied: this diagnosis is the deliverable. No threshold, "
+              "gate, test, or committed artifact was changed. The next action "
+              "(if COUNTER-LATENCY: reconcile the counter's peak-height "
+              "acceptance with an energy/area criterion; if INTRINSIC: accept "
+              "the one-hold offset as a resolution limit and, if desired, report "
+              "a plateau-integrated step height) awaits review.")
+    md.append("")
+
+    out = RESULTS_DIR / REPORT_MD
+    prior = out.read_text(encoding="utf-8") if out.exists() else ""
+    marker = "\n## Count/energy lag (offline)"
+    if marker in prior:                       # idempotent: replace this section
+        prior = prior[:prior.index(marker)].rstrip() + "\n"
+    out.write_text(prior.rstrip() + "\n" + "\n".join(md) + "\n", encoding="utf-8")
+    print(f"[annih-report] report -> {out}")
     return 0
 
 
@@ -1771,7 +2203,13 @@ def main() -> None:
                          "tabulate each matched N->N-1 step's adjacent unmatched "
                          "discontinuities, and append a SPLIT-STEP CONFIRMED / "
                          "NOT A SPLIT STEP / AMBIGUOUS verdict to "
-                         "staircase_forensics.md")
+                         "staircase_forensics.md (also prints the count/energy "
+                         "lag Stage 1 precondition)")
+    ap.add_argument("--annihilation-report", action="store_true",
+                    help="Stage 3: adjudicate the 4->3 count/energy lag from the "
+                         "committed diagnose_annih_4to3.npz sidecar; appends a "
+                         "'count/energy lag' COUNTER-LATENCY / INTRINSIC LAG / "
+                         "INCONCLUSIVE verdict to staircase_forensics.md")
     args = ap.parse_args()
     if args.starvation:
         sys.exit(starvation_forensics())
@@ -1781,6 +2219,8 @@ def main() -> None:
         sys.exit(diagnose_report())
     if args.stepquanta:
         sys.exit(step_quanta_forensics())
+    if args.annihilation_report:
+        sys.exit(annihilation_report())
 
     sweep, cfg, audit_lines, missing = load_and_audit()
     for ln in audit_lines:
