@@ -37,6 +37,7 @@ from analysis.spectral_metrics import (
     detect_power_steps,
     hold_window_average,
     match_steps_to_transitions,
+    plateau_transition_energies,
     plot_soliton_steps,
     single_dks_region,
     soliton_count_transitions,
@@ -713,6 +714,118 @@ def test_end_to_end_synthetic_staircase_5_to_1_stock_detector():
     # each matched height is the one-soliton quantum, not detector noise
     for m in align["matched"]:
         assert abs(m["step_dy"]) == pytest.approx(u_sol, abs=0.02)
+
+
+# ---------------------------------------------------------------------------
+# plateau_transition_energies: the quantization observable robust to the
+# count/energy one-hold offset (see analysis/results/staircase_forensics.md,
+# count/energy lag -> INTRINSIC LAG). The plateau-mean difference compares
+# SETTLED branch energies, so it is insensitive to whether the integer count
+# decrements one hold before/after the continuous energy drop completes; the
+# single-edge step_dy is not.
+# ---------------------------------------------------------------------------
+def _plateau_staircase(levels_by_count, counts, *, offset_at=None,
+                       offset_frac=0.75, ripple=0.0, seed=0):
+    """Ascending-detuning primary trace on a piecewise-constant count trace.
+
+    ``counts`` is the ascending soliton-count trace; each hold's baseline
+    energy is ``levels_by_count[count]``.  With ``offset_at`` set to a
+    transition edge ``e`` (count changes across e), the ENERGY change is split
+    one hold EARLY relative to the count: the count-flip hold ``e+1`` already
+    carries ``offset_frac`` of the step while the count is still the low value
+    at hold ``e`` -- i.e. the continuous drop leads the integer decrement by one
+    hold (a mid-hold annihilation), exactly the committed 4->3 signature.
+    Returns ``(primary, counts)``.
+    """
+    c = np.asarray(counts, dtype=int)
+    y = np.array([levels_by_count[int(v)] for v in c], dtype=np.float64)
+    if offset_at is not None:
+        e = int(offset_at)
+        hi, lo = levels_by_count[int(c[e + 1])], levels_by_count[int(c[e])]
+        # hold e keeps the low branch, but hold e-1 ... actually move a fraction
+        # of the step onto hold e (still counted as the low count): the energy
+        # at hold e sits offset_frac of the way up to the high branch, so the
+        # single-edge jump at the count edge e is only (1-offset_frac) of the
+        # quantum and the remainder already happened at edge e-1 (in-plateau).
+        y[e] = lo + offset_frac * (hi - lo)
+    if ripple:
+        y = y + np.random.default_rng(seed).normal(0.0, ripple, y.size)
+    return y, c
+
+
+def test_plateau_transition_energies_clean_staircase_quantizes():
+    # 1->2->3, plateaus of 4 holds, one-soliton quantum = 0.2 on a 0.5 bg.
+    counts = np.repeat([1, 2, 3], 4)
+    levels = {1: 0.7, 2: 0.9, 3: 1.1}
+    y, c = _plateau_staircase(levels, counts, ripple=0.003, seed=1)
+    tr = soliton_count_transitions(np.arange(c.size, dtype=float), c)
+    pte = plateau_transition_energies(y, c, tr)
+    assert [(p["n_high_side"], p["n_low_side"]) for p in pte] == [(2, 1), (3, 2)]
+    pq = [p["per_quantum"] for p in pte]
+    assert all(q == pytest.approx(0.2, abs=0.01) for q in pq)
+    assert max(pq) / min(pq) <= 2.0
+    # signed plateau_energy is high-minus-low (a rise going up in detuning)
+    assert all(p["plateau_energy"] > 0 for p in pte)
+
+
+def test_plateau_mean_is_offset_insensitive_single_edge_is_not():
+    # The decisive synthetic: the 2->3 energy change LEADS the count by one hold
+    # (mid-hold annihilation). Single-edge step_dy mis-measures the quantum at
+    # that transition; the plateau-mean difference recovers it.
+    counts = np.repeat([1, 2, 3], 5)
+    levels = {1: 0.70, 2: 0.90, 3: 1.10}          # true quantum 0.20
+    edges = [i for i in range(counts.size - 1) if counts[i + 1] != counts[i]]
+    e_23 = edges[1]                               # the 2->3 count edge
+    y, c = _plateau_staircase(levels, counts, offset_at=e_23, offset_frac=0.75)
+
+    tr = soliton_count_transitions(np.arange(c.size, dtype=float), c)
+    pte = plateau_transition_energies(y, c, tr)
+    pq = {(p["n_high_side"], p["n_low_side"]): p["per_quantum"] for p in pte}
+    # PLATEAU level: both transitions recover the SAME 0.20 quantum (offset
+    # holds are excluded from the stable interiors) -> quantized within 2x.
+    assert pq[(2, 1)] == pytest.approx(0.20, abs=1e-9)
+    assert pq[(3, 2)] == pytest.approx(0.20, abs=1e-9)
+    assert max(pq.values()) / min(pq.values()) == pytest.approx(1.0, abs=1e-6)
+
+    # SINGLE EDGE: the offset splits the 2->3 quantum across edge e_23 (the
+    # count flip) and edge e_23-1 (in-plateau), so the count-edge step_dy is
+    # only (1-offset_frac)=0.25 of the quantum while the clean 1->2 edge is the
+    # full 0.20 -> ratio 4 >> 2, NOT quantized.  This is why Part 2i's
+    # single-edge form is xfail-pinned.
+    dy = np.diff(y)
+    e_12 = edges[0]
+    se_12, se_23 = abs(dy[e_12]), abs(dy[e_23])
+    assert se_23 == pytest.approx(0.05, abs=1e-9)      # quarter quantum
+    assert se_12 == pytest.approx(0.20, abs=1e-9)      # full quantum
+    assert se_12 / se_23 > 2.0                         # single-edge fails
+
+
+def test_plateau_transition_energies_merged_edge_divides_by_delta_n():
+    # a merged 3->1 annihilation (delta_n = 2) reports per-quantum = |dE| / 2.
+    counts = np.concatenate([np.repeat(1, 4), np.repeat(3, 4)])
+    levels = {1: 0.7, 3: 1.1}
+    y, c = _plateau_staircase(levels, counts)
+    tr = soliton_count_transitions(np.arange(c.size, dtype=float), c)
+    (p,) = plateau_transition_energies(y, c, tr)
+    assert p["delta_n"] == 2
+    assert p["plateau_energy"] == pytest.approx(0.4, abs=1e-9)
+    assert p["per_quantum"] == pytest.approx(0.2, abs=1e-9)
+
+
+def test_plateau_transition_energies_short_plateau_fallback_and_validation():
+    # length-2 flanking plateaus: excluding both boundary holds would empty the
+    # interior, so the helper falls back to the full plateau (never crashes).
+    counts = np.array([1, 1, 2, 2, 3, 3])
+    levels = {1: 0.7, 2: 0.9, 3: 1.1}
+    y, c = _plateau_staircase(levels, counts)
+    tr = soliton_count_transitions(np.arange(c.size, dtype=float), c)
+    pte = plateau_transition_energies(y, c, tr)
+    for p in pte:
+        assert p["high_interior"][0] <= p["high_interior"][1]
+        assert p["low_interior"][0] <= p["low_interior"][1]
+        assert p["per_quantum"] == pytest.approx(0.2, abs=1e-9)
+    with pytest.raises(ValueError):
+        plateau_transition_energies(np.arange(5.0), np.arange(4), tr)
 
 
 # ---------------------------------------------------------------------------

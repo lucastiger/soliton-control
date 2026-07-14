@@ -1270,6 +1270,104 @@ def match_steps_to_transitions(steps, transitions, tol_samples: int = 1):
     }
 
 
+def plateau_transition_energies(primary, soliton_count, transitions):
+    """Plateau-level transition energies -- the observable robust to the
+    count/energy one-hold offset at a mid-hold annihilation.
+
+    A single-edge ``step_dy`` mis-measures a soliton's energy quantum when the
+    integer, hold-quantized ``soliton_count`` decrements one hold before (or
+    after) the continuous comb-energy drop completes: the drop is then split
+    across the count-flip hold and an adjacent in-plateau hold, so no single
+    edge carries the whole quantum (see ``analysis/results/
+    staircase_forensics.md`` -- count/energy lag, verdict INTRINSIC LAG).  The
+    PLATEAU-MEAN difference is insensitive to that offset: it compares the
+    settled energy of the count-N branch with the settled energy of the
+    count-(N-1) branch, ignoring the one or two transitional holds where the
+    count and energy are mid-flip.
+
+    For every transition (a :func:`soliton_count_transitions` dict, edge ``e``
+    joining ascending samples ``e`` and ``e+1``) this computes::
+
+        plateau_energy = mean(primary over the STABLE count-(n_high) plateau)
+                       - mean(primary over the STABLE count-(n_low)  plateau)
+
+    where each stable plateau is the maximal constant-count run adjacent to the
+    edge with its boundary holds that touch a count transition removed (the
+    transitional holds), always keeping at least one hold (a length-1 or -2
+    plateau falls back to its full extent).  ``primary`` and ``soliton_count``
+    are per-hold arrays in ASCENDING detuning order (the
+    :func:`detect_power_steps` / :func:`soliton_count_transitions` convention);
+    ``primary`` may be raw or normalised (the difference scales with it).
+
+    Returns one dict per transition (input order) with ``edge_index``,
+    ``n_high_side``, ``n_low_side``, ``delta_n``, the ``high_plateau`` /
+    ``low_plateau`` full index ranges, the ``high_interior`` / ``low_interior``
+    stable index ranges actually averaged, ``mean_high`` / ``mean_low``,
+    ``plateau_energy`` (signed: high minus low) and ``per_quantum``
+    (``|plateau_energy| / delta_n`` -- the energy of ONE annihilated soliton,
+    so a merged N -> N-2 edge is divided by two).
+    """
+    y = np.asarray(primary, dtype=np.float64).ravel()
+    c = np.asarray(soliton_count).ravel()
+    if y.shape != c.shape:
+        raise ValueError(
+            f"primary and soliton_count must match; got {y.shape} vs {c.shape}")
+    n = c.size
+    c_int = c.astype(np.int64)
+
+    # every count-change edge (transition boundary), from the counts alone.
+    change_edges = {int(i) for i in range(n - 1) if c_int[i + 1] != c_int[i]}
+
+    def _plateau_of(idx):
+        """Maximal constant-count run [lo, hi] containing sample ``idx``."""
+        lo = hi = int(idx)
+        while lo - 1 >= 0 and c_int[lo - 1] == c_int[idx]:
+            lo -= 1
+        while hi + 1 < n and c_int[hi + 1] == c_int[idx]:
+            hi += 1
+        return lo, hi
+
+    def _stable_interior(lo, hi):
+        """Drop the boundary holds adjacent to a count transition (>= 1 kept)."""
+        a, b = int(lo), int(hi)
+        # a touches a transition below iff edge a-1 is a change edge
+        if (a - 1) in change_edges:
+            a += 1
+        # b touches a transition above iff edge b is a change edge
+        if b in change_edges:
+            b -= 1
+        if a > b:                       # length-1/-2 plateau: use its full extent
+            return int(lo), int(hi)
+        return a, b
+
+    out = []
+    for tr in transitions:
+        e = int(tr["edge_index"])
+        hi_lo, hi_hi = _plateau_of(e + 1)          # high-detuning (n_high) side
+        lo_lo, lo_hi = _plateau_of(e)              # low-detuning (n_low) side
+        hi_a, hi_b = _stable_interior(hi_lo, hi_hi)
+        lo_a, lo_b = _stable_interior(lo_lo, lo_hi)
+        mean_high = float(np.mean(y[hi_a:hi_b + 1]))
+        mean_low = float(np.mean(y[lo_a:lo_b + 1]))
+        plateau_energy = mean_high - mean_low
+        delta_n = max(int(tr["delta_n"]), 1)
+        out.append({
+            "edge_index": e,
+            "n_high_side": int(tr["n_high_side"]),
+            "n_low_side": int(tr["n_low_side"]),
+            "delta_n": int(tr["delta_n"]),
+            "high_plateau": [int(hi_lo), int(hi_hi)],
+            "low_plateau": [int(lo_lo), int(lo_hi)],
+            "high_interior": [int(hi_a), int(hi_b)],
+            "low_interior": [int(lo_a), int(lo_b)],
+            "mean_high": mean_high,
+            "mean_low": mean_low,
+            "plateau_energy": float(plateau_energy),
+            "per_quantum": float(abs(plateau_energy) / delta_n),
+        })
+    return out
+
+
 def _moving_average(y, w):
     """Odd-window centred moving average (edge-replicated); display smoothing only."""
     y = np.asarray(y, dtype=np.float64)

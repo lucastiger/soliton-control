@@ -298,6 +298,7 @@ from analysis.spectral_metrics import (  # noqa: E402
     detect_power_steps,
     hold_window_average,
     match_steps_to_transitions,
+    plateau_transition_energies,
     plot_soliton_steps,
     single_dks_region,
     soliton_count_transitions,
@@ -981,7 +982,7 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
     # detections are PROVEN soliton steps.  The hard validation gate runs here,
     # BEFORE any artifact is written -- on failure nothing is rendered and the
     # caller prints the escalation ladder and exits nonzero.
-    transitions, align, any_region = [], None, None
+    transitions, align, any_region, pte_by_edge = [], None, None, {}
     if has_staircase:
         transitions = soliton_count_transitions(dwk, counts)
         align = match_steps_to_transitions(steps, transitions)
@@ -992,6 +993,12 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
             raise StaircaseValidationError(
                 "staircase validation failed (no artifacts written):\n  - "
                 + "\n  - ".join(problems))
+        # Plateau-level transition energies on the SAME normalised plotted
+        # primary the single-edge step_dy uses -- the quantization observable
+        # robust to the count/energy one-hold offset (see staircase_forensics.md
+        # count/energy lag -> INTRINSIC LAG).  Keyed by transition edge index.
+        pte_by_edge = {p["edge_index"]: p for p in plateau_transition_energies(
+            y1_norm, counts, transitions)}
 
     caption = (
         f"{cfg.n_solitons}-soliton staircase, pin = {cfg.pin_w} W, n_tau = "
@@ -1113,6 +1120,69 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
         block["any_soliton_region_over_kappa"] = (
             [float(any_region[0]), float(any_region[1])] if any_region
             else None)
+
+        # count/energy lag provenance (the documented, xfail-pinned single-edge
+        # limitation).  For the 4->3 annihilation the integer soliton_count
+        # decrements one hold before the continuous comb-energy drop completes,
+        # so the quantum is SPLIT across the count-flip edge and the adjacent
+        # in-plateau edge; the per-hold count is CORRECT (verdict INTRINSIC
+        # LAG).  Recorded from the plotted-primary first differences.
+        dy_primary = np.diff(y1_norm)
+        m43 = next((m for m in align["matched"] if m["n_high_side"] == 4
+                    and m["n_low_side"] == 3 and m["delta_n"] == 1), None)
+        count_energy_lag = None
+        if m43 is not None:
+            fe = int(m43["transition_edge_index"])       # count-flip edge
+            dy_flip = float(dy_primary[fe]) if fe < dy_primary.size else None
+            # the adjacent same-sign in-plateau discontinuity carrying the rest
+            # of the drop (the count-4 hold whose energy is still mid-flip).
+            adj = None
+            if dy_flip is not None:
+                sgn = np.sign(dy_flip)
+                for cand in (fe + 1, fe - 1):
+                    if 0 <= cand < dy_primary.size and \
+                            np.sign(dy_primary[cand]) == sgn and \
+                            counts[cand] == counts[cand + 1]:
+                        adj = cand
+                        break
+            dy_adj = float(dy_primary[adj]) if adj is not None else None
+            tot = abs(dy_flip) + (abs(dy_adj) if dy_adj is not None else 0.0)
+            split = ([abs(dy_flip) / tot, abs(dy_adj) / tot]
+                     if (dy_adj is not None and tot > 0) else None)
+            count_energy_lag = {
+                "affected_transition": "4->3",
+                "transition_edge_index": fe,
+                "count_flip_over_kappa": float(m43["dw_mid"]),
+                "single_edge_step_dy_at_flip": dy_flip,
+                "adjacent_in_plateau_edge_index": adj,
+                "single_edge_step_dy_adjacent": dy_adj,
+                "split_fraction_flip_vs_adjacent": split,
+                "plateau_transition_energy": (
+                    pte_by_edge[fe]["plateau_energy"]
+                    if fe in pte_by_edge else None),
+                "verdict": "INTRINSIC LAG (benign)",
+                "note": (
+                    "the integer, hold-quantized soliton_count decrements one "
+                    "hold before the continuous comb-energy drop completes at "
+                    "the 4->3 mid-hold annihilation, so the single-edge step_dy "
+                    "at the count-flip hold carries only part of the quantum "
+                    "(the remainder appears at the adjacent count-4 plateau "
+                    "hold).  The per-hold count is CORRECT (the target soliton "
+                    "is substantially present in the snapshots where it is "
+                    "detected and gone by the next hold -- see the count/energy "
+                    "lag section).  Quantization is therefore evaluated at "
+                    "PLATEAU level (plateau_transition_energy / "
+                    "plateau_per_quantum on each matched step); the single-edge "
+                    "step_dy form is xfail-pinned in "
+                    "tests/test_soliton_staircase.py::"
+                    "test_step_heights_quantized_single_edge_xfail."),
+                "verdict_reference": (
+                    "analysis/results/staircase_forensics.md -- count/energy "
+                    "lag: INTRINSIC LAG (benign).  Full verdict chain: "
+                    "counting-artifact -> starvation-falsified -> "
+                    "relative-threshold-coupling -> physics-anchor -> "
+                    "split-step-refuted -> intrinsic-lag."),
+            }
         block["staircase"] = {
             "n_seeded": int(cfg.n_solitons),
             "n_solitons_seeded": int(cfg.n_solitons),
@@ -1124,6 +1194,16 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
             "matched_steps": [
                 {"dw_mid": m["dw_mid"], "delta_n": m["delta_n"],
                  "step_dy": m["step_dy"],
+                 # plateau-mean transition energy on the plotted primary (the
+                 # offset-robust quantum; step_dy is the raw single-edge value
+                 # that the count/energy hold-offset can split -- see
+                 # count_energy_lag below).
+                 "plateau_transition_energy": (
+                     pte_by_edge[m["transition_edge_index"]]["plateau_energy"]
+                     if m["transition_edge_index"] in pte_by_edge else None),
+                 "plateau_per_quantum": (
+                     pte_by_edge[m["transition_edge_index"]]["per_quantum"]
+                     if m["transition_edge_index"] in pte_by_edge else None),
                  "step_edge_index": m["step_edge_index"],
                  "transition_edge_index": m["transition_edge_index"],
                  "n_high_side": m["n_high_side"],
@@ -1148,6 +1228,7 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
                 "collapses at the last annihilation, while remaining weak in "
                 "the TOTAL intracavity power (comparable-energy background "
                 "replaces the soliton there)"),
+            "count_energy_lag": count_energy_lag,
             "match_tol_samples": int(align["tol_samples"]),
             "validation": {
                 "rule": ">= 2 matched (state-verified) soliton steps AND "
