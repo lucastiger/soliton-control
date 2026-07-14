@@ -192,7 +192,7 @@ Generated 2026-07-13T05:26:41.654287+00:00 by `analysis/staircase_forensics.py -
 - No fix applied: this diagnosis is the deliverable. Any remedy (e.g. dropping the coupled relative arm of the candidate floor) is a separate, gated change -- not made here.
 ## Step-quanta (offline)
 
-Generated 2026-07-13T23:50:01.064293+00:00 by `analysis/staircase_forensics.py --stepquanta` (offline; no solver run; read-only on the committed artifacts). Confirms or refutes the split-step diagnosis behind the failing `tests/test_soliton_staircase.py::test_step_heights_quantized` (Part 2i).
+Generated 2026-07-14T00:04:18.287010+00:00 by `analysis/staircase_forensics.py --stepquanta` (offline; no solver run; read-only on the committed artifacts). Confirms or refutes the split-step diagnosis behind the failing `tests/test_soliton_staircase.py::test_step_heights_quantized` (Part 2i).
 
 - npz: `detuning_sweep.npz`  sha256 `fe7b6789daac517b...`
 - primary observable (from the staircase JSON block): `P_comb`; detector k = 6, match tol = 1 sample; robust sigma = 7.880e-04
@@ -224,4 +224,52 @@ Rule: **SPLIT-STEP CONFIRMED** iff the 4->3 matched edge has exactly one adjacen
 **VERDICT: AMBIGUOUS** -- aggregating the dominant adjacent same-sign discontinuity (edge 33, +0.10272) restores quantization (ratio 1.061 <= 2), so the split direction is supported -- but the strict split-step criterion is NOT met: the 4->3 edge has 2 same-sign adjacent unmatched discontinuities, not exactly one, and the reference edge is itself flanked by a same-sign neighbour (plateau ripple fragments multiple steps, so 'adjacent same-sign unmatched' is not a unique split signal)
 
 No fix applied: this diagnosis is the deliverable. Any remedy (aggregating split matched+adjacent discontinuities before the quantization check, a plateau-level step-height measure, or accepting the merged-annihilation reference) is a separate, gated change -- not made here.
+
+
+## Plateau-bounded aggregation (offline)
+
+Generated 2026-07-14T00:04:18.287699+00:00 by `analysis/staircase_forensics.py --stepquanta` (offline; no solver run; read-only on the committed artifacts). Tests a PHYSICALLY BOUNDED aggregation rule for the Part 2i step heights: the AMBIGUOUS verdict above showed that 'exactly one adjacent same-sign unmatched discontinuity' is not a valid split-partner signal (plateau ripple scatters same-sign unmatched neighbours around most edges), so aggregation is bounded here by the COUNT STRUCTURE (plateaus), not a neighbour radius.
+
+- primary observable `P_comb`; detector k = 6, match tol = 1; robust sigma = 7.880e-04; npz sha256 `fe7b6789daac517b...` (recomputation matches committed).
+- soliton_count plateaus (count: idx range): 0:[0,27], 1:[28,29], 3:[30,32], 4:[33,40], 5:[41,260]
+- count-change edges: [27, 29, 32, 40] -- ALL are matched (`unmatched_transitions` is empty; 0 unmatched count-change edges). **Every one of the 64 unmatched discontinuities is therefore in-plateau ripple**, so no count-changing fragment exists to legitimately absorb into any annihilation window.
+
+### Annihilation windows (matched N->N-1, excluding 1->0)
+
+| transition | matched edge | dw_mid (k) | delta_n | matched step_dy | low-count plateau | high-count plateau | window edges | aggregated |step_dy| | per-quantum |
+|---|---|---|---|---|---|---|---|---|---|
+| 3->1 | 29 | 6.2375 | 2 | +0.34604 | 1:[28,29] | 3:[30,32] | [29] | 0.34604 | 0.17302 |
+| 4->3 | 32 | 6.3125 | 1 | +0.05683 | 3:[30,32] | 4:[33,40] | [32] | 0.05683 | 0.05683 |
+| 5->4 | 40 | 6.5125 | 1 | +0.16929 | 4:[33,40] | 5:[41,260] | [40] | 0.16929 | 0.16929 |
+
+Neighbour classification (same-sign unmatched within tol of each matched edge -- inside the plateau-bounded window or excluded, and why):
+
+- 4->3 edge 32: neighbour edge 31 (+0.01119) -- EXCLUDED: in-plateau ripple (count 3->3, no change) -> EXCLUDED
+- 4->3 edge 32: neighbour edge 33 (+0.10272) -- EXCLUDED: in-plateau ripple (count 4->4, no change) -> EXCLUDED
+- 5->4 edge 40: neighbour edge 41 (+0.06142) -- EXCLUDED: in-plateau ripple (count 5->5, no change) -> EXCLUDED
+
+### Per-quantum magnitudes and ratios
+
+- plateau-bounded per-quantum: 3->1 = 0.17302, 4->3 = 0.05683, 5->4 = 0.16929
+- plateau-bounded pairwise ratio (max/min): **3.044** (the raw single-edge ratio is 3.044; identical here because every window is a single matched edge)
+
+### Sensitivity / anti-laundering (per-quantum at committed tol = 1)
+
+| transition | (a) plateau-bounded | (b) tol=1 same-sign | (c) matched-only |
+|---|---|---|---|
+| 3->1 | 0.17302 [29] | 0.17302 [29] | 0.17302 |
+| 4->3 | 0.05683 [32] | 0.17074 [31, 32, 33] | 0.05683 |
+| 5->4 | 0.16929 [40] | 0.23071 [40, 41] | 0.16929 |
+
+- **plateau-bounded is INSENSITIVE to the reach**: per-quantum identical at radius 1/2/3 = True (it is defined by count structure, not a neighbour radius -- no count-change fragment exists to admit at any reach).
+- the over-permissive (b) tol-same-sign rule GROWS with the reach (it absorbs progressively more in-plateau ripple), e.g. the 4->3 per-quantum at radius 1/2/3 = 0.17074/0.17074/0.20477 and the 5->4 = 0.23071/0.26564/0.26564 -- confirming (b) launders quantization by absorbing ripple, which the plateau bound forbids.
+- (a) equals (c): with no unmatched count-change fragments, the physically bounded window is exactly the matched edge, so the plateau-bounded magnitudes ARE the raw single-edge magnitudes.
+
+### Verdict
+
+Rule (plateau-bounded only): **QUANTIZED (plateau-bounded)** iff all plateau-bounded per-quantum magnitudes agree pairwise within a factor of 2 AND each window is the matched edge plus only count-changing same-sign fragments (no in-plateau ripple absorbed); **NOT QUANTIZED** iff the plateau-bounded per-quantum magnitudes still exceed a factor of 2 (a real physics finding -- possible merged annihilation or genuine non-quantization); **STILL AMBIGUOUS** iff the window construction is undefined for some transition (overlapping windows or unresolvable flanking plateaus).
+
+**VERDICT: NOT QUANTIZED** -- the plateau-bounded per-quantum magnitudes still span a factor 3.044 > 2. Every count-change edge is already matched (0 unmatched count-change edges exist), so the annihilation windows are all single matched edges and the plateau-bounded sums equal the raw single-edge magnitudes: the short 4->3 step (per-quantum 0.05683) cannot be restored by absorbing edge 33 (+0.10272), which lies INSIDE the count-4 plateau (no count change). A real finding: the position-persistence count and the comb-energy drop are offset by one hold at this annihilation, so a count-structure-respecting aggregation does not quantize the single-edge heights
+
+No fix applied: this adjudication is the deliverable. The finding -- the 4->3 comb-power drop is split across the count-flip hold (edge 32, matched, ~1/3 quantum) and the adjacent count-4 plateau hold (edge 33, ~2/3 quantum), i.e. the position-persistence count lags the comb-energy drop by one hold -- means any legitimate remedy (a plateau-integrated step height, or reconciling the count observable with the energy observable at the annihilation edge) is a separate, gated change, not made here.
 

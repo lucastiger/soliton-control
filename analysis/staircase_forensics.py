@@ -1095,6 +1095,88 @@ def _adjacent_unmatched(edge_index, matched_step_dy, unmatched_steps, tol):
     return sorted(out, key=lambda r: r["edge_index"])
 
 
+# --- plateau-bounded aggregation (offline; Prompt-C anti-laundering) -------
+def _count_plateaus(counts):
+    """Maximal runs of constant soliton_count in ascending detuning order.
+
+    Returns a list of ``(value, lo_idx, hi_idx)`` inclusive index ranges.
+    """
+    c = np.asarray(counts, dtype=int)
+    out, i, n = [], 0, c.size
+    while i < n:
+        j = i
+        while j < n and c[j] == c[i]:
+            j += 1
+        out.append((int(c[i]), i, j - 1))
+        i = j
+    return out
+
+
+def _plateau_of_index(plateaus, idx):
+    """The ``(value, lo, hi)`` plateau containing sample ``idx`` (or None)."""
+    for val, lo, hi in plateaus:
+        if lo <= idx <= hi:
+            return (val, lo, hi)
+    return None
+
+
+def _is_count_change(counts, e):
+    """True iff edge ``e`` (joining samples e, e+1) crosses a count change."""
+    return int(counts[e]) != int(counts[e + 1])
+
+
+def _aggregate_window(e_m, delta_n, matched_dy, counts, um_map, matched_edges,
+                      *, mode, radius):
+    """Aggregated |step_dy| over an annihilation window under one rule.
+
+    ``mode``:
+      - ``"matched"``  -- the matched edge alone (raw single-edge magnitude);
+      - ``"tol_same"`` -- the over-permissive Prompt-B rule: the matched edge
+        plus EVERY same-sign unmatched discontinuity within ``radius`` samples
+        (bounded only by the nearest OTHER matched edge), count-change or not;
+      - ``"plateau"``  -- the physically bounded rule: the matched edge plus a
+        CONTIGUOUS run of same-sign, COUNT-CHANGE, otherwise-unmatched fragments
+        in the flicker region.  In-plateau ripple (no count change across the
+        contiguous same-count region) is excluded BY CONSTRUCTION and breaks the
+        contiguous run, so the window never extends into a stable plateau; the
+        run is also bounded by the nearest other matched edge on each side.
+
+    Returns ``(aggregated_abs_dy, per_quantum, window_edges_sorted)``.  For the
+    plateau rule the window depends only on the count structure, so ``radius``
+    is a candidate reach that cannot admit an in-plateau edge (the tol-
+    invariance the anti-laundering check exercises).
+    """
+    msign = float(np.sign(matched_dy))
+    other = sorted(int(e) for e in matched_edges if int(e) != int(e_m))
+    lo_bound = max([e for e in other if e < e_m], default=-1)
+    hi_bound = min([e for e in other if e > e_m], default=int(counts.size) - 1)
+    total = float(matched_dy)
+    win = [int(e_m)]
+    if mode != "matched":
+        for step in (-1, 1):
+            e, dist = int(e_m) + step, 1
+            while lo_bound < e < hi_bound and dist <= radius:
+                same = (e in um_map
+                        and float(np.sign(um_map[e])) == msign)
+                if mode == "tol_same":
+                    if same:                       # absorb any same-sign ripple
+                        total += float(um_map[e])
+                        win.append(e)
+                    e += step
+                    dist += 1
+                    continue
+                # plateau mode: contiguous same-sign COUNT-CHANGE run only
+                if same and _is_count_change(counts, e):
+                    total += float(um_map[e])
+                    win.append(e)
+                    e += step
+                    dist += 1
+                    continue
+                break                              # ripple / opp-sign: stop run
+    win = sorted(set(win))
+    return abs(total), abs(total) / max(int(delta_n), 1), win
+
+
 def step_quanta_forensics() -> int:
     """Confirm/refute the split-step diagnosis behind Part 2i, offline.
 
@@ -1370,12 +1452,297 @@ def step_quanta_forensics() -> int:
               "gated change -- not made here.")
     md.append("")
 
+    # =====================================================================
+    # Prompt C: PHYSICALLY BOUNDED aggregation.  The tol=1 same-sign rule
+    # above can "restore" quantization only by absorbing same-sign neighbours
+    # that plateau ripple scatters around every edge.  Bound the aggregation by
+    # the COUNT STRUCTURE (plateaus) instead of a neighbour radius, and re-test.
+    # =====================================================================
+    plateaus = _count_plateaus(counts)
+    matched_edge_set = {int(m["step_edge_index"]) for m in align["matched"]}
+    um_map = {int(u["edge_index"]): float(u["step_dy"])
+              for u in align["unmatched_steps"]}
+    cc_edges = [e for e in range(counts.size - 1) if _is_count_change(counts, e)]
+    unmatched_cc = [e for e in cc_edges if e not in matched_edge_set]
+    matched_nn = [m for m in sorted(align["matched"], key=lambda m: m["dw_mid"])
+                  if not _is_final(m)]
+
+    pb_rows, undefined_why, seen_edges = [], [], set()
+    for m in matched_nn:
+        e = int(m["step_edge_index"])
+        lo_p = _plateau_of_index(plateaus, e)        # low-detuning (low-count)
+        hi_p = _plateau_of_index(plateaus, e + 1)    # high-detuning (high-count)
+        if lo_p is None or hi_p is None or lo_p[0] == hi_p[0]:
+            undefined_why.append(
+                f"{m['n_high_side']}->{m['n_low_side']} edge {e}: flanking "
+                f"plateaus not resolvable")
+            pb_rows.append({"m": m, "lo_p": lo_p, "hi_p": hi_p, "undef": True})
+            continue
+        agg_pb, pq_pb, win_pb = _aggregate_window(
+            e, m["delta_n"], m["step_dy"], counts, um_map, matched_edge_set,
+            mode="plateau", radius=max(tol, 3))
+        if seen_edges & set(win_pb):
+            undefined_why.append(
+                f"{m['n_high_side']}->{m['n_low_side']} edge {e}: window "
+                f"overlaps a neighbour at "
+                f"{sorted(seen_edges & set(win_pb))}")
+        seen_edges |= set(win_pb)
+        neigh = []
+        for a in _adjacent_unmatched(e, m["step_dy"],
+                                     align["unmatched_steps"], tol):
+            if not a["same_sign"]:
+                continue
+            ce = a["edge_index"]
+            reason = ("count change -> absorbed" if _is_count_change(counts, ce)
+                      else f"in-plateau ripple (count {int(counts[ce])}->"
+                           f"{int(counts[ce + 1])}, no change) -> EXCLUDED")
+            neigh.append({"edge": ce, "step_dy": a["step_dy"],
+                          "inside": ce in win_pb, "reason": reason})
+        pb_rows.append({"m": m, "lo_p": lo_p, "hi_p": hi_p, "agg": agg_pb,
+                        "pq": pq_pb, "win": win_pb, "neigh": neigh,
+                        "undef": False})
+
+    window_defined = not undefined_why
+    defined_rows = [r for r in pb_rows if not r["undef"]]
+    pq_vals = [r["pq"] for r in defined_rows]
+    raw_vals = [abs(r["m"]["step_dy"]) / r["m"]["delta_n"] for r in defined_rows]
+    pb_ratio = (max(pq_vals) / min(pq_vals)) if len(pq_vals) >= 2 else float("nan")
+    raw_ratio = (max(raw_vals) / min(raw_vals)) if len(raw_vals) >= 2 \
+        else float("nan")
+    no_ripple_absorbed = all(
+        _is_count_change(counts, e)
+        for r in defined_rows for e in r["win"]
+        if e != int(r["m"]["step_edge_index"]))
+
+    # sensitivity (per-quantum) under the three window definitions, at tol,
+    # plus the plateau-bounded tol-invariance scan (radius 1/2/3).
+    def _mode_pq(mode, radius):
+        return {int(m["step_edge_index"]): _aggregate_window(
+                    int(m["step_edge_index"]), m["delta_n"], m["step_dy"],
+                    counts, um_map, matched_edge_set, mode=mode, radius=radius)
+                for m in matched_nn}
+    sens = {mode: _mode_pq(mode, tol)
+            for mode in ("plateau", "tol_same", "matched")}
+    pb_scan = {r: _mode_pq("plateau", r) for r in (1, 2, 3)}
+    b_scan = {r: _mode_pq("tol_same", r) for r in (1, 2, 3)}
+    pb_tol_invariant = all(
+        pb_scan[1][int(m["step_edge_index"])][1]
+        == pb_scan[r][int(m["step_edge_index"])][1]
+        for m in matched_nn for r in (2, 3))
+
+    # verdict (plateau-bounded rule only).
+    if not window_defined:
+        pb_verdict = "STILL AMBIGUOUS"
+        pb_reason = ("the plateau-bounded window is undefined for: "
+                     + "; ".join(undefined_why))
+    elif not np.isfinite(pb_ratio):
+        pb_verdict = "STILL AMBIGUOUS"
+        pb_reason = ("fewer than two matched N->N-1 transitions above the 1->0 "
+                     "edge -- no pair to compare")
+    elif pb_ratio > STEPQUANTA_FACTOR:
+        pb_verdict = "NOT QUANTIZED"
+        pb_reason = (
+            f"the plateau-bounded per-quantum magnitudes still span a factor "
+            f"{pb_ratio:.3f} > {STEPQUANTA_FACTOR:g}. Every count-change edge "
+            f"is already matched ({len(unmatched_cc)} unmatched count-change "
+            f"edges exist), so the annihilation windows are all single matched "
+            f"edges and the plateau-bounded sums equal the raw single-edge "
+            f"magnitudes: the short 4->3 step (per-quantum "
+            f"{sens['plateau'][int(sm['step_edge_index'])][1]:.5f}) cannot be "
+            f"restored by absorbing edge 33 (+"
+            f"{um_map.get(33, float('nan')):.5f}), which lies INSIDE the "
+            f"count-4 plateau (no count change). A real finding: the "
+            f"position-persistence count and the comb-energy drop are offset "
+            f"by one hold at this annihilation, so a count-structure-respecting "
+            f"aggregation does not quantize the single-edge heights")
+    elif no_ripple_absorbed:
+        pb_verdict = "QUANTIZED (plateau-bounded)"
+        pb_reason = (
+            f"the plateau-bounded per-quantum magnitudes agree within a factor "
+            f"{pb_ratio:.3f} <= {STEPQUANTA_FACTOR:g}, and every window is the "
+            f"matched edge plus only count-changing same-sign fragments (no "
+            f"in-plateau ripple absorbed)")
+    else:
+        pb_verdict = "STILL AMBIGUOUS"
+        pb_reason = ("the per-quantum magnitudes agree within a factor of 2 "
+                     "only because in-plateau ripple was absorbed -- the "
+                     "window construction is not purely count-structure-bounded")
+
+    print("[stepquanta] === plateau-bounded aggregation (Prompt C) ===")
+    print("[stepquanta] plateaus (count: idx range): "
+          + "  ".join(f"{v}:[{a},{b}]" for v, a, b in plateaus if a <= 45)
+          + f"  (+{sum(1 for _, a, _ in plateaus if a > 45)} higher plateaus)")
+    print(f"[stepquanta] count-change edges: {cc_edges}; ALL matched "
+          f"({len(unmatched_cc)} unmatched count-change edges) -> every "
+          f"unmatched discontinuity is in-plateau ripple")
+    for r in pb_rows:
+        m = r["m"]
+        if r["undef"]:
+            print(f"[stepquanta]   {m['n_high_side']}->{m['n_low_side']} edge "
+                  f"{m['step_edge_index']}: WINDOW UNDEFINED")
+            continue
+        print(f"[stepquanta]   {m['n_high_side']}->{m['n_low_side']} edge "
+              f"{m['step_edge_index']} dw {m['dw_mid']:.4f}k dn{m['delta_n']} "
+              f"matched_dy {m['step_dy']:+.5f} | low-count({r['lo_p'][0]}) "
+              f"plateau [{r['lo_p'][1]},{r['lo_p'][2]}] high-count({r['hi_p'][0]}) "
+              f"plateau [{r['hi_p'][1]},{r['hi_p'][2]}] | window {r['win']} "
+              f"agg|dy| {r['agg']:.5f} per-quantum {r['pq']:.5f}")
+        for nb in r["neigh"]:
+            print(f"[stepquanta]       neighbour edge {nb['edge']} "
+                  f"{nb['step_dy']:+.5f}: {'INSIDE' if nb['inside'] else 'excluded'}"
+                  f" -- {nb['reason']}")
+    if window_defined and np.isfinite(pb_ratio):
+        print(f"[stepquanta] plateau-bounded per-quantum: "
+              + ", ".join(f"{r['m']['n_high_side']}->{r['m']['n_low_side']}="
+                          f"{r['pq']:.5f}" for r in defined_rows)
+              + f" -> pairwise ratio {pb_ratio:.3f} (raw single-edge ratio "
+              f"{raw_ratio:.3f})")
+    print("[stepquanta] sensitivity (per-quantum, at committed tol="
+          f"{tol}):  (a) plateau-bounded | (b) tol-same-sign | (c) matched-only")
+    for m in matched_nn:
+        e = int(m["step_edge_index"])
+        print(f"[stepquanta]   {m['n_high_side']}->{m['n_low_side']} edge {e}: "
+              f"a={sens['plateau'][e][1]:.5f} {sens['plateau'][e][2]}  "
+              f"b={sens['tol_same'][e][1]:.5f} {sens['tol_same'][e][2]}  "
+              f"c={sens['matched'][e][1]:.5f}")
+    print(f"[stepquanta] tol-invariance: plateau-bounded per-quantum identical "
+          f"at radius 1/2/3 = {pb_tol_invariant}; (b) tol-same-sign GROWS with "
+          f"radius, e.g. 4->3: "
+          + "/".join(f"{b_scan[r][int(sm['step_edge_index'])][1]:.5f}"
+                     for r in (1, 2, 3)))
+    print(f"[stepquanta] PLATEAU-BOUNDED VERDICT: {pb_verdict} -- {pb_reason}")
+
+    # --- report section 2 --------------------------------------------------
+    md2 = []
+    md2.append("## Plateau-bounded aggregation (offline)")
+    md2.append("")
+    md2.append(f"Generated {_dt.datetime.now(_dt.timezone.utc).isoformat()} by "
+               f"`analysis/staircase_forensics.py --stepquanta` (offline; no "
+               f"solver run; read-only on the committed artifacts). Tests a "
+               f"PHYSICALLY BOUNDED aggregation rule for the Part 2i step "
+               f"heights: the AMBIGUOUS verdict above showed that 'exactly one "
+               f"adjacent same-sign unmatched discontinuity' is not a valid "
+               f"split-partner signal (plateau ripple scatters same-sign "
+               f"unmatched neighbours around most edges), so aggregation is "
+               f"bounded here by the COUNT STRUCTURE (plateaus), not a "
+               f"neighbour radius.")
+    md2.append("")
+    md2.append(f"- primary observable `{primary}`; detector k = {k_used:g}, "
+               f"match tol = {tol}; robust sigma = {sigma:.3e}; npz sha256 "
+               f"`{_sha256(npz_path)[:16]}...` (recomputation matches "
+               f"committed).")
+    md2.append(f"- soliton_count plateaus (count: idx range): "
+               + ", ".join(f"{v}:[{a},{b}]" for v, a, b in plateaus))
+    md2.append(f"- count-change edges: {cc_edges} -- ALL are matched "
+               f"(`unmatched_transitions` is empty; {len(unmatched_cc)} "
+               f"unmatched count-change edges). **Every one of the "
+               f"{len(um_map)} unmatched discontinuities is therefore "
+               f"in-plateau ripple**, so no count-changing fragment exists to "
+               f"legitimately absorb into any annihilation window.")
+    md2.append("")
+    md2.append("### Annihilation windows (matched N->N-1, excluding 1->0)")
+    md2.append("")
+    md2.append("| transition | matched edge | dw_mid (k) | delta_n | matched "
+               "step_dy | low-count plateau | high-count plateau | window "
+               "edges | aggregated |step_dy| | per-quantum |")
+    md2.append("|---|---|---|---|---|---|---|---|---|---|")
+    for r in defined_rows:
+        m = r["m"]
+        md2.append(
+            f"| {m['n_high_side']}->{m['n_low_side']} | {m['step_edge_index']} "
+            f"| {m['dw_mid']:.4f} | {m['delta_n']} | {m['step_dy']:+.5f} | "
+            f"{r['lo_p'][0]}:[{r['lo_p'][1]},{r['lo_p'][2]}] | "
+            f"{r['hi_p'][0]}:[{r['hi_p'][1]},{r['hi_p'][2]}] | {r['win']} | "
+            f"{r['agg']:.5f} | {r['pq']:.5f} |")
+    md2.append("")
+    md2.append("Neighbour classification (same-sign unmatched within tol of "
+               "each matched edge -- inside the plateau-bounded window or "
+               "excluded, and why):")
+    md2.append("")
+    for r in defined_rows:
+        m = r["m"]
+        if not r["neigh"]:
+            continue
+        for nb in r["neigh"]:
+            md2.append(f"- {m['n_high_side']}->{m['n_low_side']} edge "
+                       f"{m['step_edge_index']}: neighbour edge {nb['edge']} "
+                       f"({nb['step_dy']:+.5f}) -- "
+                       f"{'INSIDE window' if nb['inside'] else 'EXCLUDED'}: "
+                       f"{nb['reason']}")
+    md2.append("")
+    md2.append("### Per-quantum magnitudes and ratios")
+    md2.append("")
+    md2.append(f"- plateau-bounded per-quantum: "
+               + ", ".join(f"{r['m']['n_high_side']}->{r['m']['n_low_side']} = "
+                           f"{r['pq']:.5f}" for r in defined_rows))
+    md2.append(f"- plateau-bounded pairwise ratio (max/min): **{pb_ratio:.3f}** "
+               f"(the raw single-edge ratio is {raw_ratio:.3f}; identical here "
+               f"because every window is a single matched edge)")
+    md2.append("")
+    md2.append("### Sensitivity / anti-laundering (per-quantum at committed "
+               f"tol = {tol})")
+    md2.append("")
+    md2.append("| transition | (a) plateau-bounded | (b) tol=1 same-sign | "
+               "(c) matched-only |")
+    md2.append("|---|---|---|---|")
+    for m in matched_nn:
+        e = int(m["step_edge_index"])
+        md2.append(f"| {m['n_high_side']}->{m['n_low_side']} | "
+                   f"{sens['plateau'][e][1]:.5f} {sens['plateau'][e][2]} | "
+                   f"{sens['tol_same'][e][1]:.5f} {sens['tol_same'][e][2]} | "
+                   f"{sens['matched'][e][1]:.5f} |")
+    md2.append("")
+    md2.append(f"- **plateau-bounded is INSENSITIVE to the reach**: per-quantum "
+               f"identical at radius 1/2/3 = {pb_tol_invariant} (it is defined "
+               f"by count structure, not a neighbour radius -- no count-change "
+               f"fragment exists to admit at any reach).")
+    md2.append("- the over-permissive (b) tol-same-sign rule GROWS with the "
+               "reach (it absorbs progressively more in-plateau ripple), e.g. "
+               "the 4->3 per-quantum at radius 1/2/3 = "
+               + "/".join(f"{b_scan[r][int(sm['step_edge_index'])][1]:.5f}"
+                          for r in (1, 2, 3))
+               + " and the 5->4 = "
+               + "/".join(f"{b_scan[r][int(rm['step_edge_index'])][1]:.5f}"
+                          for r in (1, 2, 3))
+               + " -- confirming (b) launders quantization by absorbing ripple, "
+               "which the plateau bound forbids.")
+    md2.append("- (a) equals (c): with no unmatched count-change fragments, the "
+               "physically bounded window is exactly the matched edge, so the "
+               "plateau-bounded magnitudes ARE the raw single-edge magnitudes.")
+    md2.append("")
+    md2.append("### Verdict")
+    md2.append("")
+    md2.append("Rule (plateau-bounded only): **QUANTIZED (plateau-bounded)** "
+               "iff all plateau-bounded per-quantum magnitudes agree pairwise "
+               "within a factor of 2 AND each window is the matched edge plus "
+               "only count-changing same-sign fragments (no in-plateau ripple "
+               "absorbed); **NOT QUANTIZED** iff the plateau-bounded per-quantum "
+               "magnitudes still exceed a factor of 2 (a real physics finding -- "
+               "possible merged annihilation or genuine non-quantization); "
+               "**STILL AMBIGUOUS** iff the window construction is undefined for "
+               "some transition (overlapping windows or unresolvable flanking "
+               "plateaus).")
+    md2.append("")
+    md2.append(f"**VERDICT: {pb_verdict}** -- {pb_reason}")
+    md2.append("")
+    md2.append("No fix applied: this adjudication is the deliverable. The "
+               "finding -- the 4->3 comb-power drop is split across the "
+               "count-flip hold (edge 32, matched, ~1/3 quantum) and the "
+               "adjacent count-4 plateau hold (edge 33, ~2/3 quantum), i.e. the "
+               "position-persistence count lags the comb-energy drop by one "
+               "hold -- means any legitimate remedy (a plateau-integrated step "
+               "height, or reconciling the count observable with the energy "
+               "observable at the annihilation edge) is a separate, gated "
+               "change, not made here.")
+    md2.append("")
+
     out = RESULTS_DIR / REPORT_MD
     prior = out.read_text(encoding="utf-8") if out.exists() else ""
     marker = "\n## Step-quanta (offline)"
-    if marker in prior:                       # idempotent: replace prior section
+    if marker in prior:                       # idempotent: replace both sections
         prior = prior[:prior.index(marker)].rstrip() + "\n"
-    out.write_text(prior.rstrip() + "\n" + "\n".join(md) + "\n", encoding="utf-8")
+    out.write_text(prior.rstrip() + "\n" + "\n".join(md) + "\n\n"
+                   + "\n".join(md2) + "\n", encoding="utf-8")
     print(f"[stepquanta] report -> {out}")
     return 0
 
