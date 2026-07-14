@@ -1,27 +1,43 @@
-"""Unit tests for the Feature 3 soliton-step helpers in analysis.spectral_metrics.
+"""Solver-free synthetic regression tests for the soliton-staircase pipeline.
 
-All tests use SYNTHETIC data (analytic staircases, breather-like power series) so
-they never run the solver -- the full solver sweep lives in the driver
-``analysis/run_detuning_sweep.py``.  They pin the two reusable pieces the
-staircase figure depends on:
+All tests use SYNTHETIC data (analytic staircases, breather-like power series,
+multi-sech circular fields) so they never run the solver -- the full solver
+sweep lives in the driver ``analysis/run_detuning_sweep.py``.  Two tiers live
+here:
 
-* :func:`detect_power_steps` -- recovers known plateau boundaries of a noisy
-  staircase within one sample, does not fire on a smooth branch, and finds the
-  single drop of a gently-sloped-branch-then-collapse trace (the real DKS case).
-* :func:`hold_window_average` -- selects the correct FINAL window and averages in
-  LINEAR power (rejecting dB/complex input), which is how each per-detuning value
-  is cycle-averaged.
+* The PRE-EXISTING ``detect_power_steps`` / ``hold_window_average`` /
+  alignment-helper tests.  These are the standing proof that the step detector
+  was never retuned to make the staircase appear -- they pin its default
+  behaviour (boundary recovery within one sample, no false positives on
+  smooth/noisy branches, k-sensitivity, degenerate inputs, the sigma == 0
+  fallback) and must keep passing UNCHANGED.
+* The CANONICAL FAILURE-MODE fixture :func:`breathing_modulated_field` and the
+  regression tests built on it, which encode the two forensically established
+  counting defects of the staircase pipeline (see
+  ``analysis/results/staircase_forensics.md``): breathing-phase dropout under
+  end-of-hold single-snapshot counting, and sibling-crest relative-threshold
+  coupling.  Companion counter-mechanics tests (wrap-around clustering,
+  persistence rejection, the physics-anchor arm) live in
+  ``tests/test_windowed_counting.py``; ``temporal_peak_positions`` angle
+  recovery also lives in ``tests/test_dks_access.py``.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
+from scipy.signal import find_peaks
 
+from analysis.dks_access import (
+    count_solitons_windowed,
+    count_temporal_peaks,
+    temporal_peak_positions,
+)
 from analysis.spectral_metrics import (
     detect_power_steps,
     hold_window_average,
     match_steps_to_transitions,
+    plateau_transition_energies,
     plot_soliton_steps,
     single_dks_region,
     soliton_count_transitions,
@@ -464,3 +480,359 @@ def test_plot_soliton_steps_state_counts_unsorted_input(tmp_path):
     plot_soliton_steps(x[::-1], y[::-1], out, steps=steps,
                        state_counts=c[::-1])
     assert out.exists()
+
+
+# ===========================================================================
+# Canonical failure-mode fixture (solver-free) for the staircase counting
+# defects, plus the regression tests built on it.
+# ===========================================================================
+# Physics scale of the fixture: with these values B2_REF_SYNTH =
+# 2*delta_omega/gamma = 1.0, i.e. the analytic single-soliton peak power (the
+# physics anchor of count_solitons_windowed's v2 acceptance rule) is exactly
+# 1.0 in fixture power units.
+DELTA_OMEGA_SYNTH = 1.5e9
+GAMMA_SYNTH = 3.0e9
+B2_REF_SYNTH = 2.0 * DELTA_OMEGA_SYNTH / GAMMA_SYNTH        # == 1.0
+CLUSTER_TOL_SYNTH = 0.05          # rad; well below the fixture pulse spacing
+
+
+def _wrap_angle(x):
+    """Wrap angle(s) to [-pi, pi)."""
+    return np.angle(np.exp(1j * np.asarray(x)))
+
+
+def breathing_modulated_field(n_solitons=5, n_snapshots=8, n_tau=2048,
+                              phase_seed=0, mod_depth=0.7,
+                              adversarial_lock=False, bg_level=0.05,
+                              width_cells=15.0):
+    """Canonical synthetic encoding of the two forensically established
+    counting defects of the staircase pipeline (see
+    ``analysis/results/staircase_forensics.md``):
+
+    1. BREATHING-PHASE DROPOUT under single-snapshot counting (forensics 4-F,
+       verdict "counting artifact"): each soliton's peak power is modulated
+       sinusoidally in "time" (across the snapshot axis) with per-soliton
+       phases drawn from ``phase_seed``, so on unlucky snapshots a trough-phase
+       pulse falls below 0.5 of the MOMENTARY maximum (set by whichever sibling
+       is at crest) and the end-of-hold 0.5-of-max peak count undercounts --
+       even though every pulse ALWAYS stays >= 20x the CW background and its
+       position never moves.
+    2. SIBLING-CREST RELATIVE-THRESHOLD COUPLING (forensics 5-D Stage B,
+       verdict "RELATIVE-THRESHOLD COUPLING CONFIRMED"): with
+       ``adversarial_lock=True`` the designated victim (pulse 0) breathes
+       around 0.30 * B2_ref exactly ANTI-phase to a designated crest sibling
+       (pulse ``n_solitons // 2``) breathing around 2.5 * B2_ref, so the
+       victim's modulation trough coincides with the sibling's crest in EVERY
+       snapshot (phase-locked worst case) and any momentary-max rule --
+       including the counter's deprecated 0.25-of-max relative arm -- rejects
+       the victim in every snapshot, while the victim always remains >= 20x
+       the background (never dim, only OUT-SHONE).
+
+    Construction: circular multi-sech fields on a CW background of amplitude
+    ``bg_level`` (power ``bg_level**2``), ``n_solitons`` pulses of angular
+    width ``width_cells`` grid cells at FIXED (pinned) positions across all
+    ``n_snapshots`` snapshots.  Peak powers are ``B2_REF_SYNTH * (1 +
+    mod_depth * sin(2*pi*k/n_snapshots + phi_j))`` with ``phi_j`` from
+    ``np.random.default_rng(phase_seed)``; ``mod_depth = 0.7`` puts troughs at
+    0.3 * B2_ref -- below 0.5 of a sibling crest (1.7 * B2_ref) yet ~120x the
+    default background power.  The physics-anchor floor ``soliton_frac *
+    B2_ref = 0.1`` therefore sits BETWEEN the background floor and the deepest
+    trough, so the v2 rule keeps every pulse in every snapshot.
+
+    Returns ``(snapshots, centers)``: complex array of shape ``(n_snapshots,
+    n_tau)`` and the pinned pulse angles (rad).
+    """
+    theta = 2.0 * np.pi * np.arange(n_tau) / n_tau
+    w = width_cells * 2.0 * np.pi / n_tau
+    centers = (2.0 * np.pi * np.arange(n_solitons) / n_solitons + 0.5) \
+        % (2.0 * np.pi)
+    phases = np.random.default_rng(phase_seed).uniform(
+        0.0, 2.0 * np.pi, n_solitons)
+    victim, crest = 0, n_solitons // 2
+    snaps = []
+    for k in range(n_snapshots):
+        f = np.full(n_tau, bg_level, dtype=complex)
+        s_lock = np.sin(2.0 * np.pi * k / n_snapshots)
+        for j, (c, ph) in enumerate(zip(centers, phases)):
+            if adversarial_lock and j == victim:
+                p = B2_REF_SYNTH * (0.30 - 0.05 * s_lock)   # in [0.25, 0.35]
+            elif adversarial_lock and j == crest:
+                p = B2_REF_SYNTH * (2.50 + 0.50 * s_lock)   # in [2.0, 3.0]
+            else:
+                p = B2_REF_SYNTH * (1.0 + mod_depth * np.sin(
+                    2.0 * np.pi * k / n_snapshots + ph))
+            f += np.sqrt(p) / np.cosh(_wrap_angle(theta - c) / w)
+        snaps.append(f)
+    return np.array(snaps), centers
+
+
+def test_fixture_encodes_the_documented_regime():
+    """The fixture's own contract: troughs below 0.5-of-momentary-max at some
+    phases, every pulse always >= 20x background, and the physics-anchor floor
+    strictly between the background floor and the deepest trough."""
+    snaps, centers = breathing_modulated_field()
+    n_tau = snaps.shape[1]
+    idx = np.round(centers * n_tau / (2.0 * np.pi)).astype(int) % n_tau
+    ratios, floors = [], []
+    for s in snaps:
+        p = np.abs(s) ** 2
+        peaks = p[idx]
+        ratios.append(peaks.min() / peaks.max())
+        assert np.all(peaks >= 20.0 * np.median(p))          # never dim
+        floors.append(5.0 * float(np.median(p)))             # bg-floor arm
+    assert min(ratios) < 0.5                # some phase drops below 0.5-of-max
+    anchor = 0.1 * B2_REF_SYNTH             # soliton_frac * B2_ref
+    deepest_trough = B2_REF_SYNTH * (1.0 - 0.7)
+    assert max(floors) < anchor < deepest_trough
+
+
+def test_single_snapshot_count_reproduces_end_of_hold_dropout():
+    """(i) count_temporal_peaks on individual unlucky snapshots undercounts --
+    the original end-of-hold defect (forensics 4-F: 'counting artifact')."""
+    snaps, _ = breathing_modulated_field()
+    singles = [count_temporal_peaks(s) for s in snaps]
+    assert min(singles) < 5, singles         # unlucky phases undercount ...
+    assert max(singles) <= 5                 # ... and nothing is ever invented
+
+
+def test_windowed_counter_recovers_exact_count_with_persistence():
+    """(ii) count_solitons_windowed over >= 8 phase-spread snapshots returns
+    exactly n_solitons, every cluster's persistence reported and > 0.5.
+
+    delta_omega/gamma are chosen so soliton_frac * B2_ref = 0.1 sits between
+    the background floor (~0.014) and the deepest breathing trough (0.3)."""
+    for n_solitons in (3, 5):
+        snaps, centers = breathing_modulated_field(n_solitons=n_solitons)
+        res = count_solitons_windowed(snaps,
+                                      cluster_tol_rad=CLUSTER_TOL_SYNTH,
+                                      delta_omega=DELTA_OMEGA_SYNTH,
+                                      gamma=GAMMA_SYNTH)
+        assert res["count"] == n_solitons
+        assert np.allclose(np.sort(res["cluster_angles_rad"]),
+                           np.sort(centers), atol=0.02)
+        pf = res["persistence_fractions"]
+        assert len(pf) == n_solitons         # every cluster reported
+        assert all(f > 0.5 for f in pf)
+
+
+def test_adversarial_lock_deprecated_rule_undercounts_v2_rule_does_not():
+    """(iii) Phase-locked worst case: the DEPRECATED relative rule --
+    reconstructed LOCALLY here, never resurrected in library code -- accepts a
+    candidate iff height >= 0.25 * momentary snapshot max, and drops the
+    locked victim in EVERY snapshot (persistence 0 < 0.5), undercounting to
+    n_solitons - 1.  The v2 physics-anchored rule counts n_solitons with
+    persistence 1.0 for every cluster (forensics 5-D Stage B)."""
+    n_solitons = 5
+    snaps, centers = breathing_modulated_field(adversarial_lock=True)
+    n_tau = snaps.shape[1]
+
+    # deprecated rule, local reconstruction: per-center persistence under
+    # "accept iff height >= 0.25 * momentary snapshot max"
+    hits = np.zeros(n_solitons)
+    for s in snaps:
+        p = np.abs(s) ** 2
+        peaks, _ = find_peaks(np.concatenate([p, p]), height=0.25 * p.max())
+        angs = 2.0 * np.pi * np.unique(peaks % n_tau) / n_tau
+        for j, c in enumerate(centers):
+            if any(abs(_wrap_angle(a - c)) < CLUSTER_TOL_SYNTH for a in angs):
+                hits[j] += 1
+    pf_old = hits / snaps.shape[0]
+    assert pf_old[0] < 0.5                       # the locked victim drops out
+    assert int(np.sum(pf_old >= 0.5)) == n_solitons - 1   # old rule undercounts
+
+    res = count_solitons_windowed(snaps, cluster_tol_rad=CLUSTER_TOL_SYNTH,
+                                  delta_omega=DELTA_OMEGA_SYNTH,
+                                  gamma=GAMMA_SYNTH)
+    assert res["count"] == n_solitons
+    assert len(res["persistence_fractions"]) == n_solitons
+    assert all(f == 1.0 for f in res["persistence_fractions"])
+
+
+def test_starvation_arithmetic_regressions_remain_green():
+    """(iv) The --starvation forensics arithmetic (falsified-hypothesis
+    record): the driver's actual cadence hold_rt // 32 puts EIGHT snapshots in
+    the final-avg_frac counting window (not the two of the starvation
+    hypothesis' hold_rt // 8), and healthy count_agreement values are
+    quantized in eighths.  The full set lives in
+    tests/test_windowed_counting.py; this pins the same helpers into the
+    staircase fast tier."""
+    from analysis.staircase_forensics import (_empirical_denominator,
+                                              _n_in_window, _on_grid)
+    for hold_rt in (2000, 1600):                 # accepted cfg + variant 2
+        assert _n_in_window(hold_rt, 0.25, max(hold_rt // 32, 1)) == 8
+    assert _n_in_window(2000, 0.25, max(2000 // 8, 1)) == 2   # the hypothesis
+    eighths = [0.0, 0.125, 0.375, 0.625, 0.875, 1.0]
+    assert _empirical_denominator(eighths) == 8
+    assert _on_grid(eighths, 8) is True
+    assert _on_grid(eighths, 2) is False
+
+
+# ---------------------------------------------------------------------------
+# temporal_peak_positions: seeded-angle recovery on 1-, 3-, 5-sech fields
+# (companion coverage with solver-adjacent fixtures lives in
+# tests/test_dks_access.py; this variant is fully synthetic and pins the
+# one-grid-cell accuracy, including a seam-straddling pulse)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("angles", [
+    [3.1],                                       # 1 sech
+    [0.7, 2.9, 5.3],                             # 3 sech
+    [0.0, 1.3, 2.6, 3.9, 5.2],                   # 5 sech, one at the 0/2pi seam
+])
+def test_temporal_peak_positions_recover_seeded_angles(angles):
+    n_tau = 2048
+    theta = 2.0 * np.pi * np.arange(n_tau) / n_tau
+    f = np.full(n_tau, 0.05, dtype=complex)
+    for a in angles:
+        f += 1.0 / np.cosh(_wrap_angle(theta - a) / (15.0 * 2 * np.pi / n_tau))
+    pos = temporal_peak_positions(f)
+    assert pos.size == len(angles)
+    cell = 2.0 * np.pi / n_tau
+    for a in angles:
+        d = np.min(np.abs(_wrap_angle(pos - a)))
+        assert d <= cell + 1e-12, (a, pos)       # within one grid cell
+
+
+# ---------------------------------------------------------------------------
+# End-to-end synthetic staircase: N stepping 5 -> 1, stock detector at its
+# default k, full alignment.  This demonstrates the UNMODIFIED detector
+# suffices for quantized steps -- no retuning anywhere.
+# ---------------------------------------------------------------------------
+def test_end_to_end_synthetic_staircase_5_to_1_stock_detector():
+    rng = np.random.default_rng(11)
+    per, u_bg, u_sol = 10, 0.40, 0.15
+    counts = np.repeat([1, 2, 3, 4, 5], per).astype(int)   # ascending detuning
+    x = np.arange(counts.size, dtype=float)
+    y = u_bg + counts * u_sol + rng.normal(0.0, 0.004, counts.size)  # ripple
+    steps = detect_power_steps(x, y)             # DEFAULT k = 6, untouched
+    transitions = soliton_count_transitions(x, counts)
+    assert len(transitions) == 4                 # 1->2, 2->3, 3->4, 4->5
+    align = match_steps_to_transitions(steps, transitions)
+    assert len(align["matched"]) == 4            # every N-step state-verified
+    assert align["unmatched_steps"] == []        # ... and nothing else fires
+    assert align["unmatched_transitions"] == []
+    assert all(m["delta_n"] == 1 for m in align["matched"])
+    # each matched height is the one-soliton quantum, not detector noise
+    for m in align["matched"]:
+        assert abs(m["step_dy"]) == pytest.approx(u_sol, abs=0.02)
+
+
+# ---------------------------------------------------------------------------
+# plateau_transition_energies: the quantization observable robust to the
+# count/energy one-hold offset (see analysis/results/staircase_forensics.md,
+# count/energy lag -> INTRINSIC LAG). The plateau-mean difference compares
+# SETTLED branch energies, so it is insensitive to whether the integer count
+# decrements one hold before/after the continuous energy drop completes; the
+# single-edge step_dy is not.
+# ---------------------------------------------------------------------------
+def _plateau_staircase(levels_by_count, counts, *, offset_at=None,
+                       offset_frac=0.75, ripple=0.0, seed=0):
+    """Ascending-detuning primary trace on a piecewise-constant count trace.
+
+    ``counts`` is the ascending soliton-count trace; each hold's baseline
+    energy is ``levels_by_count[count]``.  With ``offset_at`` set to a
+    transition edge ``e`` (count changes across e), the ENERGY change is split
+    one hold EARLY relative to the count: the count-flip hold ``e+1`` already
+    carries ``offset_frac`` of the step while the count is still the low value
+    at hold ``e`` -- i.e. the continuous drop leads the integer decrement by one
+    hold (a mid-hold annihilation), exactly the committed 4->3 signature.
+    Returns ``(primary, counts)``.
+    """
+    c = np.asarray(counts, dtype=int)
+    y = np.array([levels_by_count[int(v)] for v in c], dtype=np.float64)
+    if offset_at is not None:
+        e = int(offset_at)
+        hi, lo = levels_by_count[int(c[e + 1])], levels_by_count[int(c[e])]
+        # hold e keeps the low branch, but hold e-1 ... actually move a fraction
+        # of the step onto hold e (still counted as the low count): the energy
+        # at hold e sits offset_frac of the way up to the high branch, so the
+        # single-edge jump at the count edge e is only (1-offset_frac) of the
+        # quantum and the remainder already happened at edge e-1 (in-plateau).
+        y[e] = lo + offset_frac * (hi - lo)
+    if ripple:
+        y = y + np.random.default_rng(seed).normal(0.0, ripple, y.size)
+    return y, c
+
+
+def test_plateau_transition_energies_clean_staircase_quantizes():
+    # 1->2->3, plateaus of 4 holds, one-soliton quantum = 0.2 on a 0.5 bg.
+    counts = np.repeat([1, 2, 3], 4)
+    levels = {1: 0.7, 2: 0.9, 3: 1.1}
+    y, c = _plateau_staircase(levels, counts, ripple=0.003, seed=1)
+    tr = soliton_count_transitions(np.arange(c.size, dtype=float), c)
+    pte = plateau_transition_energies(y, c, tr)
+    assert [(p["n_high_side"], p["n_low_side"]) for p in pte] == [(2, 1), (3, 2)]
+    pq = [p["per_quantum"] for p in pte]
+    assert all(q == pytest.approx(0.2, abs=0.01) for q in pq)
+    assert max(pq) / min(pq) <= 2.0
+    # signed plateau_energy is high-minus-low (a rise going up in detuning)
+    assert all(p["plateau_energy"] > 0 for p in pte)
+
+
+def test_plateau_mean_is_offset_insensitive_single_edge_is_not():
+    # The decisive synthetic: the 2->3 energy change LEADS the count by one hold
+    # (mid-hold annihilation). Single-edge step_dy mis-measures the quantum at
+    # that transition; the plateau-mean difference recovers it.
+    counts = np.repeat([1, 2, 3], 5)
+    levels = {1: 0.70, 2: 0.90, 3: 1.10}          # true quantum 0.20
+    edges = [i for i in range(counts.size - 1) if counts[i + 1] != counts[i]]
+    e_23 = edges[1]                               # the 2->3 count edge
+    y, c = _plateau_staircase(levels, counts, offset_at=e_23, offset_frac=0.75)
+
+    tr = soliton_count_transitions(np.arange(c.size, dtype=float), c)
+    pte = plateau_transition_energies(y, c, tr)
+    pq = {(p["n_high_side"], p["n_low_side"]): p["per_quantum"] for p in pte}
+    # PLATEAU level: both transitions recover the SAME 0.20 quantum (offset
+    # holds are excluded from the stable interiors) -> quantized within 2x.
+    assert pq[(2, 1)] == pytest.approx(0.20, abs=1e-9)
+    assert pq[(3, 2)] == pytest.approx(0.20, abs=1e-9)
+    assert max(pq.values()) / min(pq.values()) == pytest.approx(1.0, abs=1e-6)
+
+    # SINGLE EDGE: the offset splits the 2->3 quantum across edge e_23 (the
+    # count flip) and edge e_23-1 (in-plateau), so the count-edge step_dy is
+    # only (1-offset_frac)=0.25 of the quantum while the clean 1->2 edge is the
+    # full 0.20 -> ratio 4 >> 2, NOT quantized.  This is why Part 2i's
+    # single-edge form is xfail-pinned.
+    dy = np.diff(y)
+    e_12 = edges[0]
+    se_12, se_23 = abs(dy[e_12]), abs(dy[e_23])
+    assert se_23 == pytest.approx(0.05, abs=1e-9)      # quarter quantum
+    assert se_12 == pytest.approx(0.20, abs=1e-9)      # full quantum
+    assert se_12 / se_23 > 2.0                         # single-edge fails
+
+
+def test_plateau_transition_energies_merged_edge_divides_by_delta_n():
+    # a merged 3->1 annihilation (delta_n = 2) reports per-quantum = |dE| / 2.
+    counts = np.concatenate([np.repeat(1, 4), np.repeat(3, 4)])
+    levels = {1: 0.7, 3: 1.1}
+    y, c = _plateau_staircase(levels, counts)
+    tr = soliton_count_transitions(np.arange(c.size, dtype=float), c)
+    (p,) = plateau_transition_energies(y, c, tr)
+    assert p["delta_n"] == 2
+    assert p["plateau_energy"] == pytest.approx(0.4, abs=1e-9)
+    assert p["per_quantum"] == pytest.approx(0.2, abs=1e-9)
+
+
+def test_plateau_transition_energies_short_plateau_fallback_and_validation():
+    # length-2 flanking plateaus: excluding both boundary holds would empty the
+    # interior, so the helper falls back to the full plateau (never crashes).
+    counts = np.array([1, 1, 2, 2, 3, 3])
+    levels = {1: 0.7, 2: 0.9, 3: 1.1}
+    y, c = _plateau_staircase(levels, counts)
+    tr = soliton_count_transitions(np.arange(c.size, dtype=float), c)
+    pte = plateau_transition_energies(y, c, tr)
+    for p in pte:
+        assert p["high_interior"][0] <= p["high_interior"][1]
+        assert p["low_interior"][0] <= p["low_interior"][1]
+        assert p["per_quantum"] == pytest.approx(0.2, abs=1e-9)
+    with pytest.raises(ValueError):
+        plateau_transition_energies(np.arange(5.0), np.arange(4), tr)
+
+
+# ---------------------------------------------------------------------------
+# Deprecation guard: the removed relative arm must warn loudly
+# ---------------------------------------------------------------------------
+def test_rel_height_candidate_keyword_emits_deprecation_warning():
+    snaps = np.ones((2, 64), dtype=complex)      # tiny synthetic input
+    with pytest.warns(DeprecationWarning, match="rel_height_candidate"):
+        count_solitons_windowed(snaps, cluster_tol_rad=0.1,
+                                rel_height_candidate=0.25)

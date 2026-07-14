@@ -96,12 +96,38 @@ def test_multi_soliton_observables(sweep):
     # per-row finite-position count == the hardened soliton_count
     assert np.array_equal(np.isfinite(pos).sum(axis=1),
                           sweep["soliton_count"])
-    # F5 contract: the settled seed's hardened count survives the first hold
-    # and the windowed counter is self-consistent there
+    # F5 contract: the settled seed's hardened windowed count survives the
+    # first hold (== n_solitons) and the windowed counter is self-consistent
+    # there
     assert sweep["soliton_count"][0] == CFG.n_solitons
     assert sweep["count_agreement"][0] >= 0.5
     assert np.all((sweep["count_agreement"] >= 0.0)
                   & (sweep["count_agreement"] <= 1.0))
+    # every hold's count is corroborated by at least one raw per-snapshot
+    # count: an agreement == 0 hold would mean the persistence machinery
+    # alone made the count (the robustness invariant's failure mode)
+    assert np.all(np.asarray(sweep["count_agreement"]) > 0.0)
+
+
+def test_counting_parameters_flow_to_npz_and_back(sweep, tmp_path):
+    """The v2 physics-anchored counter parameters (soliton_frac,
+    bg_floor_multiple, min_persistence) recorded by the driver equal the
+    library constants in analysis.dks_access and survive
+    save_sweep_npz -> load_sweep_npz unchanged -- so any consumer of a
+    committed npz can reconstruct exactly which acceptance rule counted it."""
+    from analysis.dks_access import (COUNT_BG_FLOOR_MULTIPLE,
+                                     COUNT_MIN_PERSISTENCE,
+                                     COUNT_SOLITON_FRAC)
+    assert sweep["count_min_persistence"] == COUNT_MIN_PERSISTENCE
+    assert sweep["count_soliton_frac"] == COUNT_SOLITON_FRAC
+    assert sweep["count_bg_floor_multiple"] == COUNT_BG_FLOOR_MULTIPLE
+    path = tmp_path / "roundtrip.npz"
+    save_sweep_npz(path, sweep, CFG)
+    loaded, _ = load_sweep_npz(path)
+    for key in ("count_min_persistence", "count_soliton_frac",
+                "count_bg_floor_multiple"):
+        assert loaded[key] == sweep[key], key
+        assert isinstance(loaded[key], float)
 
 
 def test_noise_off_config_zeroes_temperature():

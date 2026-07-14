@@ -298,6 +298,7 @@ from analysis.spectral_metrics import (  # noqa: E402
     detect_power_steps,
     hold_window_average,
     match_steps_to_transitions,
+    plateau_transition_energies,
     plot_soliton_steps,
     single_dks_region,
     soliton_count_transitions,
@@ -765,6 +766,29 @@ def _update_json(json_path: Path, key: str, block: dict) -> None:
         json.dump(data, f, indent=2, default=float)
 
 
+def _refresh_sweep_npz_hash() -> None:
+    """Re-stamp the saved sweep npz's sha256 into the JSON staircase block.
+
+    On a fresh solver run :func:`render_and_report` runs BEFORE
+    :func:`save_sweep_npz` (the validation gate decides the
+    ``staircase_validated`` flag the npz carries), so the ``sweep_npz_sha256``
+    recorded at render time refers to the PREVIOUS npz (or is None).  Called
+    after the save so the provenance always hashes the file the block
+    describes; touches ONLY that one field.
+    """
+    json_path = RESULTS_DIR / METRICS_JSON
+    if not json_path.exists():
+        return
+    with open(json_path) as f:
+        data = json.load(f)
+    block = data.get("soliton_step")
+    if not isinstance(block, dict) or "provenance" not in block:
+        return
+    block["provenance"]["sweep_npz_sha256"] = _sha256(RESULTS_DIR / SWEEP_NPZ)
+    with open(json_path, "w") as f:
+        json.dump(data, f, indent=2, default=float)
+
+
 # Per-step arrays that every sweep npz carries (legacy schema, still written).
 _NPZ_BASE_KEYS = ("dw_over_kappa", "dw_rad_s", "dw_eff_over_kappa", "P_intra",
                   "P_intra_std", "U_int", "U_int_std", "P_trans", "P_trans_std",
@@ -958,7 +982,7 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
     # detections are PROVEN soliton steps.  The hard validation gate runs here,
     # BEFORE any artifact is written -- on failure nothing is rendered and the
     # caller prints the escalation ladder and exits nonzero.
-    transitions, align, any_region = [], None, None
+    transitions, align, any_region, pte_by_edge = [], None, None, {}
     if has_staircase:
         transitions = soliton_count_transitions(dwk, counts)
         align = match_steps_to_transitions(steps, transitions)
@@ -969,6 +993,12 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
             raise StaircaseValidationError(
                 "staircase validation failed (no artifacts written):\n  - "
                 + "\n  - ".join(problems))
+        # Plateau-level transition energies on the SAME normalised plotted
+        # primary the single-edge step_dy uses -- the quantization observable
+        # robust to the count/energy one-hold offset (see staircase_forensics.md
+        # count/energy lag -> INTRINSIC LAG).  Keyed by transition edge index.
+        pte_by_edge = {p["edge_index"]: p for p in plateau_transition_energies(
+            y1_norm, counts, transitions)}
 
     caption = (
         f"{cfg.n_solitons}-soliton staircase, pin = {cfg.pin_w} W, n_tau = "
@@ -1008,9 +1038,18 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
                              "$P_\\mathrm{trans}/P_\\mathrm{in}$"),
         smooth_window=cfg.smooth_display)
 
+    # Staleness guard: the sha256 of the sweep npz this block was rendered
+    # from, so a regenerated npz with a stale JSON is detectable
+    # (tests/test_soliton_staircase.py pins it).  On --render-only the
+    # committed npz IS the input; on a fresh solver run the npz is (re)written
+    # AFTER rendering, so main() refreshes this field post-save
+    # (_refresh_sweep_npz_hash).
+    sweep_npz_path = RESULTS_DIR / SWEEP_NPZ
     provenance = {
         "driver": "analysis/run_detuning_sweep.py",
         "sweep_data": SWEEP_NPZ,
+        "sweep_npz_sha256": (_sha256(sweep_npz_path)
+                             if sweep_npz_path.exists() else None),
         "figure": STEPS_PNG,
         "config_file": str(CONFIG_PATH.name),
         "config_sha256": _sha256(CONFIG_PATH),
@@ -1081,6 +1120,69 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
         block["any_soliton_region_over_kappa"] = (
             [float(any_region[0]), float(any_region[1])] if any_region
             else None)
+
+        # count/energy lag provenance (the documented, xfail-pinned single-edge
+        # limitation).  For the 4->3 annihilation the integer soliton_count
+        # decrements one hold before the continuous comb-energy drop completes,
+        # so the quantum is SPLIT across the count-flip edge and the adjacent
+        # in-plateau edge; the per-hold count is CORRECT (verdict INTRINSIC
+        # LAG).  Recorded from the plotted-primary first differences.
+        dy_primary = np.diff(y1_norm)
+        m43 = next((m for m in align["matched"] if m["n_high_side"] == 4
+                    and m["n_low_side"] == 3 and m["delta_n"] == 1), None)
+        count_energy_lag = None
+        if m43 is not None:
+            fe = int(m43["transition_edge_index"])       # count-flip edge
+            dy_flip = float(dy_primary[fe]) if fe < dy_primary.size else None
+            # the adjacent same-sign in-plateau discontinuity carrying the rest
+            # of the drop (the count-4 hold whose energy is still mid-flip).
+            adj = None
+            if dy_flip is not None:
+                sgn = np.sign(dy_flip)
+                for cand in (fe + 1, fe - 1):
+                    if 0 <= cand < dy_primary.size and \
+                            np.sign(dy_primary[cand]) == sgn and \
+                            counts[cand] == counts[cand + 1]:
+                        adj = cand
+                        break
+            dy_adj = float(dy_primary[adj]) if adj is not None else None
+            tot = abs(dy_flip) + (abs(dy_adj) if dy_adj is not None else 0.0)
+            split = ([abs(dy_flip) / tot, abs(dy_adj) / tot]
+                     if (dy_adj is not None and tot > 0) else None)
+            count_energy_lag = {
+                "affected_transition": "4->3",
+                "transition_edge_index": fe,
+                "count_flip_over_kappa": float(m43["dw_mid"]),
+                "single_edge_step_dy_at_flip": dy_flip,
+                "adjacent_in_plateau_edge_index": adj,
+                "single_edge_step_dy_adjacent": dy_adj,
+                "split_fraction_flip_vs_adjacent": split,
+                "plateau_transition_energy": (
+                    pte_by_edge[fe]["plateau_energy"]
+                    if fe in pte_by_edge else None),
+                "verdict": "INTRINSIC LAG (benign)",
+                "note": (
+                    "the integer, hold-quantized soliton_count decrements one "
+                    "hold before the continuous comb-energy drop completes at "
+                    "the 4->3 mid-hold annihilation, so the single-edge step_dy "
+                    "at the count-flip hold carries only part of the quantum "
+                    "(the remainder appears at the adjacent count-4 plateau "
+                    "hold).  The per-hold count is CORRECT (the target soliton "
+                    "is substantially present in the snapshots where it is "
+                    "detected and gone by the next hold -- see the count/energy "
+                    "lag section).  Quantization is therefore evaluated at "
+                    "PLATEAU level (plateau_transition_energy / "
+                    "plateau_per_quantum on each matched step); the single-edge "
+                    "step_dy form is xfail-pinned in "
+                    "tests/test_soliton_staircase.py::"
+                    "test_step_heights_quantized_single_edge_xfail."),
+                "verdict_reference": (
+                    "analysis/results/staircase_forensics.md -- count/energy "
+                    "lag: INTRINSIC LAG (benign).  Full verdict chain: "
+                    "counting-artifact -> starvation-falsified -> "
+                    "relative-threshold-coupling -> physics-anchor -> "
+                    "split-step-refuted -> intrinsic-lag."),
+            }
         block["staircase"] = {
             "n_seeded": int(cfg.n_solitons),
             "n_solitons_seeded": int(cfg.n_solitons),
@@ -1092,6 +1194,16 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
             "matched_steps": [
                 {"dw_mid": m["dw_mid"], "delta_n": m["delta_n"],
                  "step_dy": m["step_dy"],
+                 # plateau-mean transition energy on the plotted primary (the
+                 # offset-robust quantum; step_dy is the raw single-edge value
+                 # that the count/energy hold-offset can split -- see
+                 # count_energy_lag below).
+                 "plateau_transition_energy": (
+                     pte_by_edge[m["transition_edge_index"]]["plateau_energy"]
+                     if m["transition_edge_index"] in pte_by_edge else None),
+                 "plateau_per_quantum": (
+                     pte_by_edge[m["transition_edge_index"]]["per_quantum"]
+                     if m["transition_edge_index"] in pte_by_edge else None),
                  "step_edge_index": m["step_edge_index"],
                  "transition_edge_index": m["transition_edge_index"],
                  "n_high_side": m["n_high_side"],
@@ -1116,6 +1228,7 @@ def render_and_report(sweep: dict, cfg: SweepConfig) -> Path:
                 "collapses at the last annihilation, while remaining weak in "
                 "the TOTAL intracavity power (comparable-energy background "
                 "replaces the soliton there)"),
+            "count_energy_lag": count_energy_lag,
             "match_tol_samples": int(align["tol_samples"]),
             "validation": {
                 "rule": ">= 2 matched (state-verified) soliton steps AND "
@@ -1970,6 +2083,302 @@ def save_diagnose_npz(path: Path, sidecar: dict) -> None:
     np.savez_compressed(path, **sidecar)
 
 
+# ---------------------------------------------------------------------------
+# --diagnose-annihilation mode: the count/energy-lag instrumented run.  Replays
+# the ACCEPTED configuration (verbatim from the committed npz) and, for the
+# holds bracketing the 4->3 annihilation, records for each PERSISTENT SOLITON
+# (tracked by continuation into fixed columns) its LOCAL comb energy, its local
+# peak height, and the two acceptance-rule values it is tested against, per
+# in-window snapshot -- so the adjudication can ask whether the target
+# soliton's ENERGY has already left at the count-flip hold while its PEAK still
+# certifies it.  Observes count_solitons_windowed; changes NO counting logic,
+# threshold or gate; renders no figure and touches no primary artifact.
+# ---------------------------------------------------------------------------
+ANNIH_WINDOW_PAD_KAPPA = 0.4      # detuning padding above/below the bracket edges
+ANNIH_TRACK_BUDGET_RAD = 0.15     # max hold-to-hold cluster match (>> the ~0.01
+#                                   rad/hold coherent drift, << inter-soliton gap)
+
+
+def _annih_circ_dist(a, b):
+    """Circular distance between two angles (rad)."""
+    return abs(float(np.angle(np.exp(1j * (float(a) - float(b))))))
+
+
+def _locate_4to3_window(npz_path: Path):
+    """Locate the committed 4->3 annihilation and its diagnostic detuning window.
+
+    Recomputes the alignment on the committed sweep exactly as the regression
+    test does, finds the matched 4->3 (delta_n=1) transition edge ``e``
+    (ascending), and returns ``(cfg, e, dw_hold_em1, dw_hold_ep2, dw_top,
+    dw_bot, target_angle)`` where the window spans ``ANNIH_WINDOW_PAD_KAPPA``
+    above hold ``e-1`` down to the same padding below hold ``e+2``, and
+    ``target_angle`` is the cluster present at hold ``e+1`` but absent at hold
+    ``e`` (the annihilating soliton).  Raises RuntimeError if the clean 4->3
+    edge or a single disappearing cluster is not found (a merged event).
+    """
+    d = np.load(npz_path, allow_pickle=False)
+    cfg = SweepConfig(**json.loads(str(d["sweep_config_json"])))
+    order = np.argsort(d["dw_over_kappa"])
+    dwk = np.asarray(d["dw_over_kappa"])[order]
+    counts = np.asarray(d["soliton_count"], dtype=int)[order]
+    pos = np.asarray(d["peak_positions_rad"], dtype=float)[order]
+    primary = "P_comb" if "P_comb" in d.files else "P_intra"
+    y = np.asarray(d[primary], dtype=float)[order]
+    y = y / float(np.max(y))
+    steps = detect_power_steps(dwk, y, k=cfg.step_k)
+    align = match_steps_to_transitions(
+        steps, soliton_count_transitions(dwk, counts), tol_samples=1)
+    e43 = [m for m in align["matched"] if m["n_high_side"] == 4
+           and m["n_low_side"] == 3 and m["delta_n"] == 1]
+    if not e43:
+        raise RuntimeError("no clean matched 4->3 (delta_n=1) transition in the "
+                           "committed sweep -- cannot bracket the annihilation")
+    e = int(e43[0]["step_edge_index"])
+    a_pre = pos[e + 1][np.isfinite(pos[e + 1])]
+    a_post = pos[e][np.isfinite(pos[e])]
+    target = [float(a) for a in a_pre
+              if min(_annih_circ_dist(a, b) for b in a_post) > 0.05]
+    if len(target) != 1:
+        raise RuntimeError(
+            f"{len(target)} clusters disappear across the 4->3 count drop "
+            f"(expected one localized soliton) -- possible merged annihilation")
+    dw_top = float(dwk[e - 1]) + ANNIH_WINDOW_PAD_KAPPA
+    dw_bot = float(dwk[e + 2]) - ANNIH_WINDOW_PAD_KAPPA
+    return (cfg, e, float(dwk[e - 1]), float(dwk[e + 2]), dw_top, dw_bot,
+            float(target[0]))
+
+
+def _local_soliton_energy(power, angle, tol_rad, n_tau, median_bg):
+    """Background-subtracted local energy + peak within +/- tol of ``angle``.
+
+    Integrates ``|E(theta)|^2`` over the +/- ``tol_rad`` angular window centred
+    on ``angle`` (circular), subtracting the per-snapshot angular-median
+    background from each bin -- the excess intracavity energy carried by the
+    individual soliton.  Returns ``(local_energy_bgsub, local_energy_raw,
+    local_peak)``.
+    """
+    center = int(round(float(angle) * n_tau / (2.0 * np.pi))) % n_tau
+    half = max(1, int(round(float(tol_rad) * n_tau / (2.0 * np.pi))))
+    idx = (center + np.arange(-half, half + 1)) % n_tau
+    seg = np.asarray(power)[idx]
+    return (float(np.sum(seg - median_bg)), float(np.sum(seg)),
+            float(seg.max()))
+
+
+def run_diagnose_annihilation(*, config_path) -> dict:
+    """Instrumented replay of the accepted config across the 4->3 annihilation.
+
+    Reproduces the committed configuration VERBATIM (from the committed npz's
+    ``sweep_config_json``), warm-continues DOWN from the seed, and -- for every
+    hold whose detuning lies in the window bracketing the 4->3 annihilation --
+    records a per-hold, per-in-window-snapshot, per-tracked-soliton sidecar.
+    The persistent clusters from :func:`count_solitons_windowed` (the EXISTING
+    counter, observed only) are tracked by nearest-angle continuation into
+    fixed columns (a dropped soliton's column is extrapolated by the train's
+    coherent drift so its RESIDUAL energy keeps being measured).  Per column and
+    snapshot: local comb energy, local peak, the two acceptance-rule values
+    (``bg_floor_multiple * median``, ``soliton_frac * B2_ref``) and their
+    pass booleans; per snapshot: median background, snapshot max, total P_comb,
+    total U_int.  Returns the stacked sidecar dict.
+    """
+    npz_path = RESULTS_DIR / SWEEP_NPZ
+    (cfg, e43, dw_em1, dw_ep2, dw_top, dw_bot,
+     target_angle) = _locate_4to3_window(npz_path)
+    cav = attach_dispersion(load_cavity_params(), cfg.n_tau)
+    kappa, n_tau = cav.kappa, int(cfg.n_tau)
+    n_sol = int(cfg.n_solitons)
+    modes_from_uint = (n_tau ** 2) / cav.t_r
+
+    print(f"[annih] accepted config verbatim from {SWEEP_NPZ}: n_solitons="
+          f"{cfg.n_solitons}, position_seed={cfg.position_seed}, hold_rt="
+          f"{cfg.hold_rt}, n_steps={cfg.n_steps}, n_tau={n_tau}")
+    print(f"[annih] 4->3 edge {e43}; window [{dw_bot:.4f}, {dw_top:.4f}]k "
+          f"(pad {ANNIH_WINDOW_PAD_KAPPA}k around holds {dw_ep2:.4f}.."
+          f"{dw_em1:.4f}); target soliton ~{target_angle:.4f} rad")
+
+    seed_field = sech_soliton_seed(
+        cfg.dw_start_kappa * kappa, cav, n_tau=n_tau, pin=cfg.pin_w,
+        n_solitons=n_sol, position_seed=int(cfg.position_seed),
+        position_jitter_frac=float(cfg.position_jitter_frac))
+    sol0 = _run(cfg.dw_start_kappa * kappa, int(cfg.settle_rt), cav,
+                e0=seed_field, seed=int(cfg.seed), n_tau=n_tau, pin=cfg.pin_w,
+                snapshot_interval=int(cfg.settle_rt), config_path=config_path,
+                **PRODUCTION_NUMERICS)
+    e_prev = np.asarray(sol0["e_final"])[0]
+    dt_prev = float(np.asarray(sol0["delta_t_final"]).reshape(-1)[0])
+    n_settled = count_temporal_peaks(e_prev)
+    if n_settled != n_sol:
+        raise RuntimeError(f"settled {n_settled} != {n_sol} solitons")
+
+    snap_int = max(int(cfg.hold_rt) // 32, 1)
+    col_angles = None                          # tracked column angles
+    rows = []
+    for i, dwk in enumerate(cfg.detunings_kappa()):
+        if dwk < dw_bot - 1e-9:
+            break                              # early stop below the window
+        sol = _run(dwk * kappa, int(cfg.hold_rt), cav, e0=e_prev,
+                   delta_t0=dt_prev, seed=int(cfg.seed), n_tau=n_tau,
+                   pin=cfg.pin_w, snapshot_interval=snap_int,
+                   config_path=config_path, **PRODUCTION_NUMERICS)
+        u_hist = np.asarray(sol["U_int_history"])[0]
+        dweff_hist = np.asarray(sol["delta_omega_eff_history"])[0]
+        e_final = np.asarray(sol["e_final"])[0]
+        dt_final = float(np.asarray(sol["delta_t_final"]).reshape(-1)[0])
+        u_avg = hold_window_average(u_hist, avg_frac=cfg.avg_frac)
+        dweff_mean = float(np.mean(dweff_hist[u_avg["i_start"]:]))
+        snaps = np.asarray(sol["E_snapshots"])[0]
+        snap_rt = np.arange(snaps.shape[0]) * snap_int
+        in_window = snap_rt >= u_avg["i_start"]
+        if not in_window.any():
+            in_window[-1] = True
+        in_snaps = snaps[in_window]
+        n_in = int(in_snaps.shape[0])
+
+        in_band = (dw_bot - 1e-9) <= dwk <= (dw_top + 1e-9)
+        if in_band:
+            # Observe the EXISTING counter (no logic changed).
+            wc = count_solitons_windowed(in_snaps, delta_omega=dwk * kappa,
+                                         cav=cav)
+            clusters = sorted(float(a) for a in wc["cluster_angles_rad"])
+            tol = _diag_cluster_tol_rad(cav, dwk * kappa, n_tau)
+            b2_ref = 2.0 * abs(dwk * kappa) / cav.gamma
+            floor_phys = COUNT_SOLITON_FRAC * b2_ref
+
+            # ---- track clusters into fixed columns (continuation) -----------
+            if col_angles is None:
+                col_angles = np.full(n_sol, np.nan)
+                for j, c in enumerate(clusters[:n_sol]):
+                    col_angles[j] = c
+            else:
+                new_cols = np.full(n_sol, np.nan)
+                used_cl, drifts = set(), []
+                # match each current cluster to the nearest live column
+                for c in clusters:
+                    best_k, best_d = None, 1e9
+                    for k in range(n_sol):
+                        if not np.isfinite(col_angles[k]) or k in used_cl:
+                            continue
+                        dd = _annih_circ_dist(c, col_angles[k])
+                        if dd < best_d:
+                            best_d, best_k = dd, k
+                    if best_k is not None and best_d <= ANNIH_TRACK_BUDGET_RAD:
+                        new_cols[best_k] = c
+                        used_cl.add(best_k)
+                        drifts.append(float(np.angle(np.exp(
+                            1j * (c - col_angles[best_k])))))
+                drift = float(np.median(drifts)) if drifts else 0.0
+                # dropped columns: extrapolate by the coherent drift so residual
+                # energy keeps being measured at the right angle
+                for k in range(n_sol):
+                    if np.isfinite(col_angles[k]) and not np.isfinite(new_cols[k]):
+                        new_cols[k] = float((col_angles[k] + drift)
+                                            % (2.0 * np.pi))
+                # any current cluster unmatched -> fill an empty column
+                matched_vals = {round(v, 9) for v in new_cols
+                                if np.isfinite(v)}
+                for c in clusters:
+                    if round(c, 9) in matched_vals:
+                        continue
+                    for k in range(n_sol):
+                        if not np.isfinite(new_cols[k]):
+                            new_cols[k] = c
+                            break
+                col_angles = new_cols
+
+            in_cluster = np.array([
+                (np.isfinite(col_angles[k]) and bool(clusters)
+                 and min(_annih_circ_dist(col_angles[k], c) for c in clusters)
+                 <= tol)
+                for k in range(n_sol)], dtype=bool)
+
+            # ---- per snapshot, per column measurements ----------------------
+            track_ang = np.full((n_in, n_sol), np.nan)
+            loc_e = np.full((n_in, n_sol), np.nan)
+            loc_e_raw = np.full((n_in, n_sol), np.nan)
+            loc_pk = np.full((n_in, n_sol), np.nan)
+            above_abs = np.zeros((n_in, n_sol), dtype=bool)
+            above_phys = np.zeros((n_in, n_sol), dtype=bool)
+            median_bg = np.empty(n_in)
+            snap_max = np.empty(n_in)
+            floor_abs = np.empty(n_in)
+            p_comb = np.empty(n_in)
+            u_int_snap = np.empty(n_in)
+            for s in range(n_in):
+                p = np.abs(in_snaps[s]) ** 2
+                med = float(np.median(p))
+                median_bg[s] = med
+                snap_max[s] = float(p.max())
+                floor_abs[s] = COUNT_BG_FLOOR_MULTIPLE * med
+                spec = np.abs(np.fft.fftshift(np.fft.fft(in_snaps[s]))) ** 2
+                p_comb[s] = float(spec.sum() - spec[n_tau // 2])
+                u_int_snap[s] = float(np.sum(p) * cav.t_r / n_tau)
+                for k in range(n_sol):
+                    if not np.isfinite(col_angles[k]):
+                        continue
+                    ebg, eraw, pk = _local_soliton_energy(
+                        p, col_angles[k], tol, n_tau, med)
+                    track_ang[s, k] = col_angles[k]
+                    loc_e[s, k] = ebg
+                    loc_e_raw[s, k] = eraw
+                    loc_pk[s, k] = pk
+                    above_abs[s, k] = pk >= floor_abs[s]
+                    above_phys[s, k] = pk >= floor_phys
+            rows.append(dict(
+                dw=float(dwk), dweff=dweff_mean, b2=float(b2_ref),
+                floor_phys=float(floor_phys), tol=float(tol),
+                count=int(wc["count"]), agree=float(wc["count_agreement"]),
+                n_in=n_in, col_angles=col_angles.copy(), in_cluster=in_cluster,
+                track_ang=track_ang, loc_e=loc_e, loc_e_raw=loc_e_raw,
+                loc_pk=loc_pk, above_abs=above_abs, above_phys=above_phys,
+                median_bg=median_bg, snap_max=snap_max, floor_abs=floor_abs,
+                p_comb=p_comb, u_int=u_int_snap))
+            print(f"[annih] {dwk:7.4f}k  N={wc['count']} agree="
+                  f"{wc['count_agreement']:.3f}  cols="
+                  f"{np.round(col_angles, 3)}  in_cluster={in_cluster.astype(int)}")
+
+        e_prev, dt_prev = e_final, dt_final
+        if (i + 1) % 10 == 0:
+            jax.clear_caches()
+
+    if not rows:
+        raise RuntimeError("no holds fell inside the annihilation window")
+
+    stack = lambda key: np.array([r[key] for r in rows])
+    out = {
+        "sweep_config_json": json.dumps(cfg.as_dict()),
+        "edge_4to3": int(e43),
+        "target_angle_committed_rad": float(target_angle),
+        "window_over_kappa": np.array([dw_bot, dw_top]),
+        "dw_over_kappa": stack("dw"),
+        "dw_eff_over_kappa": np.array([r["dweff"] for r in rows]) / kappa,
+        "B2_ref": stack("b2"),
+        "floor_phys": stack("floor_phys"),
+        "cluster_tol_rad": stack("tol"),
+        "soliton_count": stack("count"),
+        "count_agreement": stack("agree"),
+        "n_in_snapshots": int(rows[0]["n_in"]),
+        "col_angles_rad": stack("col_angles"),          # (n_hold, n_sol)
+        "in_cluster": stack("in_cluster"),              # (n_hold, n_sol)
+        "track_angle_rad": stack("track_ang"),          # (n_hold, n_in, n_sol)
+        "local_energy_bgsub": stack("loc_e"),           # (n_hold, n_in, n_sol)
+        "local_energy_raw": stack("loc_e_raw"),
+        "local_peak": stack("loc_pk"),
+        "above_abs": stack("above_abs"),
+        "above_phys": stack("above_phys"),
+        "median_bg": stack("median_bg"),                # (n_hold, n_in)
+        "snapshot_max": stack("snap_max"),
+        "floor_abs": stack("floor_abs"),
+        "P_comb_snap": stack("p_comb"),
+        "U_int_snap": stack("u_int"),
+        "modes_from_uint": float(modes_from_uint),
+        "bg_floor_multiple": float(COUNT_BG_FLOOR_MULTIPLE),
+        "soliton_frac": float(COUNT_SOLITON_FRAC),
+        "min_persistence": float(COUNT_MIN_PERSISTENCE),
+        "n_solitons": int(n_sol),
+    }
+    return out
+
+
 def _abort_on_failed_validation(exc: StaircaseValidationError,
                                 npz_note: str) -> None:
     """Print the failure + the canonical escalation ladder and exit nonzero.
@@ -2029,10 +2438,37 @@ def main() -> None:
                          "per-snapshot detection inputs to "
                          "results/robustness/diagnose_{VARIANT}.npz. Observes "
                          "count_solitons_windowed; changes no counting logic")
+    ap.add_argument("--diagnose-annihilation", action="store_true",
+                    help="count/energy-lag instrumented run: replays the "
+                         "accepted config (verbatim from the committed "
+                         "detuning_sweep.npz) and, for the holds bracketing the "
+                         "4->3 annihilation, records per-hold per-snapshot "
+                         "per-soliton LOCAL comb energy, local peak, and the two "
+                         "acceptance-rule values to "
+                         "results/diagnose_annih_4to3.npz. Observes "
+                         "count_solitons_windowed; no figure, no primary artifact")
     args = ap.parse_args()
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     t_start = time.time()
+
+    if args.diagnose_annihilation:
+        noise_cfg = write_noise_off_config(CONFIG_PATH)
+        try:
+            print(f"[annih] deterministic (noise-off) config -> {noise_cfg}")
+            sidecar = run_diagnose_annihilation(config_path=noise_cfg)
+        finally:
+            try:
+                noise_cfg.unlink()
+            except OSError:
+                pass
+        out = RESULTS_DIR / "diagnose_annih_4to3.npz"
+        save_diagnose_npz(out, sidecar)
+        print(f"[annih] sidecar -> {out} "
+              f"({sidecar['dw_over_kappa'].size} holds in window, "
+              f"{sidecar['n_in_snapshots']} in-window snapshots/hold) "
+              f"({time.time() - t_start:.1f}s)")
+        return
 
     if args.diagnose_variant:
         name = args.diagnose_variant
@@ -2138,6 +2574,10 @@ def main() -> None:
         validation_error = exc
     save_sweep_npz(RESULTS_DIR / SWEEP_NPZ, sweep, cfg,
                    staircase_validated=validation_error is None)
+    if validation_error is None:
+        # the JSON block was rendered before this save; re-stamp the hash of
+        # the npz it now describes (see _refresh_sweep_npz_hash).
+        _refresh_sweep_npz_hash()
     print(f"[sweep] data -> {RESULTS_DIR / SWEEP_NPZ} "
           f"(staircase_validated={validation_error is None})")
     if validation_error is not None:
