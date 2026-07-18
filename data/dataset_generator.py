@@ -23,6 +23,7 @@ from simulator.lle_solver import (
     _thermal_params,
     d2_to_beta2_lle,
     gamma_nlse_to_lle,
+    hbar_omega0_from_config,
     resolve_cavity_rates,
 )
 from simulator.noise_models import TotalNoise, _load_config as nm_load_cfg
@@ -43,6 +44,7 @@ class DatasetGenerator:
         n_tau: int = 512,
         snapshot_interval: int = 10,
         seed: int = 42,
+        enable_quantum_noise: bool = False,
     ):
         self.param_grid = param_grid
         self.config_path = str(config_path) if config_path is not None else None
@@ -70,6 +72,25 @@ class DatasetGenerator:
         self.beta2 = float(d2_to_beta2_lle(self.config["d2_rad_per_s2"], self.fsr_hz))
         self.beta = [self.beta2]
 
+        # Quantum-vacuum Langevin drive (arXiv:2604.05897 Eq. 126); OFF by
+        # default for backward-compatible datasets. When ON, the per-quadrature
+        # injection std per round trip (fine_cadence_M = 1 here, dt_fine = t_r)
+        # is sqrt(hbar*omega0*kappa*n_tau*t_r/4). The cold-start seed stays the
+        # legacy in-solver 1e-3*|e_cw| noise either way (this generator drives
+        # the low-level batched solver directly); with the drive ON the
+        # background re-thermalizes to the vacuum level within ~1/kappa anyway.
+        self.enable_quantum_noise = bool(enable_quantum_noise)
+        self.qnoise_scale = (
+            float(
+                math.sqrt(
+                    hbar_omega0_from_config(self.config)
+                    * self.kappa * self.n_tau * self.t_r / 4.0
+                )
+            )
+            if self.enable_quantum_noise
+            else 0.0
+        )
+
         self.p_th = (self.kappa / 2.0) ** 2 / (self.gamma * self.t_r * self.kappa_c)
 
         self.full_simulation_list = [
@@ -87,12 +108,17 @@ class DatasetGenerator:
             )
         ]
 
-    def _make_keys(self, batch_global_idx: int, B: int) -> tuple[jax.Array, jax.Array]:
+    def _make_keys(
+        self, batch_global_idx: int, B: int
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
         batch_key = jax.random.fold_in(self.base_key, int(batch_global_idx))
         field_key, noise_key = jax.random.split(batch_key)
         key_arr = jax.random.split(field_key, B)
         noise_keys = jax.random.split(noise_key, B)
-        return key_arr, noise_keys
+        # Quantum-noise keys from a fold_in of batch_key (NOT a widened split,
+        # which would change field_key/noise_key and the legacy RNG stream).
+        qnoise_keys = jax.random.split(jax.random.fold_in(batch_key, 2), B)
+        return key_arr, noise_keys, qnoise_keys
 
     def _forward_fill_labels(self, label_history: np.ndarray, t_total: int) -> np.ndarray:
         # Each snapshot label is forward-filled for snapshot_interval round trips.
@@ -136,7 +162,9 @@ class DatasetGenerator:
         noise_scale_arr = jnp.array([float(p["noise_scale"]) for p in params], dtype=jnp.float32)
         n_sweep_segments = int(math.ceil(8.0 * self.kappa / (sweep_rate * self.SEGMENT_RT)))
 
-        key_arr, noise_keys = self._make_keys(batch_global_idx=batch_global_idx, B=B)
+        key_arr, noise_keys, qnoise_keys = self._make_keys(
+            batch_global_idx=batch_global_idx, B=B
+        )
 
         thermal = _thermal_params(self.config_path)
         thermal["Gamma_th"] = gamma_th_scalar
@@ -168,9 +196,13 @@ class DatasetGenerator:
                 delta_center = -5.0 * self.kappa
                 t_seg = self.HOLD_RT
 
-            delta_arr = jnp.full((B,), delta_center, dtype=jnp.float32)
-            seg_field_keys = jax.random.fold_in(key_arr, seg_idx)
-            seg_noise_keys = jax.random.fold_in(noise_keys, seg_idx)
+            # (B, t_seg): the per-trajectory solver indexes delta_omega[step].
+            delta_arr = jnp.full((B, t_seg), delta_center, dtype=jnp.float64)
+            # fold_in takes a single key; map it over the per-trajectory batch.
+            _fold_batch = jax.vmap(jax.random.fold_in, in_axes=(0, None))
+            seg_field_keys = _fold_batch(key_arr, seg_idx)
+            seg_noise_keys = _fold_batch(noise_keys, seg_idx)
+            seg_qnoise_keys = _fold_batch(qnoise_keys, seg_idx)
             noise_seqs = jax.vmap(
                 lambda k, scale: noise_model.sample(k, t_seg) * scale,
                 in_axes=(0, 0),
@@ -194,6 +226,17 @@ class DatasetGenerator:
                 noise_seqs,
                 e_carry,
                 delta_t_carry,
+                None,           # d_int_grid: Taylor-beta dispersion path
+                1,              # n_substeps (legacy single Strang step)
+                False,          # dealias_two_thirds
+                False,          # edge_absorber
+                0.12,           # edge_absorber_frac (unused while absorber off)
+                False,          # dispersion_validity_mask
+                float(math.pi),  # validity_phase_threshold (unused while mask off)
+                1,              # fine_cadence_M (per-round-trip cadence)
+                seg_qnoise_keys,
+                self.qnoise_scale,
+                self.enable_quantum_noise,
             )
             # Carry field and thermal state forward across segment boundary
             e_carry = jnp.array(out["e_final"], dtype=jnp.complex64)

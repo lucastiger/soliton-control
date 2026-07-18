@@ -30,9 +30,35 @@ import jax.numpy as jnp
 import numpy as np
 import yaml
 
-from simulator.state_labeler import make_state_labeler, make_threshold_params
+from simulator.state_labeler import (
+    make_state_labeler,
+    make_threshold_params,
+    physical_off_floor,
+)
 
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "sin_params.yaml"
+
+# Reduced Planck constant [J·s] (CODATA). Used only by the quantum-vacuum-noise
+# channel to convert intracavity energy |E|² [J] to photon number via ħω₀.
+_HBAR_J_S = 1.054571817e-34
+
+
+def hbar_omega0_from_config(physical: dict[str, Any]) -> float:
+    """ħω₀ [J] at the pump: config override ``hbar_omega0_j`` if > 0, else ħ·2πc/λ_p.
+
+    ω₀ = 2πc/pump_wavelength_m (1.21526e15 rad/s at λ_p = 1.55 µm, so
+    ħω₀ = 1.2816e-19 J). Using the PUMP-mode ħω₀ for every comb mode
+    over-/under-counts the photon energy of mode μ by |μ|·FSR/f₀ — <1% across
+    the comb span here — which is the documented approximation of the
+    quantum-noise normalization. ``hbar_omega0_j`` <= 0 (the config encodes
+    "auto" as 0 because physical_parameters leaves must stay numeric) or a
+    missing key both mean "compute from the pump wavelength".
+    """
+    override = float(physical.get("hbar_omega0_j", 0.0) or 0.0)
+    if override > 0.0:
+        return override
+    lam = float(physical.get("pump_wavelength_m", 1.55e-6))
+    return _HBAR_J_S * 2.0 * math.pi * 299_792_458.0 / lam
 
 
 def gamma_nlse_to_lle(gamma_nlse_per_w_per_m: float, fsr_hz: float, n_eff: float = 2.2) -> float:
@@ -332,6 +358,35 @@ _VALIDITY_POWER = 2.0
 _VALIDITY_STRENGTH = 10.0
 
 
+def _qnoise_increment(
+    qnoise_key: jax.Array, fine_step_index, n_tau: int, scale
+) -> jnp.ndarray:
+    """One quantum-vacuum Langevin increment (n_tau,) for one fine step.
+
+    Truncated-Wigner (symmetric-ordering) c-number limit of the vacuum input
+    noise √κ·ξ̂_μ(t), ⟨ξ̂_μ(t)ξ̂†_μ′(t′)⟩ = δ(t−t′)δ_μμ′ (arXiv:2604.05897
+    Eq. 126): i.i.d. complex Gaussian per fast-time sample with per-quadrature
+    std ``scale`` = √(ħω₀·κ·n_tau·dt_fine/4), i.e. total per-sample variance
+    ħω₀·κ·n_tau·dt_fine/2 — equivalent (by Parseval, Ẽ_μ = a_μ·n_tau·√(ħω₀))
+    to every mode μ receiving an independent photon-amplitude increment of
+    total variance (κ/2)·dt_fine, whose steady state in the undriven linear
+    cavity is the symmetric-ordered vacuum occupation of ½ photon per mode.
+    Time-domain injection deliberately avoids extra FFTs.
+
+    The per-step key is ``fold_in(qnoise_key, fine_step_index)`` with
+    ``fine_step_index = step_idx·fine_cadence_M + m`` — deterministic given the
+    trajectory key, independent of n_substeps, and generated in-scan (never a
+    pre-materialized (t_slow, n_tau) array).
+    """
+    k = jax.random.fold_in(qnoise_key, fine_step_index)
+    k_re, k_im = jax.random.split(k)
+    draw = (
+        jax.random.normal(k_re, (n_tau,), dtype=jnp.float64)
+        + 1j * jax.random.normal(k_im, (n_tau,), dtype=jnp.float64)
+    )
+    return (scale * draw).astype(jnp.complex128)
+
+
 def _single_trajectory_solver(
     delta_omega: float,
     pin: float,
@@ -358,6 +413,9 @@ def _single_trajectory_solver(
     dispersion_validity_mask: bool,  # static; opt-in damping of modes whose per-sub-step mismatch phase exceeds the threshold
     validity_phase_threshold: float,  # |D_int - delta_omega|*dt_sub threshold (rad) for the validity mask
     fine_cadence_M: int,          # static; advance thermal/detuning/energy at dt=t_r/M (1 = per-round-trip)
+    qnoise_key: jax.Array,        # per-trajectory PRNG key for the quantum Langevin drive
+    qnoise_scale: float,          # per-quadrature injection std √(ħω₀·κ·n_tau·dt_fine/4); 0.0 = disabled
+    qnoise_enabled: bool,         # static; False traces ZERO extra ops (bit-identical legacy path)
 ) -> dict[str, jnp.ndarray]:
     """Solve one detuning trajectory with SSFM + thermal Euler update.
 
@@ -387,6 +445,18 @@ def _single_trajectory_solver(
     resonances); the total physical time is unchanged (M fine steps per round
     trip). M=1 is bit-identical to the per-round-trip integrator. Histories are
     still recorded once per round trip on the end-of-round-trip field.
+
+    ``qnoise_enabled`` (static Python bool) turns on the quantum-vacuum Langevin
+    drive (arXiv:2604.05897 Eq. 126): once per FINE step (never per sub-step, so
+    the injected variance is independent of n_substeps) every fast-time sample
+    receives an i.i.d. complex Gaussian increment of per-quadrature std
+    ``qnoise_scale`` = √(ħω₀·κ·n_tau·dt_fine/4), injected AFTER the sub-step
+    loop and BEFORE the edge_absorber / dispersion_validity_mask applications so
+    the numerical masks damp rather than re-populate edge modes (with
+    dealias_two_thirds ON the modes |mu| > n_tau/3 are therefore under-occupied
+    by construction; validation statistics must restrict to |mu| <= n_tau/3).
+    When False, this function traces exactly the legacy computation — no RNG
+    calls and no arithmetic are added to the scan body.
     """
     omega = _build_omega_grid(n_tau, t_r)
     # Per-mode measured dispersion when supplied, else the Taylor beta polynomial.
@@ -434,13 +504,16 @@ def _single_trajectory_solver(
         over = jnp.maximum(phase_sub / validity_phase_threshold - 1.0, 0.0)
         validity = jnp.exp(-_VALIDITY_STRENGTH * over ** _VALIDITY_POWER)
 
-    def _fine_step(e_cur, delta_t_cur, dw_step, freq_noise):
+    def _fine_step(e_cur, delta_t_cur, dw_step, freq_noise, step_idx, m):
         """Advance the field and thermal state by ONE fine step dt_fine = t_r/M.
 
         The thermal detuning shift is recomputed from the CURRENT ΔT (so the
         thermo-optic feedback runs at the fine cadence, not once per round trip),
-        the field takes n_substeps Strang sub-steps over dt_fine, the masks are
-        applied, then the single-pole thermal ODE is Euler-stepped by dt_fine.
+        the field takes n_substeps Strang sub-steps over dt_fine, the quantum
+        Langevin increment is added (only when qnoise_enabled; keyed on the
+        global fine-step index step_idx*fine_cadence_M + m, with m the static
+        fine-step index within the round trip), the masks are applied, then the
+        single-pole thermal ODE is Euler-stepped by dt_fine.
         Returns (e_next, delta_t_next, u_int, delta_omega_eff).
         """
         # Deterministic thermal detuning shift. δω = ω_res − ω_pump, so heating
@@ -468,6 +541,14 @@ def _single_trajectory_solver(
                 e_w2 = e_w2 * mask_23
             e_sub = jnp.fft.ifft(e_w2 * h_half).astype(jnp.complex128)
         e_next = e_sub
+
+        # Quantum-vacuum Langevin injection: after the sub-step loop, BEFORE the
+        # numerical masks (so they damp, never re-populate, the edge modes).
+        # Static Python branch — the disabled path traces zero extra ops.
+        if qnoise_enabled:
+            e_next = e_next + _qnoise_increment(
+                qnoise_key, step_idx * fine_cadence_M + m, n_tau, qnoise_scale
+            )
 
         # Edge absorber then dispersion-validity mask (per fine step; M=1 -> once
         # per round trip, as before).
@@ -504,9 +585,9 @@ def _single_trajectory_solver(
         delta_t_next = delta_t
         u_int = jnp.sum(jnp.abs(e_t) ** 2) * (t_r / n_tau)
         delta_omega_eff = dw_step
-        for _ in range(fine_cadence_M):
+        for m in range(fine_cadence_M):
             e_next, delta_t_next, u_int, delta_omega_eff = _fine_step(
-                e_next, delta_t_next, dw_step, freq_noise
+                e_next, delta_t_next, dw_step, freq_noise, step_idx, m
             )
 
         # Through-port power via energy balance, on the end-of-round-trip field.
@@ -617,12 +698,18 @@ def _physical_state_labeler(
     return make_state_labeler(params)
 
 
+# Argument order mirrors _single_trajectory_solver. Vmapped (axis 0):
+# delta_omega(0), rng_key(11), noise_sequence(14), e0_override(15),
+# delta_t0_override(16), qnoise_key(25). Static: t_slow(2), beta(3), n_tau(7),
+# snapshot_interval(10), state_labeler(13), n_substeps(18),
+# dealias_two_thirds(19), edge_absorber(20), dispersion_validity_mask(22),
+# fine_cadence_M(24), qnoise_enabled(27).
 _PER_TRAJ = jax.jit(
     jax.vmap(
         _single_trajectory_solver,
-        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0, 0, 0, None, None, None, None, None, None, None, None),
+        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0, 0, 0, None, None, None, None, None, None, None, None, 0, None, None),
     ),
-    static_argnums=(2, 3, 7, 10, 13, 18, 19, 20, 22, 24),
+    static_argnums=(2, 3, 7, 10, 13, 18, 19, 20, 22, 24, 27),
 )
 
 
@@ -648,6 +735,8 @@ def solve_lle_ssfm_jax(
     dispersion_validity_mask: bool = False,
     validity_phase_threshold: float = float(jnp.pi),
     fine_cadence_M: int = 1,
+    quantum_noise_enabled: bool | None = None,
+    quantum_noise_seed_vacuum_init: bool | None = None,
 ) -> dict[str, np.ndarray]:
     """Batch-capable SSFM solver for the generalized LLE using JAX.
 
@@ -657,6 +746,32 @@ def solve_lle_ssfm_jax(
       Solitons exist for kappa/2 < delta_omega < ~5*kappa.
       For adiabatic soliton access, sweep delta_omega from negative to positive
       (blue-to-red pump scan).
+
+    Quantum noise: with ``quantum_noise_enabled`` (config key or kwarg; OFF by
+      default) the solver adds the physically normalized quantum-vacuum Langevin
+      drive of Herr, Tikan & Kippenberg, arXiv:2604.05897, Sec. V.B.2, Eq. 126:
+      each mode receives sqrt(kappa)*xi_mu(t) with
+      <xi_mu(t) xi_mu'^dagger(t')> = delta(t-t') delta_mumu', both loss baths
+      (kappa_0, kappa_ex) combined since both are vacuum/coherent (no squeezed
+      baths). In the classical truncated-Wigner (symmetric-ordering) c-number
+      limit this is additive complex Gaussian noise with
+      <xi_mu xi_mu'*> = 1/2 delta(t-t') delta_mumu', whose undriven steady state
+      is the symmetric-ordered vacuum occupation of 1/2 photon per mode. It is
+      injected in the TIME domain once per fine step (dt_fine = t_r/M): every
+      fast-time sample gets an i.i.d. complex Gaussian of per-quadrature std
+      sqrt(hbar*omega0*kappa*n_tau*dt_fine/4), which by Parseval
+      (Emode_mu = a_mu*n_tau*sqrt(hbar*omega0), photon number
+      n_mu = |Emode_mu|^2/(n_tau^2*hbar*omega0)) equals an independent
+      photon-amplitude increment of variance (kappa/2)*dt_fine per mode.
+      hbar*omega0 is evaluated at the pump for ALL modes (<1% error over the
+      comb span). When additionally ``quantum_noise_seed_vacuum_init`` is on
+      (default when enabled), a COLD start seeds the analytic CW state with one
+      complex Gaussian draw of per-sample variance hbar*omega0*n_tau/2
+      (<n_mu> = 1/2 at t=0) instead of the legacy 1e-3*|e_cw| noise; the legacy
+      seed path itself is untouched (bypassed via the warm-start branch). With
+      the flag OFF the solver is bit-identical to the legacy solver: no RNG
+      calls or arithmetic are added to the scan body and the RNG key chain of
+      the legacy paths is unchanged.
 
     Args:
         pin: Pump power in watts.
@@ -731,6 +846,16 @@ def solve_lle_ssfm_jax(
             removes the residual t_r-periodic modulation of the mean-field map (a
             driver of parametric round-trip-map resonances) at fixed total
             physical time. Default 1 = bit-identical per-round-trip integrator.
+        quantum_noise_enabled: Master switch for the quantum-vacuum Langevin
+            drive (see the "Quantum noise" section above). ``None`` (default) =
+            read the ``quantum_noise_enabled`` config key (itself defaulting to
+            off); an explicit bool overrides the config. OFF is bit-identical to
+            the legacy solver.
+        quantum_noise_seed_vacuum_init: When the master switch is on, seed a
+            COLD start with the half-photon-per-mode vacuum draw instead of the
+            legacy 1e-3*|e_cw| noise. ``None`` (default) = read the
+            ``quantum_noise_seed_vacuum_init`` config key (default on). Ignored
+            when the master switch is off or when ``e0_override`` is given.
 
     Returns:
         Dictionary containing requested histories.
@@ -795,8 +920,10 @@ def solve_lle_ssfm_jax(
     _p_th = (kappa / 2.0) ** 2 * kappa / (2.0 * gamma * kappa_c)
     if pin < 0.1 * _p_th:
         import warnings as _w
+        # max() guards the pin=0 (undriven cavity, e.g. vacuum-equilibrium
+        # runs) case against ZeroDivisionError in the message formatting.
         _w.warn(
-            f"pin={pin*1e3:.1f} mW is {_p_th/pin:.0f}x below the MI threshold "
+            f"pin={pin*1e3:.1f} mW is {_p_th/max(pin, 1e-300):.0f}x below the MI threshold "
             f"P_th={_p_th*1e3:.1f} mW. All trajectories will be CW (label 1). "
             f"Increase pin or adjust Q_i / A_eff in config.",
             stacklevel=2,
@@ -899,6 +1026,77 @@ def solve_lle_ssfm_jax(
     key, key_field, key_noise = jax.random.split(rng_key, 3)
     key_arr    = jax.random.split(key_field, delta_arr.shape[0])   # for e0
     noise_keys = jax.random.split(key_noise, delta_arr.shape[0])   # for AR(1)
+    # One more subkey for the quantum vacuum noise, split from the LEFTOVER
+    # chain `key` — NOT by widening the 3-way split above, which would change
+    # key_field/key_noise and break the bit-identity of the flag-off RNG stream.
+    key, key_qnoise = jax.random.split(key, 2)
+
+    # --- Quantum vacuum noise (arXiv:2604.05897 Sec. V.B.2, Eq. 126) ---------
+    # Resolve the flags: explicit kwarg wins, else the flat config keys. The
+    # config encodes the booleans as 0/1 (physical_parameters leaves must stay
+    # numeric — see tests/test_config.py); accept bool or 0/1 and nothing else.
+    def _as_flag(name: str, value) -> bool:
+        assert isinstance(value, (bool, int, np.integer)) and int(value) in (0, 1), (
+            f"{name} must be boolean-valued (bool or 0/1), got {value!r}."
+        )
+        return bool(value)
+
+    if quantum_noise_enabled is None:
+        quantum_noise_enabled = physical.get("quantum_noise_enabled", 0)
+    qn_enabled = _as_flag("quantum_noise_enabled", quantum_noise_enabled)
+    if quantum_noise_seed_vacuum_init is None:
+        quantum_noise_seed_vacuum_init = physical.get(
+            "quantum_noise_seed_vacuum_init", 1
+        )
+    qn_seed_vacuum = _as_flag(
+        "quantum_noise_seed_vacuum_init", quantum_noise_seed_vacuum_init
+    )
+
+    hbar_omega0 = hbar_omega0_from_config(physical)
+    dt_fine = t_r / fine_cadence_M
+    if qn_enabled:
+        # Per-quadrature time-domain injection std per fine step (see the
+        # "Quantum noise" docstring section for the Parseval derivation).
+        qnoise_scale = float(math.sqrt(hbar_omega0 * kappa * n_tau * dt_fine / 4.0))
+        # Perturbation sanity numbers, logged once per solve. The XPM
+        # cross-check 2*gamma*U_vac == gamma*hbar_omega0*n_tau holds identically
+        # (U_vac = n_tau*hbar_omega0/2), so both are printed from one formula.
+        u_vac = n_tau * hbar_omega0 / 2.0                       # J
+        kerr_vac = gamma * u_vac                                # rad/s (SPM)
+        inj_rt = math.sqrt(hbar_omega0 * kappa * n_tau * t_r / 4.0)
+        print(
+            f"[quantum noise] hbar*omega0 = {hbar_omega0:.4e} J, "
+            f"U_vac = n_tau*hbar*omega0/2 = {u_vac:.3e} J, "
+            f"Kerr shift gamma*U_vac = {kerr_vac:.3e} rad/s "
+            f"= {kerr_vac / kappa:.2e}*kappa (XPM cross-check 2*gamma*U_vac = "
+            f"{2.0 * kerr_vac:.3e} rad/s), per-round-trip per-quadrature "
+            f"injection std = {inj_rt:.3e} (field units), per-fine-step "
+            f"(dt_fine = t_r/{fine_cadence_M}) std = {qnoise_scale:.3e}"
+        )
+        # The steady vacuum background must sit well below the labeler's OFF
+        # floor, or OFF/CW labels can flip once the background thermalizes.
+        _dw_max_qn = float(np.max(np.abs(np.asarray(delta_arr))))
+        _off_floor = physical_off_floor(
+            float(kappa), float(kappa_c), float(pin), _dw_max_qn
+        )
+        if not (u_vac < 0.5 * _off_floor):
+            import warnings as _w
+            _w.warn(
+                f"Vacuum background U_vac = n_tau*hbar*omega0/2 = {u_vac:.3e} J "
+                f"is not < 0.5x the labeler OFF floor "
+                f"physical_off_floor(...) = {_off_floor:.3e} J: the thermalized "
+                f"vacuum background may flip OFF/CW labels. Consider a larger "
+                f"off_fraction for the state labeler (or a smaller n_tau).",
+                stacklevel=2,
+            )
+    else:
+        qnoise_scale = 0.0
+
+    # Per-trajectory quantum-noise keys (independent of the legacy key chains).
+    # Built unconditionally so the _PER_TRAJ signature is uniform; when the
+    # flag is off the traced argument is unused and dead-code-eliminated.
+    key_qnoise_inj, key_qnoise_seed = jax.random.split(key_qnoise, 2)
+    qnoise_keys = jax.random.split(key_qnoise_inj, delta_arr.shape[0])
 
     # --- Generate per-trajectory noise sequences ---
     from simulator.noise_models import TotalNoise, _load_config as _nm_load_cfg
@@ -921,7 +1119,36 @@ def solve_lle_ssfm_jax(
     # plus seeding noise. A non-zero e0_override is passed through verbatim as the
     # exact initial field (no seeding noise), enabling deterministic soliton seeding.
     if e0_override is None:
-        e0_init = jnp.zeros((n_traj, n_tau), dtype=jnp.complex128)
+        if qn_enabled and qn_seed_vacuum:
+            # Vacuum-scale cold-start seed (half a photon per mode): analytic CW
+            # state + one complex Gaussian draw of per-sample variance
+            # sigma0^2 = hbar*omega0*n_tau/2 (per-quadrature std sigma0_q =
+            # sqrt(hbar*omega0*n_tau/4)), so by Parseval <n_mu> = 1/2 at t=0.
+            # Built HERE (host-side, Python branch) and handed to the solver as
+            # a verbatim warm start, so the legacy 1e-3*|e_cw| traced seed path
+            # is bypassed WITHOUT being restructured — the flag-off path stays
+            # bit-identical.
+            _amp0 = math.sqrt(max(float(kappa_c) * float(pin), 0.0))
+            _dw0 = np.asarray(delta_arr[:, 0], dtype=np.float64)     # (n_traj,)
+            _den0 = (float(kappa) / 2.0) ** 2 + _dw0 ** 2
+            e_cw_traj = jnp.asarray(
+                _amp0 * (float(kappa) / 2.0) / _den0
+                - 1j * _amp0 * _dw0 / _den0,
+                dtype=jnp.complex128,
+            )                                                        # (n_traj,)
+            sigma0_q = math.sqrt(hbar_omega0 * n_tau / 4.0)
+
+            def _vac_draw(k):
+                k_re, k_im = jax.random.split(k)
+                return sigma0_q * (
+                    jax.random.normal(k_re, (n_tau,), dtype=jnp.float64)
+                    + 1j * jax.random.normal(k_im, (n_tau,), dtype=jnp.float64)
+                )
+
+            vac = jax.vmap(_vac_draw)(jax.random.split(key_qnoise_seed, n_traj))
+            e0_init = (e_cw_traj[:, None] + vac).astype(jnp.complex128)
+        else:
+            e0_init = jnp.zeros((n_traj, n_tau), dtype=jnp.complex128)
     else:
         # Accept complex64 (or real) warm-start fields but upcast to complex128.
         e0_arr = jnp.asarray(e0_override, dtype=jnp.complex128)
@@ -1002,6 +1229,9 @@ def solve_lle_ssfm_jax(
         dispersion_validity_mask,
         validity_phase_threshold,
         fine_cadence_M,
+        qnoise_keys,
+        qnoise_scale,
+        qn_enabled,
     )
 
     return {k: np.asarray(v) for k, v in out.items()}

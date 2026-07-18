@@ -96,6 +96,31 @@ physical_parameters:
   # margin and trips the latter hard. Raise it if running deliberately higher P_in.
   thermal_shift_max_over_kappa: 15.0
 
+  # ---- Quantum vacuum noise (arXiv:2604.05897 Sec. V.B.2, Eq. 126) -----------
+  # Additive Langevin drive sqrt(kappa)*xi_mu(t) with
+  # <xi_mu(t) xi_mu'^dagger(t')> = delta(t-t')*delta_mumu' (both loss baths
+  # combined; coherent/vacuum baths only, no squeezing), implemented in the
+  # truncated-Wigner c-number limit: per fine step dt_fine every fast-time
+  # sample of E receives an i.i.d. complex Gaussian of per-quadrature std
+  # sqrt(hbar*omega0*kappa*n_tau*dt_fine/4); undriven steady state = the
+  # symmetric-ordered vacuum occupation of 1/2 photon per mode.
+  # NOTE: booleans are encoded as 0/1 ints because every physical_parameters
+  # leaf must parse as a plain number (tests/test_config.py locks this in).
+  # Master switch. 0 = OFF (default): the solver is bit-identical to the
+  # legacy (pre-quantum-noise) solver. 1 = ON.
+  quantum_noise_enabled: 0
+  # When the master switch is 1, replace the ad-hoc cold-start seed
+  # (1e-3*|e_cw| Gaussian) with the vacuum-scale seed: CW state + complex
+  # Gaussian of per-sample variance hbar*omega0*n_tau/2 (=> <n_mu> = 1/2 at
+  # t=0). Ignored while the master switch is 0.
+  quantum_noise_seed_vacuum_init: 1
+  # Optional override of hbar*omega0 [J] used for the photon-energy
+  # normalization. 0 = auto: hbar*omega0 = hbar*2*pi*c/pump_wavelength_m
+  # = 1.054571817e-34 * 2*pi*2.99792458e8 / 1.55e-6 = 1.2816e-19 J.
+  # (The pump-mode hbar*omega0 is used for ALL comb modes; <1% error over the
+  # comb span.) Encoded as 0 rather than null for the numeric-leaves test.
+  hbar_omega0_j: 0.0
+
   # ---- chi2 channels: ZERO for SiN (centrosymmetric: no Pockels, no pyroelectric) ----
   eo_r33_m_per_v: 0.0
   pyroelectric_coeff_c_per_m2_k: 0.0
