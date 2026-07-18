@@ -1,0 +1,50 @@
+{
+  "seed": 0,
+  "quick": false,
+  "hbar_omega0_j": 1.2815779715689e-19,
+  "soliton_comparison": {
+    "delta_omega_over_kappa": 11.0,
+    "n_tau": 8192,
+    "compare_rt": 20000,
+    "wing_band_mu": [
+      1998,
+      2596
+    ],
+    "floor": {
+      "off": {
+        "wing_mean_energy_j": 1.3934513255556504e-23,
+        "wing_over_half_photon": 0.00021745868865860664,
+        "wing_db_rel_pump": -117.98374399587098
+      },
+      "on": {
+        "wing_mean_energy_j": 6.471124498574008e-20,
+        "wing_over_half_photon": 1.0098682471347562,
+        "wing_db_rel_pump": -81.31487308967557
+      }
+    },
+    "u_int_mean_off": 5.478359353044433e-22,
+    "u_int_mean_on": 5.478510179601429e-22,
+    "label_mode_off": 6,
+    "label_mode_on": 3
+  },
+  "vacuum_equilibrium": {
+    "grand_mean_n_mu": 0.497960320937875,
+    "grand_mean_mu_le_third": 0.4990547695817817,
+    "decay_rate_rad_s": 75842516.11869135,
+    "rate_over_half_kappa": 0.998716303906918
+  },
+  "mi_growth": {
+    "mu_star": 179.0,
+    "mu_eq62": 187.77516199551198,
+    "ratio": 0.9532677170811243,
+    "p_th_w": 0.003502838591016889
+  },
+  "figures": [
+    "/home/user/soliton-control/analysis/figures/quantum_noise_spectrum_off_on.png",
+    "/home/user/soliton-control/analysis/figures/quantum_noise_vacuum_occupancy.png",
+    "/home/user/soliton-control/analysis/figures/quantum_noise_waveform_off_on.png",
+    "/home/user/soliton-control/analysis/figures/quantum_noise_uint_off_on.png",
+    "/home/user/soliton-control/analysis/figures/quantum_noise_autocorrelation.png",
+    "/home/user/soliton-control/analysis/figures/quantum_noise_mi_growth.png"
+  ]
+}
