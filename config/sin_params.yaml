@@ -96,6 +96,55 @@ physical_parameters:
   # margin and trips the latter hard. Raise it if running deliberately higher P_in.
   thermal_shift_max_over_kappa: 15.0
 
+  # ---- Quantum vacuum noise (arXiv:2604.05897 Sec. V.B.2, Eq. 126) -----------
+  # Additive Langevin drive sqrt(kappa)*xi_mu(t) with
+  # <xi_mu(t) xi_mu'^dagger(t')> = delta(t-t')*delta_mumu' (both loss baths
+  # combined; coherent/vacuum baths only, no squeezing), implemented in the
+  # truncated-Wigner c-number limit: per fine step dt_fine every fast-time
+  # sample of E receives an i.i.d. complex Gaussian of per-quadrature std
+  # sqrt(hbar*omega0*kappa*n_tau*dt_fine/4); undriven steady state = the
+  # symmetric-ordered vacuum occupation of 1/2 photon per mode.
+  # NOTE: booleans are encoded as 0/1 ints because every physical_parameters
+  # leaf must parse as a plain number (tests/test_config.py locks this in).
+  # Master switch. 0 = OFF (default): the solver is bit-identical to the
+  # legacy (pre-quantum-noise) solver. 1 = ON.
+  quantum_noise_enabled: 0
+  # When the master switch is 1, replace the ad-hoc cold-start seed
+  # (1e-3*|e_cw| Gaussian) with the vacuum-scale seed: CW state + complex
+  # Gaussian of per-sample variance hbar*omega0*n_tau/2 (=> <n_mu> = 1/2 at
+  # t=0). Ignored while the master switch is 0.
+  quantum_noise_seed_vacuum_init: 1
+  # Injection cadence ENUM (0/1 int, same encoding convention as the flags):
+  #   0 = fine (default): one injection per fine step dt_fine = t_r/M — the
+  #       exact prescription;
+  #   1 = roundtrip: one injection per round trip (at fine-step m=0) with the
+  #       variance scaled to dt = t_r. A CPU-performance knob, valid because
+  #       kappa*t_r ~ 6.2e-3 << 1 (steady occupation 0.5015 vs 0.5); with
+  #       fine_cadence_M = 1 the two cadences are bit-identical.
+  quantum_noise_injection_cadence: 0
+  # Optional override of hbar*omega0 [J] used for the photon-energy
+  # normalization. 0 = auto: hbar*omega0 = hbar*2*pi*c/pump_wavelength_m
+  # = 1.054571817e-34 * 2*pi*2.99792458e8 / 1.55e-6 = 1.2816e-19 J.
+  # (The pump-mode hbar*omega0 is used for ALL comb modes; <1% error over the
+  # comb span.) Encoded as 0 rather than null for the numeric-leaves test.
+  hbar_omega0_j: 0.0
+  # ---- Labeler robustness to the vacuum floor (active ONLY when
+  #      quantum_noise_enabled = 1; the solver forces the inactive values
+  #      otherwise, so flag-off labeling is bit-identical to legacy). --------
+  # Margin (dimensionless, LINEAR power; 10.0 = +10 dB) between the
+  # symmetric-ordered vacuum level and the levels the labeler judges:
+  #  * spectral-envelope clip = margin * n_tau^2*hbar*omega0/2  (raw |FFT|^2),
+  #    so the single-DKS monotonicity gate only sees structure >= 10 dB above
+  #    vacuum, where per-mode SNR is meaningful;
+  #  * OFF-floor lift = margin * n_tau*hbar*omega0/2  (J), so a vacuum-filled
+  #    cavity (pin ~ 0 with the Langevin drive on) labels OFF, never CW.
+  labeler_vacuum_floor_margin: 10.0
+  # Circular moving-average width (modes, odd-adjusted internally) applied to
+  # the LINEAR spectral envelope before the monotonicity gate. Single-snapshot
+  # vacuum modes are exponentially distributed (log10 std = (pi/sqrt(6))/ln10
+  # ~ 5.6 dB); averaging w modes leaves ~5.6/sqrt(w) ~ 2 dB at w = 8.
+  labeler_envelope_smooth_modes: 8
+
   # ---- chi2 channels: ZERO for SiN (centrosymmetric: no Pockels, no pyroelectric) ----
   eo_r33_m_per_v: 0.0
   pyroelectric_coeff_c_per_m2_k: 0.0
