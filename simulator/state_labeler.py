@@ -57,6 +57,9 @@ def make_threshold_params(
     delta_omega_max: float,
     *,
     off_fraction: float = 1e-3,
+    vacuum_floor_level: float = 0.0,
+    envelope_smooth_modes: int = 1,
+    vacuum_off_floor: float = 0.0,
     overrides: dict | None = None,
 ) -> dict:
     """Build the shared threshold dict from physical config — single source of truth.
@@ -65,11 +68,31 @@ def make_threshold_params(
     all other (geometric / spectral) thresholds come from ``_DEFAULT_THRESHOLD_PARAMS``.
     The SAME dict feeds both the JAX labeler (``make_state_labeler``) and the NumPy
     labeler (``label_soliton_state``), so the two stay byte-for-byte consistent.
+
+    Quantum-vacuum-floor parameters (all inactive by default; the solver
+    computes them from ħω₀, n_tau and the config margins ONLY when the quantum
+    noise channel is enabled — the labeler never derives physics itself):
+
+    ``vacuum_floor_level``  [raw |FFT(E)|² units, i.e. n_tau²·ħω₀/2 × margin]
+        Absolute clip applied to the (smoothed) spectral envelope before the
+        single-DKS monotonicity gate; 0.0 = exact historical arithmetic.
+    ``envelope_smooth_modes``  [modes]
+        Circular moving-average width (odd-adjusted) for the same envelope;
+        1 = identity. Reduces the exponential-statistics wing fluctuation
+        (~5.6 dB/mode single-snapshot) to ~5.6/√w dB.
+    ``vacuum_off_floor``  [J, i.e. n_tau·ħω₀/2 × margin]
+        Lifts the OFF power floor to max(off_fraction·U_cw,min, this), so a
+        pure vacuum-filled cavity (e.g. pin = 0 with the Langevin drive on)
+        labels OFF instead of being promoted to CW/MI by its own ½-photon
+        background. 0.0 = unchanged legacy floor.
     """
     params = dict(_DEFAULT_THRESHOLD_PARAMS)
-    params["power_floor"] = physical_off_floor(
-        kappa, kappa_c, pin, delta_omega_max, off_fraction
+    params["power_floor"] = max(
+        physical_off_floor(kappa, kappa_c, pin, delta_omega_max, off_fraction),
+        float(vacuum_off_floor),
     )
+    params["vacuum_floor_level"] = float(vacuum_floor_level)
+    params["envelope_smooth_modes"] = int(envelope_smooth_modes)
     if overrides:
         params.update(overrides)
     return params
@@ -106,6 +129,13 @@ def make_state_labeler(threshold_params: dict | None = None):
     SECH2_ENV_MONO_MIN = float(_params["sech2_env_mono_min"])  # single-DKS envelope test
     SECH2_ENV_TOL      = float(_params["sech2_env_tol"])       # per-step log tolerance
     COMB_MIN_DB        = float(_params["comb_structure_min_db"])  # comb-vs-flat-floor gate
+    # Quantum-vacuum-floor robustness of the envelope gate (see the docstring
+    # of make_threshold_params). Both are build-time STATIC no-ops at their
+    # inactive defaults (0.0 / 1): the branches below are Python-level, so the
+    # inactive path traces EXACTLY the historical arithmetic.
+    VACUUM_FLOOR_LEVEL = float(_params["vacuum_floor_level"])  # raw |FFT(E)|² units
+    _w = int(_params["envelope_smooth_modes"])
+    ENV_SMOOTH_W       = 2 * (_w // 2) + 1 if _w > 1 else 1    # odd-adjusted width
 
     def state_labeler(e_t: jnp.ndarray) -> jnp.int32:
         n_tau = e_t.shape[0]
@@ -151,8 +181,30 @@ def make_state_labeler(threshold_params: dict | None = None):
         # The envelope monotonicity is ~1.0 for a single DKS at any resolution
         # (the comb may be broad, but it is smooth), and ~0.5–0.75 for MI/chaos.
         spec_shift = jnp.fft.fftshift(spec)
+        # Vacuum-floor-robust envelope for the monotonicity gate ONLY (entropy,
+        # contrast and the inner/outer band ratio keep the raw spectrum).
+        # Single-snapshot modal power of a vacuum-filled mode is exponentially
+        # distributed => log10-power std = (pi/sqrt(6))/ln 10 ~ 0.56 decades,
+        # which the raw-envelope step test reads as non-monotonic structure.
+        # (i) circular moving average over ENV_SMOOTH_W modes (linear power,
+        # fftshifted ordering; the wrap joins the +/-Nyquist edges) reduces the
+        # fluctuation to ~5.6/sqrt(w) dB; (ii) absolute clip at
+        # VACUUM_FLOOR_LEVEL (raw units, BEFORE peak normalization, so the
+        # floor is state-independent): modes at the clip form an exactly flat
+        # plateau whose steps are 0 <= tol — "envelope terminated", trivially
+        # monotone, never new structure. Both branches are Python-static; at
+        # the inactive defaults (w=1, level=0.0) the traced arithmetic is
+        # bit-for-bit the historical one.
+        env_lin = spec_shift
+        if ENV_SMOOTH_W > 1:
+            _h = ENV_SMOOTH_W // 2
+            env_lin = sum(
+                jnp.roll(env_lin, k) for k in range(-_h, _h + 1)
+            ) / float(ENV_SMOOTH_W)
+        if VACUUM_FLOOR_LEVEL > 0.0:
+            env_lin = jnp.maximum(env_lin, VACUUM_FLOOR_LEVEL)
         log_env = jnp.log10(
-            jnp.maximum(spec_shift / jnp.maximum(jnp.max(spec_shift), 1e-30), 1e-12)
+            jnp.maximum(env_lin / jnp.maximum(jnp.max(env_lin), 1e-30), 1e-12)
         )
         c_idx = n_tau // 2                                   # DC / pump line index
         right_steps = log_env[c_idx + 1:] - log_env[c_idx:-1]   # outward, i > center
@@ -292,6 +344,17 @@ _DEFAULT_THRESHOLD_PARAMS: dict = {
     "sharpness_min": 0.75,   # DEPRECATED: no longer used by the JAX labeler
     "peak_prominence": 0.3,
     "peak_width": 2.0,
+    # Quantum-vacuum-floor robustness (see make_threshold_params). Inactive by
+    # default: 0.0 clips nothing and width 1 is the identity, so the JAX
+    # envelope gate traces the exact historical arithmetic. Set by the solver
+    # (physics-anchored: n_tau²·ħω₀/2 × margin, and an odd-adjusted smoothing
+    # width) only when the quantum noise channel is enabled. The NumPy labeler
+    # carries the keys for parity but has no spectral monotonicity gate — its
+    # single-DKS discriminator is the TEMPORAL sech² fit, which is robust to
+    # the vacuum floor (the floor perturbs |E(τ)|² at the ~1e-5 relative
+    # level); the shared OFF floor lift enters via power_floor for both paths.
+    "vacuum_floor_level": 0.0,
+    "envelope_smooth_modes": 1,
 }
 
 def label_soliton_state(E_tau, threshold_params) -> int:

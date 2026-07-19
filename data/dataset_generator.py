@@ -90,6 +90,25 @@ class DatasetGenerator:
             if self.enable_quantum_noise
             else 0.0
         )
+        # Scan-time labeler: the historical conservative fallback (identical
+        # object => stable jit static-arg identity) when the quantum channel is
+        # off; a vacuum-floor-aware labeler (see simulator/state_labeler.py
+        # make_threshold_params) when it is on, so the single-DKS envelope gate
+        # is not defeated by the physical ~5.6 dB per-mode vacuum fluctuations.
+        # The fallback power_floor (1e-13 J) already sits far above
+        # n_tau*hbar*omega0/2 at these grid sizes, so no OFF-floor lift needed.
+        if self.enable_quantum_noise:
+            from simulator.state_labeler import make_state_labeler
+
+            _hbw = hbar_omega0_from_config(self.config)
+            _margin = float(self.config.get("labeler_vacuum_floor_margin", 10.0))
+            _smooth = int(self.config.get("labeler_envelope_smooth_modes", 8))
+            self.state_labeler = make_state_labeler({
+                "vacuum_floor_level": _margin * (self.n_tau**2) * _hbw / 2.0,
+                "envelope_smooth_modes": _smooth,
+            })
+        else:
+            self.state_labeler = _STATE_LABELER
 
         self.p_th = (self.kappa / 2.0) ** 2 / (self.gamma * self.t_r * self.kappa_c)
 
@@ -246,7 +265,7 @@ class DatasetGenerator:
                 int(self.snapshot_interval),
                 seg_field_keys,
                 thermal,
-                _STATE_LABELER,
+                self.state_labeler,
                 noise_seqs,
                 e_carry,
                 delta_t_carry,
@@ -261,6 +280,7 @@ class DatasetGenerator:
                 seg_qnoise_keys,
                 self.qnoise_scale,
                 self.enable_quantum_noise,
+                False,          # qnoise_roundtrip: fine cadence (M=1 here, identical)
             )
             # Carry field and thermal state forward across segment boundary
             e_carry = jnp.array(out["e_final"], dtype=jnp.complex64)

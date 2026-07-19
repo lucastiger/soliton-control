@@ -414,8 +414,9 @@ def _single_trajectory_solver(
     validity_phase_threshold: float,  # |D_int - delta_omega|*dt_sub threshold (rad) for the validity mask
     fine_cadence_M: int,          # static; advance thermal/detuning/energy at dt=t_r/M (1 = per-round-trip)
     qnoise_key: jax.Array,        # per-trajectory PRNG key for the quantum Langevin drive
-    qnoise_scale: float,          # per-quadrature injection std √(ħω₀·κ·n_tau·dt_fine/4); 0.0 = disabled
+    qnoise_scale: float,          # per-quadrature injection std for ONE injection event; 0.0 = disabled
     qnoise_enabled: bool,         # static; False traces ZERO extra ops (bit-identical legacy path)
+    qnoise_roundtrip: bool,       # static; True = inject once per ROUND TRIP (at fine-step m=0, scale pre-scaled to dt=t_r)
 ) -> dict[str, jnp.ndarray]:
     """Solve one detuning trajectory with SSFM + thermal Euler update.
 
@@ -544,8 +545,15 @@ def _single_trajectory_solver(
 
         # Quantum-vacuum Langevin injection: after the sub-step loop, BEFORE the
         # numerical masks (so they damp, never re-populate, the edge modes).
-        # Static Python branch — the disabled path traces zero extra ops.
-        if qnoise_enabled:
+        # Static Python branches — the disabled path traces zero extra ops.
+        # Roundtrip cadence (qnoise_roundtrip, static): inject only at the
+        # first fine step (m == 0 is Python-static in the unrolled fine loop)
+        # with qnoise_scale pre-scaled to dt = t_r by the host — valid because
+        # kappa*t_r ~ 6.2e-3 << 1 keeps even per-round-trip injection deep in
+        # the continuum limit (steady occupation 0.5015 vs 0.5). The key index
+        # step_idx*fine_cadence_M + 0 keeps the fold_in ladder unchanged, so
+        # fine_cadence_M = 1 makes the two cadences bit-identical.
+        if qnoise_enabled and (not qnoise_roundtrip or m == 0):
             e_next = e_next + _qnoise_increment(
                 qnoise_key, step_idx * fine_cadence_M + m, n_tau, qnoise_scale
             )
@@ -684,16 +692,29 @@ def _physical_state_labeler(
     pin: float,
     delta_omega_max: float,
     off_fraction: float = 1e-3,
+    vacuum_floor_level: float = 0.0,
+    envelope_smooth_modes: int = 1,
+    vacuum_off_floor: float = 0.0,
 ):
     """Build (and cache) a state labeler whose OFF floor = f·U_cw,min from config.
 
     Cached on the physical params so repeated solver calls with the same config
     reuse one labeler object — JAX treats it as a static arg, so a stable object
     identity avoids needless recompilation. A genuinely different config produces
-    a new labeler (and a correct recompile, since the OFF floor changed).
+    a new labeler (and a correct recompile, since the OFF floor changed). The
+    quantum-vacuum-floor parameters (see make_threshold_params) participate in
+    the cache key, so toggling the quantum channel or its labeler margins also
+    recompiles correctly.
     """
     params = make_threshold_params(
-        kappa, kappa_c, pin, delta_omega_max, off_fraction=off_fraction
+        kappa,
+        kappa_c,
+        pin,
+        delta_omega_max,
+        off_fraction=off_fraction,
+        vacuum_floor_level=vacuum_floor_level,
+        envelope_smooth_modes=envelope_smooth_modes,
+        vacuum_off_floor=vacuum_off_floor,
     )
     return make_state_labeler(params)
 
@@ -745,13 +766,13 @@ def _detuning_noise_sequences(
 # delta_t0_override(16), qnoise_key(25). Static: t_slow(2), beta(3), n_tau(7),
 # snapshot_interval(10), state_labeler(13), n_substeps(18),
 # dealias_two_thirds(19), edge_absorber(20), dispersion_validity_mask(22),
-# fine_cadence_M(24), qnoise_enabled(27).
+# fine_cadence_M(24), qnoise_enabled(27), qnoise_roundtrip(28).
 _PER_TRAJ = jax.jit(
     jax.vmap(
         _single_trajectory_solver,
-        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0, 0, 0, None, None, None, None, None, None, None, None, 0, None, None),
+        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0, 0, 0, None, None, None, None, None, None, None, None, 0, None, None, None),
     ),
-    static_argnums=(2, 3, 7, 10, 13, 18, 19, 20, 22, 24, 27),
+    static_argnums=(2, 3, 7, 10, 13, 18, 19, 20, 22, 24, 27, 28),
 )
 
 
@@ -779,6 +800,7 @@ def solve_lle_ssfm_jax(
     fine_cadence_M: int = 1,
     quantum_noise_enabled: bool | None = None,
     quantum_noise_seed_vacuum_init: bool | None = None,
+    quantum_noise_injection_cadence: int | None = None,
 ) -> dict[str, np.ndarray]:
     """Batch-capable SSFM solver for the generalized LLE using JAX.
 
@@ -898,6 +920,15 @@ def solve_lle_ssfm_jax(
             legacy 1e-3*|e_cw| noise. ``None`` (default) = read the
             ``quantum_noise_seed_vacuum_init`` config key (default on). Ignored
             when the master switch is off or when ``e0_override`` is given.
+        quantum_noise_injection_cadence: 0 = inject once per FINE step
+            (dt_fine = t_r/fine_cadence_M; the default, exact prescription) or
+            1 = once per ROUND TRIP (at fine-step m = 0 with the variance
+            scaled to dt = t_r) — a CPU-performance knob valid because
+            kappa*t_r ~ 6.2e-3 << 1 keeps per-round-trip injection deep in the
+            continuum limit (steady occupation 0.5015 vs 0.5). With
+            fine_cadence_M = 1 the two cadences are bit-identical. ``None``
+            (default) = read the ``quantum_noise_injection_cadence`` config key
+            (default 0).
 
     Returns:
         Dictionary containing requested histories.
@@ -1092,10 +1123,28 @@ def solve_lle_ssfm_jax(
 
     hbar_omega0 = hbar_omega0_from_config(physical)
     dt_fine = t_r / fine_cadence_M
+    if quantum_noise_injection_cadence is None:
+        quantum_noise_injection_cadence = physical.get(
+            "quantum_noise_injection_cadence", 0
+        )
+    assert isinstance(quantum_noise_injection_cadence, (bool, int, np.integer)) and int(
+        quantum_noise_injection_cadence
+    ) in (0, 1), (
+        f"quantum_noise_injection_cadence must be 0 (fine) or 1 (roundtrip), "
+        f"got {quantum_noise_injection_cadence!r}."
+    )
+    qn_roundtrip = bool(int(quantum_noise_injection_cadence))
     if qn_enabled:
-        # Per-quadrature time-domain injection std per fine step (see the
-        # "Quantum noise" docstring section for the Parseval derivation).
-        qnoise_scale = float(math.sqrt(hbar_omega0 * kappa * n_tau * dt_fine / 4.0))
+        # Per-quadrature time-domain injection std per injection EVENT (see
+        # the "Quantum noise" docstring section for the Parseval derivation):
+        # dt = dt_fine for the fine cadence, dt = t_r for the roundtrip
+        # cadence (variance scaled so the per-round-trip injected variance is
+        # identical; with fine_cadence_M = 1 the two are the same number and
+        # the traces are bit-identical).
+        _dt_inject = t_r if qn_roundtrip else dt_fine
+        qnoise_scale = float(
+            math.sqrt(hbar_omega0 * kappa * n_tau * _dt_inject / 4.0)
+        )
         # Perturbation sanity numbers, logged once per solve. The XPM
         # cross-check 2*gamma*U_vac == gamma*hbar_omega0*n_tau holds identically
         # (U_vac = n_tau*hbar_omega0/2), so both are printed from one formula.
@@ -1108,11 +1157,25 @@ def solve_lle_ssfm_jax(
             f"Kerr shift gamma*U_vac = {kerr_vac:.3e} rad/s "
             f"= {kerr_vac / kappa:.2e}*kappa (XPM cross-check 2*gamma*U_vac = "
             f"{2.0 * kerr_vac:.3e} rad/s), per-round-trip per-quadrature "
-            f"injection std = {inj_rt:.3e} (field units), per-fine-step "
-            f"(dt_fine = t_r/{fine_cadence_M}) std = {qnoise_scale:.3e}"
+            f"injection std = {inj_rt:.3e} (field units), per-event "
+            f"({'roundtrip cadence, dt = t_r' if qn_roundtrip else f'fine cadence, dt = t_r/{fine_cadence_M}'}) "
+            f"std = {qnoise_scale:.3e}"
         )
-        # The steady vacuum background must sit well below the labeler's OFF
-        # floor, or OFF/CW labels can flip once the background thermalizes.
+        # Labeler vacuum-floor parameters (physics-anchored: everything traces
+        # to hbar*omega0, n_tau and the documented config margins). The
+        # spectral clip is in raw |FFT(E)|^2 units (n_tau^2*hbar*omega0/2 per
+        # vacuum mode); the OFF floor lift is in energy units
+        # (n_tau*hbar*omega0/2 = the mean |E_j|^2 of a vacuum-filled cavity).
+        qn_floor_margin = float(physical.get("labeler_vacuum_floor_margin", 10.0))
+        qn_smooth_modes = int(physical.get("labeler_envelope_smooth_modes", 8))
+        qn_vacuum_floor_spec = qn_floor_margin * (n_tau**2) * hbar_omega0 / 2.0
+        qn_vacuum_off_floor = qn_floor_margin * u_vac
+
+        # The steady vacuum background must sit well below the CW-derived OFF
+        # floor; where it does not, the labeler's OFF floor is LIFTED to the
+        # vacuum-anchored level margin*U_vac (see make_threshold_params), so
+        # the background itself can never be promoted OFF->CW — but the OFF
+        # class then extends up to that lifted floor, which is worth a heads-up.
         _dw_max_qn = float(np.max(np.abs(np.asarray(delta_arr))))
         _off_floor = physical_off_floor(
             float(kappa), float(kappa_c), float(pin), _dw_max_qn
@@ -1121,14 +1184,21 @@ def solve_lle_ssfm_jax(
             import warnings as _w
             _w.warn(
                 f"Vacuum background U_vac = n_tau*hbar*omega0/2 = {u_vac:.3e} J "
-                f"is not < 0.5x the labeler OFF floor "
-                f"physical_off_floor(...) = {_off_floor:.3e} J: the thermalized "
-                f"vacuum background may flip OFF/CW labels. Consider a larger "
-                f"off_fraction for the state labeler (or a smaller n_tau).",
+                f"is not < 0.5x the CW-derived labeler OFF floor "
+                f"physical_off_floor(...) = {_off_floor:.3e} J. The OFF floor "
+                f"is therefore lifted to the vacuum-anchored level "
+                f"margin*U_vac = {qn_vacuum_off_floor:.3e} J so the vacuum "
+                f"background labels OFF (never CW); coherent fields dimmer "
+                f"than that lifted floor will also label OFF. Consider a "
+                f"larger off_fraction if CW discrimination near the floor "
+                f"matters.",
                 stacklevel=2,
             )
     else:
         qnoise_scale = 0.0
+        qn_vacuum_floor_spec = 0.0
+        qn_smooth_modes = 1
+        qn_vacuum_off_floor = 0.0
 
     # Per-trajectory quantum-noise keys (independent of the legacy key chains).
     # Built unconditionally so the _PER_TRAJ signature is uniform; when the
@@ -1214,9 +1284,18 @@ def solve_lle_ssfm_jax(
     # Physically-scaled OFF floor: f·U_cw,min with U_cw,min at the largest |δω|
     # in the sweep. Built from the concrete config so OFF tracks the energy scale
     # rather than a magic constant. Cached on the params so identity is stable.
+    # With the quantum channel enabled the vacuum-floor labeler parameters are
+    # threaded through (inactive zeros/1 otherwise, so the flag-off labeler is
+    # the exact historical object).
     delta_omega_max = float(np.max(np.abs(np.asarray(delta_arr))))
     state_labeler = _physical_state_labeler(
-        float(kappa), float(kappa_c), float(pin), delta_omega_max
+        float(kappa),
+        float(kappa_c),
+        float(pin),
+        delta_omega_max,
+        vacuum_floor_level=qn_vacuum_floor_spec,
+        envelope_smooth_modes=qn_smooth_modes,
+        vacuum_off_floor=qn_vacuum_off_floor,
     )
 
     # Optional measured per-mode dispersion: cast to the solver dtype and pin the
@@ -1261,6 +1340,7 @@ def solve_lle_ssfm_jax(
         qnoise_keys,
         qnoise_scale,
         qn_enabled,
+        qn_roundtrip,
     )
 
     return {k: np.asarray(v) for k, v in out.items()}

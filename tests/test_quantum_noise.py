@@ -469,6 +469,7 @@ def _per_traj_args(n_traj=2, n_tau=64, t_slow=3, qnoise_enabled=False):
         jax.random.split(jax.random.PRNGKey(1), n_traj),   # qnoise_key
         qnoise_scale,             # qnoise_scale
         bool(qnoise_enabled),     # qnoise_enabled (static)
+        False,                    # qnoise_roundtrip (static; fine cadence)
     )
 
 
@@ -501,7 +502,7 @@ def _scan_body_primitives(qnoise_enabled: bool) -> list[str]:
             args[6], args[7], args[8], args[9], args[10], rng_key,
             args[12], args[13], noise_seq[0], e0[0], dt0[0], args[17],
             args[18], args[19], args[20], args[21], args[22], args[23],
-            args[24], qnoise_key, args[26], qnoise_enabled,
+            args[24], qnoise_key, args[26], qnoise_enabled, False,
         )
 
     jpr = jax.make_jaxpr(_one_traj)(
@@ -511,6 +512,164 @@ def _scan_body_primitives(qnoise_enabled: bool) -> list[str]:
         if eqn.primitive.name == "scan":
             return _collect_primitives(eqn.params["jaxpr"].jaxpr, [])
     raise AssertionError("no scan primitive found in the solver jaxpr")
+
+
+def test_spectral_floor_wing_band_inside_dealias_window():
+    """The report's floor-measurement band must lie inside |mu| <= n_tau/3.
+
+    With dealias_two_thirds ON (the production stack used for the -81.3 dB
+    wing measurement) the modes beyond n_tau/3 are zeroed every kick and are
+    deliberately under-occupied; measuring the vacuum floor there would read
+    low. Pins the band for the committed measurement (n_tau = 8192:
+    |mu| in [1998, 2596], boundary 2730).
+    """
+    from analysis.quantum_noise_report import wing_band
+
+    for n_tau in (1024, 4096, 8192, 16384):
+        lo, hi = wing_band(n_tau)
+        assert 0 < lo < hi <= n_tau / 3.0, (n_tau, lo, hi)
+
+
+# ---------------------------------------------------------------------------
+# Injection cadence (quantum_noise_injection_cadence: 0 = fine, 1 = roundtrip)
+# ---------------------------------------------------------------------------
+def test_cadence_bit_identical_at_M1():
+    """With fine_cadence_M = 1 the two cadences must be bit-identical.
+
+    Same fold_in index (step*1 + 0) and the same scale (sqrt(M) = 1), so the
+    traces coincide exactly.
+    """
+    kw = dict(
+        pin=0.05,
+        delta_omega=3.0 * _KAPPA,
+        t_slow=40,
+        beta=[_BETA2],
+        kappa=_KAPPA,
+        kappa_c=_KAPPA_C,
+        rng_key=jax.random.PRNGKey(9),
+        n_tau=256,
+        snapshot_interval=10,
+        fine_cadence_M=1,
+        quantum_noise_enabled=True,
+    )
+    fine = _solve_quiet(quantum_noise_injection_cadence=0, **kw)
+    rt = _solve_quiet(quantum_noise_injection_cadence=1, **kw)
+    for key in fine:
+        assert np.array_equal(fine[key], rt[key]), key
+
+
+def test_cadence_rejects_invalid_value():
+    with pytest.raises(AssertionError, match="quantum_noise_injection_cadence"):
+        _short_solve(quantum_noise_enabled=True, quantum_noise_injection_cadence=2)
+
+
+def test_roundtrip_cadence_vacuum_equilibrium_M4(tmp_path):
+    """M = 4 with roundtrip cadence: <n_mu> = 0.5 +- 10% and kappa/2 decay.
+
+    One injection per round trip with variance kappa*t_r/2 per mode against a
+    per-round-trip decay e^{-kappa*t_r}: the same discrete map as the M = 1
+    fine cadence, so the steady occupation (0.5015) and the linewidth are
+    unchanged; this pins that the sqrt(M) rescaling and the m = 0 gating are
+    right (an un-rescaled roundtrip injection at M = 4 would give 0.125).
+    """
+    sidecar = _write_sidecar(tmp_path, "tk0_cadence.yaml", {"T_k": 0.0})
+    n_tau, t_slow, snap = 512, 4000, 2
+    sol = _solve_quiet(
+        pin=0.0,
+        delta_omega=np.zeros((4, t_slow)),
+        t_slow=t_slow,
+        beta=[_BETA2],
+        kappa=_KAPPA,
+        kappa_c=_KAPPA_C,
+        rng_key=jax.random.PRNGKey(23),
+        n_tau=n_tau,
+        config_path=str(sidecar),
+        snapshot_interval=snap,
+        fine_cadence_M=4,
+        quantum_noise_enabled=True,
+        quantum_noise_injection_cadence=1,
+    )
+    snaps = np.asarray(sol["E_snapshots"])
+    win = snaps[:, snaps.shape[1] // 2 :, :]
+    spec = np.abs(np.fft.fft(win, axis=-1)) ** 2
+    n_mu = spec.mean(axis=(0, 1)) / (n_tau**2 * _HBW)
+    grand = float(np.mean(n_mu))
+    assert abs(grand / 0.5 - 1.0) < 0.10, grand
+
+    # Phase-corrected all-modes decay estimator (every mode decays at kappa/2
+    # under the KNOWN linear phase exp(-i*D_int(mu)*tau); rotating it out lets
+    # C_mu(tau) average coherently over modes without the |.|-estimator's
+    # noise-floor bias, which dominates a single-mode fit at this reduced
+    # 512-mode / 2000-RT statistics budget).
+    from simulator.lle_solver import _build_omega_grid, build_dispersion
+
+    modes = np.fft.fft(snaps, axis=-1)[:, snaps.shape[1] // 2 :, :]
+    mu_full = np.fft.fftfreq(n_tau) * n_tau
+    keep = np.abs(mu_full) <= n_tau / 3.0
+    wk = modes[:, :, keep]
+    disp = np.asarray(build_dispersion(_build_omega_grid(n_tau, _T_R), (_BETA2,)))[keep]
+    lifetime_rt = 1.0 / (_KAPPA * _T_R)
+    lags = np.arange(
+        int(round(0.2 * lifetime_rt / snap)),
+        int(round(2.0 * lifetime_rt / snap)) + 1,
+        4,
+    )
+    dphi = disp * snap * _T_R
+    corr = np.array(
+        [
+            float(
+                np.mean(
+                    np.real(
+                        np.mean(
+                            wk[:, l:, :] * np.conj(wk[:, : wk.shape[1] - l, :]),
+                            axis=(0, 1),
+                        )
+                        * np.exp(1j * dphi * l)
+                    )
+                )
+            )
+            for l in lags
+        ]
+    )
+    rate = -np.polyfit(lags * snap * _T_R, np.log(corr), 1)[0]
+    assert abs(rate / (_KAPPA / 2.0) - 1.0) < 0.10, rate / (_KAPPA / 2.0)
+
+
+def test_roundtrip_cadence_mi_sideband(tmp_path):
+    """MI sideband selection also holds under M = 4 + roundtrip cadence."""
+    gamma = float(_PHYS["gamma_LLE_per_J_per_s"])
+    d2 = float(_PHYS["d2_rad_per_s2"])
+    p_in = 0.214
+    p_th = _KAPPA**3 / (8.0 * gamma * _KAPPA_C)
+    mu_th = math.sqrt((_KAPPA / d2) * (1.0 + math.sqrt(p_in / p_th - 1.0)))
+    sidecar = _write_sidecar(
+        tmp_path, "mi_quiet_cadence.yaml", {"T_k": 0.0, "Gamma_th": 1e-4}
+    )
+    n_tau, t_slow, snap = 1024, 6000, 25
+    sol = _solve_quiet(
+        pin=p_in,
+        delta_omega=-2.5 * _KAPPA,
+        t_slow=t_slow,
+        beta=[_BETA2],
+        kappa=_KAPPA,
+        kappa_c=_KAPPA_C,
+        rng_key=jax.random.PRNGKey(31),
+        n_tau=n_tau,
+        config_path=str(sidecar),
+        snapshot_interval=snap,
+        fine_cadence_M=4,
+        quantum_noise_enabled=True,
+        quantum_noise_injection_cadence=1,
+    )
+    snaps = np.asarray(sol["E_snapshots"])[0]
+    n_mode = np.abs(np.fft.fft(snaps, axis=-1)) ** 2 / (n_tau**2 * _HBW)
+    mu = np.fft.fftfreq(n_tau) * n_tau
+    band = (np.abs(mu) >= 10) & (np.abs(mu) <= n_tau / 3.0)
+    peak = n_mode[:, band].max(axis=-1)
+    idx = np.argmax(peak > 1e5)
+    assert peak[idx] > 1e5, "MI sidebands never reached detection level"
+    mu_star = abs(float(mu[band][np.argmax(n_mode[idx][band])]))
+    assert abs(mu_star / mu_th - 1.0) < 0.15, (mu_star, mu_th)
 
 
 def test_disabled_path_adds_no_rng_to_scan_body():

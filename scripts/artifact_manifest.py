@@ -74,6 +74,7 @@ GEN = {
     "forward_sweep.csv": ("analysis/adiabatic_sweeps.py", "other"),
     "reverse_sweep.csv": ("analysis/adiabatic_sweeps.py", "other"),
     "staircase_forensics.md": ("analysis/staircase_forensics.py", "other"),
+    "quantum_noise_report.json": ("analysis/quantum_noise_report.py", "other"),
     "robustness/variant_1.npz": ("analysis/run_detuning_sweep.py --robustness", "robustness"),
     "robustness/variant_2.npz": ("analysis/run_detuning_sweep.py --robustness", "robustness"),
     "robustness/variant_3.npz": ("analysis/run_detuning_sweep.py --robustness", "robustness"),

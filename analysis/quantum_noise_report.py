@@ -122,6 +122,12 @@ def soliton_comparison(cav, config_path, seed: int, n_tau: int, settle_rt: int,
     # Far-wing floor: modal ENERGY U_mu = P_mu / n_tau^2 [J] against the
     # symmetric-ordered vacuum hbar*omega0/2, and in dB relative to the pump.
     band = wing_band(n_tau)
+    # PRODUCTION_NUMERICS runs with dealias_two_thirds ON: modes |mu| > n_tau/3
+    # are zeroed every kick and are deliberately under-occupied, so the floor
+    # band must sit strictly inside the dealias window.
+    assert PRODUCTION_NUMERICS.get("dealias_two_thirds") is not True or (
+        band[1] <= n_tau / 3.0
+    ), f"wing band {band} extends past the 2/3 dealias boundary {n_tau/3:.0f}"
     wing = (np.abs(out["on"]["mu"]) >= band[0]) & (
         np.abs(out["on"]["mu"]) <= band[1]
     )
@@ -397,7 +403,32 @@ def main(argv=None) -> int:
     figs = make_figures(sol_cmp, vac, mig, cav, n_tau)
 
     RESULTS_JSON.parent.mkdir(parents=True, exist_ok=True)
+    # Provenance per the repo's artifact conventions (cf.
+    # scripts/artifact_manifest.py and dks_artifact_provenance.json): the
+    # generating script, the commit the run was made from, a hash of the BASE
+    # config the sidecar was derived from, and the seed.
+    import hashlib
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[1]
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    except Exception:
+        commit = "unknown"
+    cfg_sha = hashlib.sha256(
+        (repo_root / "config" / "sin_params.yaml").read_bytes()
+    ).hexdigest()
+
     report = {
+        "provenance": {
+            "script": "analysis/quantum_noise_report.py",
+            "git_commit": commit,
+            "base_config_sha256": cfg_sha,
+            "seed": args.seed,
+        },
         "seed": args.seed,
         "quick": bool(args.quick),
         "hbar_omega0_j": sol_cmp["hbar_omega0_j"],
