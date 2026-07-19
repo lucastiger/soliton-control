@@ -25,7 +25,7 @@
     "u_int_mean_off": 5.478359353044433e-22,
     "u_int_mean_on": 5.478510179601429e-22,
     "label_mode_off": 6,
-    "label_mode_on": 3
+    "label_mode_on": 6
   },
   "vacuum_equilibrium": {
     "grand_mean_n_mu": 0.497960320937875,
