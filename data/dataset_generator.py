@@ -120,6 +120,41 @@ class DatasetGenerator:
         qnoise_keys = jax.random.split(jax.random.fold_in(batch_key, 2), B)
         return key_arr, noise_keys, qnoise_keys
 
+    def _segment_schedule(self, sweep_rate: float) -> list[tuple[float, int]]:
+        """(delta_center, t_seg) per segment: the blue->red sweep + final hold.
+
+        Extracted from ``simulate_batch`` verbatim so tests can drive the
+        segment/carry machinery with a custom (e.g. constant-detuning)
+        schedule by overriding this one method; production behavior is
+        unchanged.
+        """
+        n_sweep_segments = int(
+            math.ceil(8.0 * self.kappa / (sweep_rate * self.SEGMENT_RT))
+        )
+        schedule = [
+            (
+                (3.0 * self.kappa)
+                - sweep_rate * (seg_idx * self.SEGMENT_RT + self.SEGMENT_RT / 2.0),
+                int(self.SEGMENT_RT),
+            )
+            for seg_idx in range(n_sweep_segments)
+        ]
+        schedule.append((-5.0 * self.kappa, int(self.HOLD_RT)))
+        return schedule
+
+    def _segment_noise(self, noise_model, seg_noise_keys, noise_scale_arr, t_seg):
+        """Per-segment TRN/detuning-noise sequences, exactly as the batch uses.
+
+        NOTE (pinned by tests/test_dataset_generator.py): the AR(1) noise is
+        regenerated per segment from x0 = 0, so every segment boundary
+        restarts the sequence at zero — a documented flaw kept as-is until the
+        planned ``legacy_segment_noise`` migration.
+        """
+        return jax.vmap(
+            lambda k, scale: noise_model.sample(k, int(t_seg)) * scale,
+            in_axes=(0, 0),
+        )(seg_noise_keys, noise_scale_arr)
+
     def _forward_fill_labels(self, label_history: np.ndarray, t_total: int) -> np.ndarray:
         # Each snapshot label is forward-filled for snapshot_interval round trips.
         # At segment boundaries the last snapshot of a segment may cover fewer than
@@ -160,7 +195,7 @@ class DatasetGenerator:
         gamma_th_scalar = gamma_ths.pop()
 
         noise_scale_arr = jnp.array([float(p["noise_scale"]) for p in params], dtype=jnp.float32)
-        n_sweep_segments = int(math.ceil(8.0 * self.kappa / (sweep_rate * self.SEGMENT_RT)))
+        schedule = self._segment_schedule(sweep_rate)
 
         key_arr, noise_keys, qnoise_keys = self._make_keys(
             batch_global_idx=batch_global_idx, B=B
@@ -185,17 +220,7 @@ class DatasetGenerator:
         e_carry = jnp.zeros((B, self.n_tau), dtype=jnp.complex64)
         delta_t_carry = jnp.zeros((B,), dtype=jnp.float32)
 
-        total_segments = n_sweep_segments + 1
-        for seg_idx in range(total_segments):
-            if seg_idx < n_sweep_segments:
-                delta_center = (3.0 * self.kappa) - sweep_rate * (
-                    seg_idx * self.SEGMENT_RT + self.SEGMENT_RT / 2.0
-                )
-                t_seg = self.SEGMENT_RT
-            else:
-                delta_center = -5.0 * self.kappa
-                t_seg = self.HOLD_RT
-
+        for seg_idx, (delta_center, t_seg) in enumerate(schedule):
             # (B, t_seg): the per-trajectory solver indexes delta_omega[step].
             delta_arr = jnp.full((B, t_seg), delta_center, dtype=jnp.float64)
             # fold_in takes a single key; map it over the per-trajectory batch.
@@ -203,10 +228,9 @@ class DatasetGenerator:
             seg_field_keys = _fold_batch(key_arr, seg_idx)
             seg_noise_keys = _fold_batch(noise_keys, seg_idx)
             seg_qnoise_keys = _fold_batch(qnoise_keys, seg_idx)
-            noise_seqs = jax.vmap(
-                lambda k, scale: noise_model.sample(k, t_seg) * scale,
-                in_axes=(0, 0),
-            )(seg_noise_keys, noise_scale_arr)
+            noise_seqs = self._segment_noise(
+                noise_model, seg_noise_keys, noise_scale_arr, t_seg
+            )
 
             out = _PER_TRAJ(
                 delta_arr,

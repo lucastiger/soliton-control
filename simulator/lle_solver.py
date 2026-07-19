@@ -698,6 +698,48 @@ def _physical_state_labeler(
     return make_state_labeler(params)
 
 
+def _legacy_rng_chain(rng_key: jax.Array, n_traj: int):
+    """The EXACT legacy per-solve key derivation — arity pinned, do not widen.
+
+    key_field / key_noise come from the historical ``jax.random.split(rng_key,
+    3)``; changing that split's arity (e.g. to 4) changes EVERY subkey and
+    silently breaks the flag-off bit-identity of the solver, which is why the
+    quantum-noise subkey is instead split from the leftover chain ``key``.
+    The quantum-noise channel takes ONLY ``key_qnoise``; the detuning-noise /
+    cold-start-seed keys are independent of the quantum flag by construction.
+    Pinned by tests/test_dataset_generator.py::test_key_isolation.
+
+    Returns (key_arr, noise_keys, key_qnoise): per-trajectory cold-start-seed
+    keys, per-trajectory detuning-noise keys, and the quantum-noise chain key.
+    """
+    key, key_field, key_noise = jax.random.split(rng_key, 3)
+    key, key_qnoise = jax.random.split(key, 2)
+    key_arr = jax.random.split(key_field, int(n_traj))     # for e0 seed noise
+    noise_keys = jax.random.split(key_noise, int(n_traj))  # for AR(1) noise
+    return key_arr, noise_keys, key_qnoise
+
+
+def _detuning_noise_sequences(
+    noise_keys: jax.Array, t_slow: int, config_path: str | Path | None = None
+) -> jnp.ndarray:
+    """Per-trajectory TRN/PyroEO/TCCR detuning-noise sequences, (n_traj, t_slow).
+
+    Exactly the sequences ``solve_lle_ssfm_jax`` hands to the scan. A module
+    function (taking only the legacy ``noise_keys``) so tests can pin that the
+    detuning-noise channel is bit-independent of the quantum-noise channel.
+    Noise models emit float32; upcast to float64 so the delta_omega_eff axis
+    (and thus the linear-operator phase) is fully double precision in the loop.
+    """
+    from simulator.noise_models import TotalNoise, _load_config as _nm_load_cfg
+
+    _noise_model = TotalNoise(_nm_load_cfg(config_path))
+
+    def _gen_noise(key):
+        return _noise_model.sample(key, int(t_slow))
+
+    return jax.vmap(_gen_noise)(noise_keys).astype(jnp.float64)
+
+
 # Argument order mirrors _single_trajectory_solver. Vmapped (axis 0):
 # delta_omega(0), rng_key(11), noise_sequence(14), e0_override(15),
 # delta_t0_override(16), qnoise_key(25). Static: t_slow(2), beta(3), n_tau(7),
@@ -1022,14 +1064,10 @@ def solve_lle_ssfm_jax(
                 f"use d2_to_beta2_lle(d2_rad_per_s2, fsr_hz)."
             )
     
-    # Split into three independent groups from a single chain
-    key, key_field, key_noise = jax.random.split(rng_key, 3)
-    key_arr    = jax.random.split(key_field, delta_arr.shape[0])   # for e0
-    noise_keys = jax.random.split(key_noise, delta_arr.shape[0])   # for AR(1)
-    # One more subkey for the quantum vacuum noise, split from the LEFTOVER
-    # chain `key` — NOT by widening the 3-way split above, which would change
-    # key_field/key_noise and break the bit-identity of the flag-off RNG stream.
-    key, key_qnoise = jax.random.split(key, 2)
+    # Legacy-pinned key derivation (key_field/key_noise from the historical
+    # 3-way split; key_qnoise from the leftover chain). See _legacy_rng_chain —
+    # its arity is pinned by tests/test_dataset_generator.py.
+    key_arr, noise_keys, key_qnoise = _legacy_rng_chain(rng_key, delta_arr.shape[0])
 
     # --- Quantum vacuum noise (arXiv:2604.05897 Sec. V.B.2, Eq. 126) ---------
     # Resolve the flags: explicit kwarg wins, else the flat config keys. The
@@ -1098,20 +1136,11 @@ def solve_lle_ssfm_jax(
     key_qnoise_inj, key_qnoise_seed = jax.random.split(key_qnoise, 2)
     qnoise_keys = jax.random.split(key_qnoise_inj, delta_arr.shape[0])
 
-    # --- Generate per-trajectory noise sequences ---
-    from simulator.noise_models import TotalNoise, _load_config as _nm_load_cfg
-    _nm_cfg = _nm_load_cfg(config_path)
-    _noise_model = TotalNoise(_nm_cfg)
+    # --- Generate per-trajectory noise sequences (see _detuning_noise_sequences) ---
+    noise_sequences = _detuning_noise_sequences(
+        noise_keys, int(t_slow), config_path
+    )  # (n_traj, t_slow)
 
-    # shape: (n_traj, t_slow)  — one AR(1) sequence per trajectory
-    def _gen_noise(key):
-        return _noise_model.sample(key, int(t_slow))
-
-    # Noise models emit float32; upcast the detuning-noise sequences to float64
-    # so the delta_omega_eff axis (and thus the linear-operator phase) is fully
-    # double precision inside the SSFM loop.
-    noise_sequences = jax.vmap(_gen_noise)(noise_keys).astype(jnp.float64)  # (n_traj, t_slow)
-    
     n_traj = delta_arr.shape[0]
 
     # Warm-start handling. Cold start (override None) uses an all-zero e0, which the
