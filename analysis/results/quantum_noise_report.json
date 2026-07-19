@@ -1,4 +1,10 @@
 {
+  "provenance": {
+    "script": "analysis/quantum_noise_report.py",
+    "git_commit": "98e8def5166f950b4dcd05160d062c538fdb6eea",
+    "base_config_sha256": "104e3c3b5934c331ed7e67680806166851552c763b9b9da599d7383ec97aa429",
+    "seed": 0
+  },
   "seed": 0,
   "quick": false,
   "hbar_omega0_j": 1.2815779715689e-19,
