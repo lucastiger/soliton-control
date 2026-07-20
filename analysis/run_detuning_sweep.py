@@ -375,6 +375,18 @@ def write_noise_off_config(base_config_path=CONFIG_PATH, out_path=None) -> Path:
     :func:`simulator.lle_solver._thermal_params`, so the deterministic thermo-
     optic dynamics (Gamma_th, tau_th, the thermal shift) are unchanged.
 
+    T_k = 0 kills EVERY dT-derived channel for EVERY ``trn_psd_model``: the
+    single-pole amplitude is proportional to sqrt(var_delta_t), the
+    Kondratiev-Gorodetsky PSD scales as T_k^2 (its renormalization target,
+    Eq. 129, vanishes), the ``csv`` model is explicitly forced to a zero PSD
+    at T_k = 0 (a tabulated file cannot know the temperature, so the switch
+    is applied in ``noise_models._build_delta_t_psd``), and the FSR
+    (repetition-rate) noise dD1(t) = (D1/omega0)*C_pull*dT(t) inherits the
+    zero dT sequence -- so ``fsr_noise_enabled`` needs no separate override
+    here (pinned by tests/test_noise_metrology.py::
+    test_fsr_tk_zero_channel_identically_zero and
+    test_tk_zero_collapses_all_delta_t_channels).
+
     Additionally forces ``quantum_noise_enabled = 0``: the quantum-vacuum
     Langevin drive (arXiv:2604.05897 Eq. 126) has correlator set by the loss
     rate kappa alone -- it is NOT proportional to T_k^2 like the thermal
