@@ -417,6 +417,7 @@ def _single_trajectory_solver(
     qnoise_scale: float,          # per-quadrature injection std for ONE injection event; 0.0 = disabled
     qnoise_enabled: bool,         # static; False traces ZERO extra ops (bit-identical legacy path)
     qnoise_roundtrip: bool,       # static; True = inject once per ROUND TRIP (at fine-step m=0, scale pre-scaled to dt=t_r)
+    pump_scale_sequence: jnp.ndarray | None,  # (t_slow,) per-round-trip pump-power scale 1+eps (RIN); None = fixed pump (legacy trace)
 ) -> dict[str, jnp.ndarray]:
     """Solve one detuning trajectory with SSFM + thermal Euler update.
 
@@ -458,6 +459,19 @@ def _single_trajectory_solver(
     by construction; validation statistics must restrict to |mu| <= n_tau/3).
     When False, this function traces exactly the legacy computation — no RNG
     calls and no arithmetic are added to the scan body.
+
+    ``pump_scale_sequence`` (pump RIN, arXiv:2604.05897 Sec. V.B.5) is a
+    per-round-trip pump-POWER scale s_t = 1 + eps(t) >= 0, shape (t_slow,):
+    the pump kick becomes sqrt(max(kappa_c*pin*s_t, 0))*dt_sub, HELD CONSTANT
+    across the M fine steps and the n_substeps sub-steps of the round trip
+    (physical RIN bandwidth << FSR = 1/t_r, so per-round-trip resolution is
+    exact for all physical RIN), and the energy-balance through-port power
+    uses the instantaneous pin*s_t. ``None`` (the default) selects the legacy
+    precomputed constant kick via a Python branch — the disabled path traces
+    zero extra ops (no gather, no per-step sqrt), exactly like the
+    d_int_grid=None pattern. The absorbed-power/thermal pathway then
+    transduces RIN -> P_abs -> DeltaT -> detuning automatically (the paper's
+    thermal transfer mechanism) with no extra code.
     """
     omega = _build_omega_grid(n_tau, t_r)
     # Per-mode measured dispersion when supplied, else the Taylor beta polynomial.
@@ -505,7 +519,7 @@ def _single_trajectory_solver(
         over = jnp.maximum(phase_sub / validity_phase_threshold - 1.0, 0.0)
         validity = jnp.exp(-_VALIDITY_STRENGTH * over ** _VALIDITY_POWER)
 
-    def _fine_step(e_cur, delta_t_cur, dw_step, freq_noise, step_idx, m):
+    def _fine_step(e_cur, delta_t_cur, dw_step, freq_noise, kick, step_idx, m):
         """Advance the field and thermal state by ONE fine step dt_fine = t_r/M.
 
         The thermal detuning shift is recomputed from the CURRENT ΔT (so the
@@ -514,7 +528,9 @@ def _single_trajectory_solver(
         Langevin increment is added (only when qnoise_enabled; keyed on the
         global fine-step index step_idx*fine_cadence_M + m, with m the static
         fine-step index within the round trip), the masks are applied, then the
-        single-pole thermal ODE is Euler-stepped by dt_fine.
+        single-pole thermal ODE is Euler-stepped by dt_fine. ``kick`` is the
+        per-sub-step pump drive for THIS round trip (the constant ``pump_kick``
+        without RIN; the RIN-scaled kick otherwise).
         Returns (e_next, delta_t_next, u_int, delta_omega_eff).
         """
         # Deterministic thermal detuning shift. δω = ω_res − ω_pump, so heating
@@ -531,7 +547,7 @@ def _single_trajectory_solver(
         # n_substeps Strang sub-steps over dt_sub: pump kick, L·N·L (unrolled).
         e_sub = e_cur
         for _ in range(n_substeps):
-            e_pumped = (e_sub + pump_kick).astype(jnp.complex128)
+            e_pumped = (e_sub + kick).astype(jnp.complex128)
             e_w = jnp.fft.fft(e_pumped)
             e_half = jnp.fft.ifft(e_w * h_half).astype(jnp.complex128)
             nl_phase = jnp.exp(1j * gamma * jnp.abs(e_half) ** 2 * dt_sub).astype(jnp.complex128)
@@ -586,7 +602,26 @@ def _single_trajectory_solver(
         dw_step = delta_omega[step_idx]
         # Stochastic TCCR/TRN/PyroEO detuning noise for this round trip (held
         # across the M fine steps; constant detuning has no t_r-periodicity).
+        # The pump-laser FREQUENCY-noise term -2*pi*dnu_p(t) is pre-summed into
+        # noise_sequence on the host (frame co-rotates with the pump), so it
+        # needs no extra handling here.
         freq_noise = noise_sequence[step_idx]
+
+        # Pump RIN: per-round-trip pump-power scale s_t = 1 + eps(t) >= 0.
+        # P_in(t) = pin*s_t and the kick becomes sqrt(max(kappa_c*pin*s_t,0))*
+        # dt_sub, held constant over the round trip's fine/sub-steps (RIN
+        # bandwidth << FSR, so per-round-trip resolution is exact for all
+        # physical RIN). Python branch: pump_scale_sequence=None traces the
+        # legacy constant-kick path bit-identically (zero extra ops).
+        if pump_scale_sequence is not None:
+            scale_t = pump_scale_sequence[step_idx]
+            pin_t = pin * scale_t
+            kick_t = (
+                jnp.sqrt(jnp.maximum(kappa_c * pin_t, 0.0)) * dt_sub
+            ).astype(jnp.complex128)
+        else:
+            pin_t = pin
+            kick_t = pump_kick
 
         # fine_cadence_M fine steps of dt_fine per round trip (static -> unrolled).
         e_next = e_t
@@ -595,12 +630,14 @@ def _single_trajectory_solver(
         delta_omega_eff = dw_step
         for m in range(fine_cadence_M):
             e_next, delta_t_next, u_int, delta_omega_eff = _fine_step(
-                e_next, delta_t_next, dw_step, freq_noise, step_idx, m
+                e_next, delta_t_next, dw_step, freq_noise, kick_t, step_idx, m
             )
 
         # Through-port power via energy balance, on the end-of-round-trip field.
-        # Clip to [0, pin] (the balance underestimates P_trans during filling).
-        p_trans = jnp.clip(pin - kappa_i * u_int / t_r, 0.0, pin)            #W
+        # Both terms use the INSTANTANEOUS launched power pin_t = pin*s_t (with
+        # RIN the input and the clip ceiling modulate together); clip to
+        # [0, pin_t] (the balance underestimates P_trans during filling).
+        p_trans = jnp.clip(pin_t - kappa_i * u_int / t_r, 0.0, pin_t)        #W
         do_snapshot = (step_idx % snapshot_interval) == 0
         next_snap_count = snap_count + do_snapshot.astype(jnp.int32)
         write_idx = jnp.minimum(snap_count, n_snapshots - 1)
@@ -763,14 +800,19 @@ def _detuning_noise_sequences(
 
 # Argument order mirrors _single_trajectory_solver. Vmapped (axis 0):
 # delta_omega(0), rng_key(11), noise_sequence(14), e0_override(15),
-# delta_t0_override(16), qnoise_key(25). Static: t_slow(2), beta(3), n_tau(7),
-# snapshot_interval(10), state_labeler(13), n_substeps(18),
-# dealias_two_thirds(19), edge_absorber(20), dispersion_validity_mask(22),
-# fine_cadence_M(24), qnoise_enabled(27), qnoise_roundtrip(28).
+# delta_t0_override(16), qnoise_key(25), pump_scale_sequence(29). Static:
+# t_slow(2), beta(3), n_tau(7), snapshot_interval(10), state_labeler(13),
+# n_substeps(18), dealias_two_thirds(19), edge_absorber(20),
+# dispersion_validity_mask(22), fine_cadence_M(24), qnoise_enabled(27),
+# qnoise_roundtrip(28). pump_scale_sequence(29) is a traced per-trajectory
+# array OR None (RIN disabled): the Python `is not None` branch in the solver
+# resolves it at trace time WITHOUT static_argnums, exactly like d_int_grid(17)
+# — a None value under in_axes=0 is treated as broadcast (not mapped), so the
+# disabled path traces the legacy constant-kick computation with zero extra ops.
 _PER_TRAJ = jax.jit(
     jax.vmap(
         _single_trajectory_solver,
-        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0, 0, 0, None, None, None, None, None, None, None, None, 0, None, None, None),
+        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0, 0, 0, None, None, None, None, None, None, None, None, 0, None, None, None, 0),
     ),
     static_argnums=(2, 3, 7, 10, 13, 18, 19, 20, 22, 24, 27, 28),
 )
@@ -801,6 +843,9 @@ def solve_lle_ssfm_jax(
     quantum_noise_enabled: bool | None = None,
     quantum_noise_seed_vacuum_init: bool | None = None,
     quantum_noise_injection_cadence: int | None = None,
+    pump_noise_enabled: bool | None = None,
+    pump_freq_noise_override: np.ndarray | jnp.ndarray | None = None,
+    pump_rin_epsilon_override: np.ndarray | jnp.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """Batch-capable SSFM solver for the generalized LLE using JAX.
 
@@ -836,6 +881,41 @@ def solve_lle_ssfm_jax(
       the flag OFF the solver is bit-identical to the legacy solver: no RNG
       calls or arithmetic are added to the scan body and the RNG key chain of
       the legacy paths is unchanged.
+
+    Pump-laser noise: with ``pump_noise_enabled`` (config key or kwarg; OFF by
+      default) the solver adds pump-laser frequency noise and relative
+      intensity noise (RIN) per Herr, Tikan & Kippenberg, arXiv:2604.05897,
+      Secs. V.B.4-V.B.5. Both channels are synthesized HOST-SIDE in float64
+      once per trajectory (see :class:`simulator.noise_models.PumpNoise`) and
+      threaded into the SAME machinery the intracavity dynamics already
+      provide -- the solver IS the transfer function, so cavity filtering and
+      quadrature rotation happen automatically and no transfer function is
+      hand-implemented:
+        * Frequency noise. The frame co-rotates with the pump, so the
+          instantaneous laser-frequency deviation delta_nu_p(t) is exactly a
+          detuning noise. Because delta_omega = omega_res - omega_p, a positive
+          laser-frequency excursion LOWERS delta_omega: the contribution
+          -2*pi*delta_nu_p(t) is SUMMED into ``noise_sequences`` on the host
+          (before the vmap), so NO solver-scan change is needed and the cavity
+          low-pass / quadrature rotation emerge from the equations of motion.
+          Returned as ``pump_freq_noise_history`` (the -2*pi*delta_nu_p
+          contribution to delta_omega, rad/s) for diagnostics.
+        * RIN. P_in(t) = Pbar_in*(1 + eps(t)); the per-round-trip pump-power
+          scale s_t = 1 + eps(t) is threaded as ``pump_scale_sequence`` so the
+          pump kick becomes sqrt(max(kappa_c*pin*s_t, 0))*dt_sub, held constant
+          across the fine/sub-steps (RIN bandwidth << FSR). The
+          absorbed-power/thermal pathway then transduces RIN -> P_abs -> DeltaT
+          -> detuning automatically (the paper's thermal transfer mechanism)
+          with no extra code. Returned as ``pump_rin_epsilon_history`` (eps).
+      New per-trajectory subkeys are APPENDED to the existing key chain
+      (key_field/key_noise/key_qnoise unchanged), so enabling pump noise does
+      not perturb any legacy RNG stream. With the flag OFF (and no override)
+      the frequency channel adds a zero sequence to ``noise_sequences`` (a
+      no-op) and ``pump_scale_sequence`` is None, so the scan traces the
+      legacy constant-kick path with zero extra ops. Deterministic overrides
+      ``pump_freq_noise_override`` (delta_nu_p in Hz) and
+      ``pump_rin_epsilon_override`` (eps) bypass the stochastic synthesis for
+      the linear-response / sign-convention tests.
 
     Args:
         pin: Pump power in watts.
@@ -929,9 +1009,28 @@ def solve_lle_ssfm_jax(
             fine_cadence_M = 1 the two cadences are bit-identical. ``None``
             (default) = read the ``quantum_noise_injection_cadence`` config key
             (default 0).
+        pump_noise_enabled: Master switch for pump-laser frequency noise and
+            RIN (see the "Pump-laser noise" section above). ``None`` (default)
+            = read the ``pump_noise_enabled`` config key (itself defaulting to
+            off); an explicit bool overrides the config. OFF (and no override)
+            is bit-identical to the legacy solver. Providing either override
+            below forces that channel on regardless of this flag.
+        pump_freq_noise_override: Optional DETERMINISTIC laser-frequency
+            deviation delta_nu_p(t) in Hz, shape (t_slow,) or (n_traj, t_slow),
+            used INSTEAD of the stochastic frequency-noise synthesis. The
+            solver sums -2*pi*delta_nu_p into ``noise_sequences`` and returns it
+            as ``pump_freq_noise_history``. Used by the sign-convention and
+            linear-response tests.
+        pump_rin_epsilon_override: Optional DETERMINISTIC relative-intensity
+            deviation eps(t), shape (t_slow,) or (n_traj, t_slow), used INSTEAD
+            of the stochastic RIN synthesis. The pump-power scale is
+            1 + eps(t); returned as ``pump_rin_epsilon_history``.
 
     Returns:
-        Dictionary containing requested histories.
+        Dictionary containing requested histories. When pump noise is active
+        it additionally contains ``pump_freq_noise_history`` (the
+        -2*pi*delta_nu_p contribution to delta_omega, rad/s) and
+        ``pump_rin_epsilon_history`` (eps), both shape (n_traj, t_slow).
     """
 
     if int(n_substeps) < 1:
@@ -1213,6 +1312,90 @@ def solve_lle_ssfm_jax(
 
     n_traj = delta_arr.shape[0]
 
+    # --- Pump-laser noise: frequency noise + RIN (arXiv:2604.05897 V.B.4-V.B.5) --
+    # Host-side float64 synthesis (see simulator.noise_models.PumpNoise). The
+    # frequency-noise contribution -2*pi*delta_nu_p is SUMMED into
+    # noise_sequences (no solver-scan change); RIN becomes the per-trajectory
+    # pump-power scale s = 1 + eps threaded as pump_scale_sequence (None when
+    # the channel is inert, so the scan traces the legacy constant-kick path).
+    #
+    # Pump PRNG subkeys are APPENDED to the legacy chain WITHOUT disturbing its
+    # order: reconstruct the exact split ladder of _legacy_rng_chain and split
+    # ONE more time off the leftover key (key_field/key_noise/key_qnoise are
+    # extracted before this point and are therefore unchanged). Built
+    # unconditionally so the derivation is stable; unused when the channel is off.
+    from simulator.noise_models import PumpNoise as _PumpNoise
+
+    _pk, _kf, _kn = jax.random.split(rng_key, 3)
+    _pk, _kq = jax.random.split(_pk, 2)
+    _pk, key_pump = jax.random.split(_pk, 2)              # appended pump key
+    key_pump_freq, key_pump_rin = jax.random.split(key_pump, 2)
+
+    if pump_noise_enabled is None:
+        pump_noise_enabled = physical.get("pump_noise_enabled", 0)
+    _pump = _PumpNoise(physical, enabled=pump_noise_enabled)
+    pump_on = _pump.enabled
+
+    def _broadcast_pump_seq(arr, name):
+        a = np.asarray(arr, dtype=np.float64)
+        if a.ndim == 1:
+            if a.shape[0] != int(t_slow):
+                raise ValueError(
+                    f"{name} 1-D length must be t_slow={t_slow}, got {a.shape[0]}."
+                )
+            return np.broadcast_to(a, (n_traj, int(t_slow))).copy()
+        if a.ndim == 2:
+            if a.shape != (n_traj, int(t_slow)):
+                raise ValueError(
+                    f"{name} 2-D shape must be (n_traj={n_traj}, t_slow={t_slow}), "
+                    f"got {tuple(a.shape)}."
+                )
+            return a
+        raise ValueError(f"{name} must be 1/2-D, got ndim={a.ndim}.")
+
+    # Frequency-noise component of delta_omega: -2*pi*delta_nu_p (rad/s).
+    if pump_freq_noise_override is not None:
+        # Override is delta_nu_p in Hz; contribution to delta_omega is -2*pi*dnu.
+        _dnu = _broadcast_pump_seq(pump_freq_noise_override, "pump_freq_noise_override")
+        pump_freq_noise_history = (-2.0 * math.pi * _dnu).astype(np.float64)
+    elif pump_on and (_pump._h0 > 0.0 or _pump._hm1 > 0.0):
+        _freq_keys = jax.random.split(key_pump_freq, n_traj)
+        pump_freq_noise_history = np.stack(
+            [-np.asarray(_pump.sample_freq(k, int(t_slow))) for k in _freq_keys]
+        ).astype(np.float64)                              # (n_traj, t_slow), rad/s
+    else:
+        pump_freq_noise_history = np.zeros((n_traj, int(t_slow)), dtype=np.float64)
+
+    # Sum the pump frequency-noise contribution into the detuning-noise axis.
+    if np.any(pump_freq_noise_history):
+        noise_sequences = (
+            noise_sequences + jnp.asarray(pump_freq_noise_history, dtype=jnp.float64)
+        )
+
+    # RIN component: per-round-trip pump-power scale s = 1 + eps (>= 0).
+    if pump_rin_epsilon_override is not None:
+        pump_rin_epsilon_history = _broadcast_pump_seq(
+            pump_rin_epsilon_override, "pump_rin_epsilon_override"
+        ).astype(np.float64)
+    elif pump_on:
+        _rin_keys = jax.random.split(key_pump_rin, n_traj)
+        pump_rin_epsilon_history = np.stack(
+            [np.asarray(_pump.sample_rin(k, int(t_slow))) for k in _rin_keys]
+        ).astype(np.float64)                              # (n_traj, t_slow)
+    else:
+        pump_rin_epsilon_history = np.zeros((n_traj, int(t_slow)), dtype=np.float64)
+
+    # Only build pump_scale_sequence when RIN is actually non-trivial; otherwise
+    # pass None so the scan traces the legacy constant-kick path (zero extra ops).
+    if pump_rin_epsilon_override is not None or (
+        pump_on and _pump._rin_floor_lin > 0.0
+    ):
+        pump_scale_sequence = jnp.asarray(
+            np.maximum(1.0 + pump_rin_epsilon_history, 0.0), dtype=jnp.float64
+        )
+    else:
+        pump_scale_sequence = None
+
     # Warm-start handling. Cold start (override None) uses an all-zero e0, which the
     # low-level solver detects (via jnp.all(e0 == 0)) to build the analytic CW state
     # plus seeding noise. A non-zero e0_override is passed through verbatim as the
@@ -1341,9 +1524,17 @@ def solve_lle_ssfm_jax(
         qnoise_scale,
         qn_enabled,
         qn_roundtrip,
+        pump_scale_sequence,
     )
 
-    return {k: np.asarray(v) for k, v in out.items()}
+    result = {k: np.asarray(v) for k, v in out.items()}
+    # Pump-noise diagnostics (host-side; only when a channel is active, so the
+    # legacy-flags-off result dict is unchanged key-for-key).
+    if np.any(pump_freq_noise_history):
+        result["pump_freq_noise_history"] = pump_freq_noise_history
+    if pump_scale_sequence is not None:
+        result["pump_rin_epsilon_history"] = pump_rin_epsilon_history
+    return result
 
 
 def validate_solver(

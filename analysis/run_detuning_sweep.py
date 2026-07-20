@@ -380,12 +380,18 @@ def write_noise_off_config(base_config_path=CONFIG_PATH, out_path=None) -> Path:
     rate kappa alone -- it is NOT proportional to T_k^2 like the thermal
     channels -- so zeroing T_k does not silence it and it needs its own switch
     to keep the sidecar-configured run fully deterministic.
+
+    Also forces ``pump_noise_enabled = 0``: the pump-laser frequency noise and
+    RIN (arXiv:2604.05897 V.B.4-V.B.5) are set by the laser's own PSDs, not by
+    T_k, so they too need their own switch to give a fully deterministic
+    sidecar run.
     """
     with open(base_config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     pp = cfg.setdefault("physical_parameters", {})
     pp["T_k"] = 0.0
     pp["quantum_noise_enabled"] = 0
+    pp["pump_noise_enabled"] = 0
     if out_path is None:
         fd, name = tempfile.mkstemp(prefix="sin_params_noiseoff_", suffix=".yaml")
         out_path = Path(name)
