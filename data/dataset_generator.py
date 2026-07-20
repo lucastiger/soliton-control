@@ -112,6 +112,21 @@ class DatasetGenerator:
 
         self.p_th = (self.kappa / 2.0) ** 2 / (self.gamma * self.t_r * self.kappa_c)
 
+        # Segment-noise cadence (config key legacy_segment_noise, default 1).
+        # 1 = legacy: regenerate the classical noise per segment from x0 = 0
+        #     with fold_in(noise_keys, seg_idx) — BIT-IDENTICAL to the
+        #     historical generator, including its documented decorrelation
+        #     transient at every segment boundary (pinned by
+        #     tests/test_dataset_generator.py::test_segment_noise_restarts_at_zero_tripwire).
+        # 0 = continuity fix: generate the FULL-trajectory noise (detuning
+        #     noise AND pump channels) once per trajectory up front — host,
+        #     float64, keyed on the UNFOLDED per-trajectory keys, stationary
+        #     from sample 0 via PSD synthesis — and slice per segment. Stays
+        #     legacy by default until the staircase suite is re-baselined.
+        self.legacy_segment_noise = bool(
+            int(self.config.get("legacy_segment_noise", 1))
+        )
+
         # Optional pump-laser-noise sweep axes (arXiv:2604.05897 V.B.4-V.B.5).
         # Absent -> the disabled defaults (h0 = 0 Hz²/Hz, RIN floor = -300 dBc/Hz),
         # so datasets without these keys are bit-identical to the legacy path.
@@ -190,6 +205,25 @@ class DatasetGenerator:
             lambda k, scale: noise_model.sample(k, int(t_seg)) * scale,
             in_axes=(0, 0),
         )(seg_noise_keys, noise_scale_arr)
+
+    def _full_trajectory_noise(
+        self, noise_model, noise_keys, noise_scale_arr, t_total
+    ) -> np.ndarray:
+        """(B, t_total) float64 detuning noise for the CONTINUITY mode.
+
+        One host-side PSD-synthesized sequence per trajectory (see
+        ``TotalNoise.sample_full_with_delta_t``: stationary from sample 0 for
+        every ``trn_psd_model`` including ``single_pole``), keyed on the
+        UNFOLDED per-trajectory ``noise_keys`` and generated for the FULL
+        schedule length up front, so per-segment slices are windows of one
+        continuous realization — no boundary decorrelation transient.
+        """
+        rows = [
+            noise_model.sample_full_with_delta_t(noise_keys[i], int(t_total))[0]
+            * float(noise_scale_arr[i])
+            for i in range(len(noise_scale_arr))
+        ]
+        return np.stack(rows).astype(np.float64)
 
     def _segment_pump(self, seg_pump_keys, pump_h0_arr, rin_floor_arr, t_seg):
         """Per-segment pump-laser noise sequences (freq contribution + RIN scale).
@@ -292,6 +326,21 @@ class DatasetGenerator:
 
         noise_model = TotalNoise(nm_load_cfg(self.config_path))
 
+        # CONTINUITY mode (legacy_segment_noise = 0): generate the classical
+        # noise channels for the WHOLE schedule once per trajectory up front
+        # (host, float64, keyed on the unfolded per-trajectory keys) and slice
+        # per segment below. Legacy mode keeps the historical per-segment
+        # fold_in regeneration bit-for-bit.
+        if not self.legacy_segment_noise:
+            t_total_sched = int(sum(t for _, t in schedule))
+            full_noise = self._full_trajectory_noise(
+                noise_model, noise_keys, noise_scale_arr, t_total_sched
+            )
+            full_pump_freq, full_pump_scale = self._segment_pump(
+                np.asarray(pump_keys), pump_h0_arr, rin_floor_arr, t_total_sched
+            )
+            seg_offset = 0
+
         outputs = {
             "P_trans": [],
             "U_int": [],
@@ -310,21 +359,36 @@ class DatasetGenerator:
             # fold_in takes a single key; map it over the per-trajectory batch.
             _fold_batch = jax.vmap(jax.random.fold_in, in_axes=(0, None))
             seg_field_keys = _fold_batch(key_arr, seg_idx)
-            seg_noise_keys = _fold_batch(noise_keys, seg_idx)
             seg_qnoise_keys = _fold_batch(qnoise_keys, seg_idx)
-            seg_pump_keys = _fold_batch(pump_keys, seg_idx)
-            noise_seqs = self._segment_noise(
-                noise_model, seg_noise_keys, noise_scale_arr, t_seg
-            )
+            if self.legacy_segment_noise:
+                # LEGACY cadence: regenerate per segment from the folded keys
+                # (bit-identical to the historical generator; every boundary
+                # restarts the AR(1) at zero — the documented flaw).
+                seg_noise_keys = _fold_batch(noise_keys, seg_idx)
+                seg_pump_keys = _fold_batch(pump_keys, seg_idx)
+                noise_seqs = self._segment_noise(
+                    noise_model, seg_noise_keys, noise_scale_arr, t_seg
+                )
 
-            # Pump-laser noise: sum -2*pi*delta_nu_p into the detuning-noise axis
-            # and build the RIN pump-power scale (None when inactive -> legacy
-            # constant-kick path). Both default-off, so legacy datasets are
-            # unaffected. noise_seqs is float32 here (generator convention); the
-            # solver upcasts to float64 internally.
-            pump_freq_contrib, pump_scale_seq = self._segment_pump(
-                np.asarray(seg_pump_keys), pump_h0_arr, rin_floor_arr, t_seg
-            )
+                # Pump-laser noise: sum -2*pi*delta_nu_p into the detuning-noise
+                # axis and build the RIN pump-power scale (None when inactive ->
+                # legacy constant-kick path). Both default-off, so legacy
+                # datasets are unaffected. noise_seqs is float32 here (generator
+                # convention); the solver upcasts to float64 internally.
+                pump_freq_contrib, pump_scale_seq = self._segment_pump(
+                    np.asarray(seg_pump_keys), pump_h0_arr, rin_floor_arr, t_seg
+                )
+            else:
+                # CONTINUITY mode: slice this segment's window out of the
+                # precomputed full-trajectory sequences (one continuous
+                # realization per trajectory; no boundary transient).
+                sl = slice(seg_offset, seg_offset + int(t_seg))
+                seg_offset += int(t_seg)
+                noise_seqs = jnp.asarray(full_noise[:, sl], dtype=jnp.float64)
+                pump_freq_contrib = full_pump_freq[:, sl]
+                pump_scale_seq = (
+                    None if full_pump_scale is None else full_pump_scale[:, sl]
+                )
             if np.any(pump_freq_contrib):
                 noise_seqs = noise_seqs + jnp.asarray(
                     pump_freq_contrib, dtype=noise_seqs.dtype
@@ -366,6 +430,8 @@ class DatasetGenerator:
                 self.enable_quantum_noise,
                 False,          # qnoise_roundtrip: fine cadence (M=1 here, identical)
                 pump_scale_arg,  # RIN pump-power scale (None = legacy constant kick)
+                None,           # fsr_noise_sequence (FSR noise: solver-level opt-in only)
+                (),             # mode_probe_indices (no probes in dataset generation)
             )
             # Carry field and thermal state forward across segment boundary
             e_carry = jnp.array(out["e_final"], dtype=jnp.complex64)

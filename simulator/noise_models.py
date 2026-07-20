@@ -13,8 +13,115 @@ import numpy as np
 import yaml
 from scipy.signal import welch
 
+from simulator.colored_noise import (
+    csv_psd,
+    kondratiev_gorodetsky_psd,
+    np_generator_from_key,
+    single_pole_psd,
+    synthesize_from_psd,
+)
+
 
 _DEF_CFG_PATH = Path(__file__).resolve().parents[1] / "config" / "sin_params.yaml"
+
+# Valid values of the ``trn_psd_model`` config key. ``single_pole`` is the
+# historical AR(1)/Lorentzian model and stays BIT-IDENTICAL to the
+# pre-colored-noise code; the other two produce host-side float64 sequences
+# via simulator.colored_noise (FFT synthesis from the target PSD).
+_TRN_PSD_MODELS = ("single_pole", "kondratiev_gorodetsky", "csv")
+_TRN_CSV_UNITS = ("S_delta_T", "S_delta_omega")
+
+
+def _resolve_trn_psd_model(cfg) -> str:
+    """Validate and return the ``trn_psd_model`` config value."""
+    model = cfg.get("trn_psd_model", "single_pole")
+    if model is None:
+        model = "single_pole"
+    model = str(model)
+    if model not in _TRN_PSD_MODELS:
+        raise ValueError(
+            f"trn_psd_model must be one of {_TRN_PSD_MODELS}, got {model!r}."
+        )
+    return model
+
+
+def _build_delta_t_psd(cfg, model: str, c_pull: float, f_s: float,
+                       var_delta_t: float, tau_th: float):
+    """Return ``(S_dT(f) callable [K^2/Hz], variance_target [K^2])``.
+
+    * ``single_pole``: the Lorentzian spectral twin of the AR(1) generator,
+      total variance = the Eq. 129 thermodynamic value ``var_delta_t``.
+    * ``kondratiev_gorodetsky``: paper Eq. 130 shape renormalized so its
+      integral over [0, f_s/2] equals the Eq. 129 variance (see
+      simulator.colored_noise.kondratiev_gorodetsky_psd). Requires the
+      geometry keys ``trn_R_m``/``trn_da_m``/``trn_db_m`` (validated here).
+    * ``csv``: user-tabulated S_dT(f) or S_domega(f) selected by
+      ``trn_csv_units``; S_domega is mapped to temperature units via
+      S_dT = S_domega / C_pull^2 so the Pyro-EO channel can share the SAME
+      dT sequence. T_k = 0 forces a zero PSD for EVERY model (the
+      repository's deterministic noise-off convention — the CSV tabulation
+      does not itself scale with T_k, so the switch is applied explicitly).
+    """
+    t_k = float(cfg.get("T_k", 300.0))
+    if t_k == 0.0:
+        zero = lambda f: np.zeros_like(np.asarray(f, dtype=np.float64))  # noqa: E731
+        return zero, 0.0
+
+    if model == "single_pole":
+        return single_pole_psd(var_delta_t, tau_th), var_delta_t
+
+    if model == "kondratiev_gorodetsky":
+        missing = [k for k in ("trn_R_m", "trn_da_m", "trn_db_m")
+                   if not (cfg.get(k) or 0.0) > 0.0]
+        if missing:
+            raise ValueError(
+                f"trn_psd_model = 'kondratiev_gorodetsky' requires positive "
+                f"geometry keys trn_R_m/trn_da_m/trn_db_m [m]; "
+                f"missing/invalid: {missing}."
+            )
+        psd, _var = kondratiev_gorodetsky_psd(
+            T_k=t_k,
+            kappa_th=float(cfg.get("kappa_th_w_per_m_k", 4.6)),
+            rho=float(cfg.get("rho_kg_per_m3", 4.64e3)),
+            cp=float(cfg.get("Cp_j_per_kg_k", 700.0)),
+            R=float(cfg["trn_R_m"]),
+            d_a=float(cfg["trn_da_m"]),
+            d_b=float(cfg["trn_db_m"]),
+            mode_volume=float(cfg.get("mode_volume_m3", 1.0e-15)),
+            f_max=f_s / 2.0,
+        )
+        return psd, _var
+
+    # model == "csv"
+    path = cfg.get("trn_psd_csv_path")
+    if not path:
+        raise ValueError(
+            "trn_psd_model = 'csv' requires trn_psd_csv_path (two-column "
+            "CSV: f [Hz], S)."
+        )
+    units = cfg.get("trn_csv_units", "S_delta_T") or "S_delta_T"
+    if units not in _TRN_CSV_UNITS:
+        raise ValueError(
+            f"trn_csv_units must be one of {_TRN_CSV_UNITS}, got {units!r}."
+        )
+    raw = csv_psd(path)
+    if units == "S_delta_omega":
+        if c_pull == 0.0:
+            raise ValueError(
+                "trn_csv_units = 'S_delta_omega' needs a non-zero frequency "
+                "pull C_pull = (omega0/n0)*(dn_dT + n0*alpha_L_per_k) to map "
+                "the PSD into temperature units."
+            )
+        inv_c2 = 1.0 / c_pull**2
+        psd = lambda f, _raw=raw, _s=inv_c2: _s * _raw(f)   # noqa: E731
+    else:
+        psd = raw
+    # Variance target: numeric integral over the synthesis band (measured
+    # PSDs have no closed form).
+    from simulator.colored_noise import integrate_psd
+
+    var = integrate_psd(psd, f_lo=max(1.0, 1e-6 * f_s), f_hi=f_s / 2.0)
+    return psd, var
 
 
 def _load_config(config_path: str | Path | None = None) -> dict[str, Any]:
@@ -40,6 +147,25 @@ def _ar1_samples(key, N, tau_corr, sigma_physical, t_r):
 
 
 class TRNoise:
+    """Thermorefractive (TRN) detuning noise with a pluggable PSD strategy.
+
+    ``trn_psd_model`` (config) selects the temperature-fluctuation spectrum:
+
+    * ``single_pole`` (default): the historical AR(1) generator — the
+      sampled stream is BYTE-COMPATIBLE with the pre-colored-noise code.
+    * ``kondratiev_gorodetsky``: analytic WGM PSD, arXiv:2604.05897 Eq. 130,
+      variance renormalized to Eq. 129 (see simulator.colored_noise).
+    * ``csv``: measured/FEM tabulated PSD (Huang et al. 2019 style).
+
+    In every model the frequency-pull map is ``domega(t) = C_pull*dT(t)``
+    with ``C_pull = (omega0/n0)*(dn_dT + n0*alpha_L_per_k)`` — the optional
+    ``alpha_L_per_k`` (thermal-expansion coefficient, 1/K, default 0) folds
+    the paper's "dimensional fluctuation" companion of TRN into the pull
+    coefficient. Colored models synthesize HOST-SIDE (float64, numpy rng
+    derived deterministically from the JAX key); ``single_pole`` keeps the
+    traced AR(1) path.
+    """
+
     def __init__(self, cfg):
         self.cfg = cfg
         self.t_r = 1.0 / float(cfg.get("fsr_hz", 2.0e11))
@@ -54,16 +180,56 @@ class TRNoise:
         self.T_k = float(cfg.get("T_k", 300.0))
         self.k_b = 1.380649e-23
         self.var_delta_t = self.k_b * self.T_k**2 / (self.rho * self.cp * self.v)
-        self.sigma_trn = (self.omega_0 / self.n0) * self.dn_dT * math.sqrt(self.var_delta_t)
+        # Frequency pull dω/dT [rad/s/K]: thermo-optic + (optional) thermal
+        # expansion. With alpha_L_per_k = 0 this is bit-identical to the
+        # historical (omega0/n0)*dn_dT (x + n0*0.0 == x in IEEE arithmetic).
+        self.alpha_L = float(cfg.get("alpha_L_per_k", 0.0) or 0.0)
+        self.c_pull = (self.omega_0 / self.n0) * (
+            self.dn_dT + self.n0 * self.alpha_L
+        )
+        self.sigma_trn = self.c_pull * math.sqrt(self.var_delta_t)
+        self.psd_model = _resolve_trn_psd_model(cfg)
+        self.f_s = 1.0 / self.t_r
+        # (S_dT(f) [K^2/Hz], variance target [K^2]) for the selected model —
+        # built eagerly so config errors surface at construction time.
+        self.delta_t_psd, self.var_delta_t_target = _build_delta_t_psd(
+            cfg, self.psd_model, self.c_pull, self.f_s,
+            self.var_delta_t, self.tau_th,
+        )
+
+    @property
+    def is_colored(self) -> bool:
+        return self.psd_model != "single_pole"
+
+    def sample_delta_t(self, key, N) -> np.ndarray:
+        """Host-side float64 dT(t) sequence, (N,), from the selected PSD.
+
+        Available for EVERY model (single_pole uses its Lorentzian spectral
+        twin), stationary from sample 0 — this is the sequence the
+        segment-continuity path slices. NOT the byte-compatible AR(1) stream
+        (that one lives in :meth:`sample` for ``single_pole``).
+        """
+        rng = np_generator_from_key(key)
+        return synthesize_from_psd(rng, int(N), self.delta_t_psd, self.f_s)
 
     def sample(self, key, N) -> jnp.ndarray:
-        return _ar1_samples(key, N, self.tau_th, self.sigma_trn, self.t_r)
+        if not self.is_colored:
+            return _ar1_samples(key, N, self.tau_th, self.sigma_trn, self.t_r)
+        return jnp.asarray(self.c_pull * self.sample_delta_t(key, N),
+                           dtype=jnp.float64)
 
     def psd(self, f) -> jnp.ndarray:
-        s_delta_t = (
-            (4.0 * self.k_b * self.T_k**2 * self.tau_th) / (self.rho * self.cp * self.v)
-        ) / (1.0 + (2.0 * jnp.pi * f * self.tau_th) ** 2)
-        return ((self.omega_0 / self.n0) * self.dn_dT) ** 2 * s_delta_t
+        """One-sided S_domega(f) [(rad/s)^2/Hz] of the selected model."""
+        if not self.is_colored:
+            s_delta_t = (
+                (4.0 * self.k_b * self.T_k**2 * self.tau_th) / (self.rho * self.cp * self.v)
+            ) / (1.0 + (2.0 * jnp.pi * f * self.tau_th) ** 2)
+            # c_pull == (omega0/n0)*dn_dT when alpha_L_per_k = 0 (the
+            # historical value); with expansion enabled the pull follows suit.
+            return self.c_pull**2 * s_delta_t
+        return jnp.asarray(
+            self.c_pull**2 * self.delta_t_psd(np.asarray(f, dtype=np.float64))
+        )
 
 
 class PyroEONoise:
@@ -99,20 +265,45 @@ class PyroEONoise:
             + _er_bot * (_t_bot / _t_ln)
         )
         # η_geom = eps_r_z / eps_r_eff  (implicitly encoded by using eps_r_eff)
-        self.sigma_pyroeo = (
+        # Pyro-EO frequency pull dω/dT [rad/s/K]; DRIVEN BY THE SAME dT(t) as
+        # TRN (see TotalNoise), whatever PSD model generates that dT.
+        self.pyro_coeff = (
             self.omega_0 * self.n0**2 * self.r33 * self.p
             / (2.0 * self.eps0 * self.eps_r_eff)
-        ) * math.sqrt(self.var_delta_t)
+        )
+        self.sigma_pyroeo = self.pyro_coeff * math.sqrt(self.var_delta_t)
+        # Same PSD strategy as TRNoise (the pyro-EO channel is temperature-
+        # driven, so it inherits the trn_psd_model selection).
+        self.psd_model = _resolve_trn_psd_model(cfg)
+        self.f_s = 1.0 / self.t_r
+        _alpha = float(cfg.get("alpha_L_per_k", 0.0) or 0.0)
+        _dn_dT = float(cfg.get("dn_dT_per_k", 4.0e-5))
+        _c_pull = (self.omega_0 / self.n0) * (_dn_dT + self.n0 * _alpha)
+        self.delta_t_psd, self.var_delta_t_target = _build_delta_t_psd(
+            cfg, self.psd_model, _c_pull, self.f_s,
+            self.var_delta_t, self.tau_th,
+        )
+
+    @property
+    def is_colored(self) -> bool:
+        return self.psd_model != "single_pole"
 
     def sample(self, key, N) -> jnp.ndarray:
-        return _ar1_samples(key, N, self.tau_th, self.sigma_pyroeo, self.t_r)
+        if not self.is_colored:
+            return _ar1_samples(key, N, self.tau_th, self.sigma_pyroeo, self.t_r)
+        rng = np_generator_from_key(key)
+        delta_t = synthesize_from_psd(rng, int(N), self.delta_t_psd, self.f_s)
+        return jnp.asarray(self.pyro_coeff * delta_t, dtype=jnp.float64)
 
     def psd(self, f) -> jnp.ndarray:
-        s_delta_t = (
-            (4.0 * self.k_b * self.T_k**2 * self.tau_th) / (self.rho * self.cp * self.v)
-        ) / (1.0 + (2.0 * jnp.pi * f * self.tau_th) ** 2)
-        scale = (self.omega_0 * self.n0**2 * self.r33 * self.p / (2.0 * self.eps0 * self.eps_r_eff)) ** 2
-        return scale * s_delta_t
+        if not self.is_colored:
+            s_delta_t = (
+                (4.0 * self.k_b * self.T_k**2 * self.tau_th) / (self.rho * self.cp * self.v)
+            ) / (1.0 + (2.0 * jnp.pi * f * self.tau_th) ** 2)
+            return self.pyro_coeff**2 * s_delta_t
+        return jnp.asarray(
+            self.pyro_coeff**2 * self.delta_t_psd(np.asarray(f, dtype=np.float64))
+        )
 
 
 class TCCRNoise:
@@ -181,6 +372,26 @@ class TCCRNoise:
 
 
 class TotalNoise:
+    """Combined TRN + Pyro-EO + TCCR detuning noise.
+
+    The TRN and Pyro-EO channels share ONE temperature sequence dT(t) — they
+    are the same thermodynamic fluctuation seen through two different pull
+    coefficients — whatever ``trn_psd_model`` generates that sequence. TCCR
+    (carrier noise, zero for SiN) keeps its independent AR(1) stream.
+
+    Sampling surfaces:
+      * :meth:`sample` — the historical (N,) float32 combined sequence;
+        BYTE-COMPATIBLE with the pre-colored-noise code for
+        ``trn_psd_model = single_pole``.
+      * :meth:`sample_with_delta_t` — same combined sequence PLUS the
+        underlying dT(t) (float64), so the FSR-noise channel
+        dD1(t) = (D1/omega0)*C_pull*dT(t) can reuse the identical sequence.
+      * :meth:`sample_full_with_delta_t` — host-side float64 PSD-synthesized
+        path for ALL models (single_pole uses its Lorentzian spectral twin);
+        stationary from sample 0, used by the ``legacy_segment_noise = 0``
+        full-trajectory-then-slice mode of the dataset generator.
+    """
+
     def __init__(self, cfg):
         self.cfg = cfg
         self.trn = TRNoise(cfg)
@@ -192,71 +403,108 @@ class TotalNoise:
         self.dn_dT = self.trn.dn_dT
         self.r33 = self.pyroeo.r33
         self.p = self.pyroeo.p
-        
+
         self.eps0 = self.pyroeo.eps0
         self.eps_r_z = self.pyroeo.eps_r_z
         self.eps_r_eff = self.pyroeo.eps_r_eff
-        
+
         self.tau_th = self.trn.tau_th
         self.var_delta_t = self.trn.var_delta_t
         self.tau_carrier = self.tccr.tau_carrier
+        self.psd_model = self.trn.psd_model
+        self.c_pull = self.trn.c_pull
+        self.pyro_coeff = self.pyroeo.pyro_coeff
+        self.delta_t_psd = self.trn.delta_t_psd
+        self.var_delta_t_target = self.trn.var_delta_t_target
+        self.f_s = 1.0 / self.t_r
 
-    def sample(self, key, N) -> jnp.ndarray:
+    @property
+    def is_colored(self) -> bool:
+        return self.psd_model != "single_pole"
+
+    def sample_with_delta_t(self, key, N):
+        """(combined detuning noise, dT sequence): shapes (N,), (N,).
+
+        The combined sequence is float32 and — for ``single_pole`` —
+        bit-identical to the historical :meth:`sample` (identical key split,
+        identical arithmetic; dT is merely also returned). dT is float64
+        (colored) / the float32 AR(1) stream upcast (legacy). The legacy
+        branch is fully traceable (vmap-safe); colored models synthesize on
+        the HOST and must be looped, not vmapped.
+        """
         key_thermal, key_tccr = jax.random.split(key, 2)
-        temp_noise = _ar1_samples(key_thermal, N, self.tau_th, math.sqrt(self.var_delta_t), self.t_r)
-        trn_noise = (self.omega_0 / self.n0 * self.dn_dT) * temp_noise
-        pyroeo_noise = (self.omega_0 * self.n0**2 * self.r33 * self.p / (2.0 * self.eps0 * self.eps_r_eff)) * temp_noise
+        if not self.is_colored:
+            temp_noise = _ar1_samples(
+                key_thermal, N, self.tau_th, math.sqrt(self.var_delta_t), self.t_r
+            )
+        else:
+            rng = np_generator_from_key(key_thermal)
+            temp_noise = jnp.asarray(
+                synthesize_from_psd(rng, int(N), self.delta_t_psd, self.f_s),
+                dtype=jnp.float64,
+            )
+        trn_noise = self.c_pull * temp_noise
+        pyroeo_noise = self.pyro_coeff * temp_noise
         tccr_noise = self.tccr.sample(key_tccr, N)
-        
+
         # Sign convention: PyroEO *partially cancels* TRN for z-cut TFLN with
         # air top-cladding (Yu lab geometry).  For SiO₂-clad or flipped substrate,
         # the sign of pyroeo_noise may need to flip.  Verify against Fig. 2 of the
         # TCCR paper (DOI to be added) before generating the training dataset.
-        return (trn_noise - pyroeo_noise + tccr_noise).astype(jnp.float32)
+        combined = (trn_noise - pyroeo_noise + tccr_noise).astype(jnp.float32)
+        # dT stays float64 where available (colored path is float64 already;
+        # the legacy AR(1) stream upcasts only under the solver's x64 mode —
+        # avoids a spurious truncation warning in standalone float32 use).
+        if jax.config.read("jax_enable_x64") and temp_noise.dtype != jnp.float64:
+            temp_noise = temp_noise.astype(jnp.float64)
+        return combined, temp_noise
+
+    def sample(self, key, N) -> jnp.ndarray:
+        return self.sample_with_delta_t(key, N)[0]
+
+    def sample_full_with_delta_t(self, key, N):
+        """Host float64 (combined, dT) pair for the segment-continuity path.
+
+        EVERY model synthesizes from its PSD here (single_pole from the
+        Lorentzian twin of the AR(1)), so the sequence is stationary from
+        sample 0 — a full trajectory generated once up front and sliced per
+        segment has no boundary decorrelation transient. TCCR also
+        synthesizes from its single-pole PSD (independent stream from the
+        second subkey). Returns numpy float64 arrays, shape (N,) each.
+        """
+        key_thermal, key_tccr = jax.random.split(key, 2)
+        rng_t = np_generator_from_key(key_thermal)
+        delta_t = synthesize_from_psd(rng_t, int(N), self.delta_t_psd, self.f_s)
+        combined = (self.c_pull - self.pyro_coeff) * delta_t
+        if self.tccr.sigma_tccr > 0.0:
+            rng_c = np_generator_from_key(key_tccr)
+            tccr_psd = single_pole_psd(self.tccr.var_tccr, self.tau_carrier)
+            combined = combined + synthesize_from_psd(
+                rng_c, int(N), tccr_psd, self.f_s
+            )
+        return combined.astype(np.float64), delta_t.astype(np.float64)
 
 
 def _np_generator_from_key(key) -> np.random.Generator:
     """Deterministic host-side numpy Generator derived from a JAX PRNG key.
 
-    Pump-noise synthesis is done on the HOST in float64 (FFT synthesis of long
-    sequences is cheap in numpy and must not depend on the jax x64 flag, which
-    may be unset when this module is imported standalone). The full key data is
-    folded into a SeedSequence, so distinct JAX keys give independent, fully
-    reproducible numpy streams.
+    Thin alias of :func:`simulator.colored_noise.np_generator_from_key` (the
+    single seeding convention for every host-side noise synthesis); kept
+    under its historical name for the pump-noise call sites and tests.
     """
-    data = np.asarray(jax.random.key_data(key), dtype=np.uint32).ravel()
-    entropy = int.from_bytes(data.tobytes(), "little")
-    return np.random.default_rng(np.random.SeedSequence(entropy))
+    return np_generator_from_key(key)
 
 
 def _synthesize_from_onesided_psd(rng: np.random.Generator, n: int, psd_fn,
                                   f_s: float) -> np.ndarray:
     """Real sequence x (n,) float64 with one-sided target PSD ``psd_fn(f)``.
 
-    FFT synthesis at sample rate ``f_s``: on the rfft grid f_k = k·f_s/n draw
-    Hermitian-symmetric unit-variance complex Gaussians ζ_k (E|ζ_k|² = 1) and
-    set c_k = ζ_k·sqrt(S(f_k)·f_s·n/2); x = irfft(c). Then
-    Var(x) = (2/n²)·Σ_k E|c_k|² = Σ_k S(f_k)·Δf ≈ ∫₀^{f_s/2} S df, i.e. the
-    one-sided convention, and the Welch PSD of x reproduces S(f_k) bin by bin.
-    The DC and (even-n) Nyquist bins must be real for a real x: they get real
-    unit-variance draws with the same amplitude scaling. Whatever value
-    ``psd_fn`` returns at f = 0 sets the DC-bin variance, so 1/f-type inputs
-    must clamp their own DC bin (see PumpNoise: S(f₀) := S(f₁)); those two
-    single bins carry ~1/n of the total variance and are irrelevant to any
-    band-averaged PSD check.
+    Thin alias of :func:`simulator.colored_noise.synthesize_from_psd` with
+    ``clamp_dc=False`` -- the LEGACY pump-noise semantics, where the
+    callables clamp their own DC bin (S(f_0) := S(f_1) for the 1/f parts).
+    Same recipe, same draw order, bit-identical output.
     """
-    if n < 2:
-        return np.zeros(int(n), dtype=np.float64)
-    f = np.fft.rfftfreq(int(n), d=1.0 / float(f_s))          # (n//2 + 1,)
-    s = np.asarray(psd_fn(f), dtype=np.float64)
-    amp = np.sqrt(np.maximum(s, 0.0) * float(f_s) * int(n) / 2.0)
-    zr = rng.standard_normal(f.size)
-    zi = rng.standard_normal(f.size)
-    z = (zr + 1j * zi) / math.sqrt(2.0)                      # E|z|² = 1
-    z[0] = zr[0]                                             # DC bin real
-    if int(n) % 2 == 0:
-        z[-1] = zi[-1]                                       # Nyquist bin real
-    return np.fft.irfft(z * amp, n=int(n)).astype(np.float64)
+    return synthesize_from_psd(rng, n, psd_fn, f_s, clamp_dc=False)
 
 
 class PumpNoise:

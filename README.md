@@ -13,6 +13,26 @@
 - **Model training** for a physics-informed recurrent network (PI-RNN).
 - **Closed-loop control** using model predictive control (MPC) and hardware integration stubs.
 
+## Noise models
+
+Every stochastic channel of the simulator, its configuration keys (all under `physical_parameters` in `config/sin_params.yaml`), defaults, and the equation it implements from Herr, Tikan & Kippenberg, arXiv:2604.05897. **Every default reproduces the pre-colored-noise solver bit-for-bit**; each channel is opt-in.
+
+| Channel | Physics / paper reference | Config keys (default) | Default state |
+|---|---|---|---|
+| Quantum vacuum | Langevin drive √κ·ξ̂\_μ(t), Eq. 126 (Sec. V.B.2); truncated-Wigner ½ photon/mode | `quantum_noise_enabled` (0), `quantum_noise_seed_vacuum_init` (1), `quantum_noise_injection_cadence` (0), `hbar_omega0_j` (0 = auto), `labeler_vacuum_floor_margin` (10), `labeler_envelope_smooth_modes` (8) | OFF |
+| Thermorefractive (TRN) | δω(t) = C\_pull·δT(t); variance Eq. 129 k\_BT²/(ρC\_pV); spectrum selectable — `single_pole` (AR(1)/Lorentzian twin), `kondratiev_gorodetsky` (Eq. 130, variance renormalized to Eq. 129), `csv` (measured/FEM, Huang et al. 2019 style, log-log interpolated, flat-clamped) | `T_k` (300), `tau_th_s`, `dn_dT_per_k`, `rho_kg_per_m3`, `Cp_j_per_kg_k`, `mode_volume_m3`, `trn_psd_model` (`single_pole`), `trn_R_m`/`trn_da_m`/`trn_db_m` (null; required iff K-G, with d\_a ≥ 1.2·d\_b asserted), `trn_psd_csv_path` (null), `trn_csv_units` (`S_delta_T`) | ON (single-pole, as before) |
+| Thermal expansion pull | "dimensional fluctuation" companion of TRN folded into the pull: C\_pull = (ω₀/n₀)(dn/dT + n₀·α\_L) | `alpha_L_per_k` (0.0) | OFF (0.0 = thermo-optic only) |
+| Pyro-EO | χ⁽²⁾ pyroelectric-EO shift driven by the **same δT sequence** as TRN (partial cancellation, sign per z-cut TFLN) | `eo_r33_m_per_v` (0 for SiN), `pyroelectric_coeff_c_per_m2_k` (0), `eps_r_z`, stack thicknesses | OFF for SiN (r33 = 0) |
+| TCCR | surface-carrier shot noise → EO shift, AR(1) with `tau_carrier_s` | `surface_state_density_per_m2`, `tau_carrier_s`, `eo_r33_m_per_v` | OFF for SiN (r33 = 0) |
+| Pump frequency noise | S\_δν(f) = h₀ + h₋₁/f, Δν\_L = π·h₀ (Sec. V.B.4); enters as −2π·δν\_p(t) on the detuning axis | `pump_noise_enabled` (0), `pump_freq_noise_h0_hz2_per_hz` (0), `pump_freq_noise_hm1_hz3_per_hz` (0) | OFF |
+| Pump RIN | S\_ε(f) floor + 1/f excess below `f_c` (Sec. V.B.5); pump-power scale 1+ε(t) | `pump_rin_floor_dbc_per_hz` (−300), `pump_rin_excess_dbc_per_hz` (−300), `pump_rin_corner_hz` (1e4) | OFF |
+| FSR (repetition-rate) noise | δD₁(t) = (D₁/ω₀)·C\_pull·δT(t) from the **same δT sequence**; per-mode linear detuning μ·δD₁(t) in the linear operator — the TRN-limited f\_rep term (Sec. V.B.1 elastic tape) | `fsr_noise_enabled` (0) | OFF |
+| Dataset segment cadence | `legacy_segment_noise` = 1 keeps the historical per-segment noise regeneration (bit-identical, with its documented boundary decorrelation transient); 0 = full-trajectory-then-slice continuity fix | `legacy_segment_noise` (1) | legacy |
+
+Infrastructure: `simulator/colored_noise.py` synthesizes any channel from a one-sided target PSD (exact recipe in its docstring: Hermitian rfft draw with c\_k = ζ\_k·√(S(f\_k)·f\_s·N/2), DC clamped to S(f₁); Var(x) = ∫₀^{f\_s/2}S df), host-side float64, seeded deterministically from JAX keys. `T_k = 0` (the `write_noise_off_config` sidecar) forces **every** δT-derived channel — TRN, Pyro-EO, and FSR noise, for every `trn_psd_model` including `csv` — identically to zero; quantum and pump noise carry their own switches.
+
+**Noise metrology** (`analysis/noise_metrology.py`, paper Sec. V.B.1): the solver can record the complex FFT amplitudes of up to 16 probed modes every round trip (`solve_lle_ssfm_jax(mode_probe_indices=...)` → `mode_probe_history`, one extra FFT per round trip only when enabled). On those records the module computes per-line frequency-noise PSDs (Welch, detrended), the repetition-rate phase, the elastic-tape decomposition S\_μ(f) = S\_c + 2μS\_cr + μ²S\_rep with fix point μ\_fix = −S\_cr/S\_rep (least-squares across ≥5 probes per Fourier bin), β-separation-line effective linewidths (Di Domenico et al., Appl. Opt. 49, 4801 (2010)), timing jitter from the temporal peak trajectory, and a warm-continuation quiet-point sweep (Sec. V.B.5). `analysis/noise_comparison_report.py` regenerates the eight comparison/validation figures and their JSON metrics.
+
 ## Installation
 
 1. Clone the repository:
