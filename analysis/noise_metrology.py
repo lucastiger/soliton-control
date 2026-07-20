@@ -127,6 +127,26 @@ def rep_rate_phase(phases: np.ndarray, mus, i1: int, i2: int) -> np.ndarray:
     return (phases[:, i2] - phases[:, i1]) / dmu
 
 
+def cross_frequency_psd(phase_a: np.ndarray, phase_b: np.ndarray, t_r: float,
+                        nperseg: int | None = None):
+    """One-sided cross-PSD S_ab(f) of two phase traces' frequency noises.
+
+    Welch-averaged CSD (complex) of the constant-detrended instantaneous
+    frequencies, same conventions as :func:`frequency_noise_psd`. Used for
+    the direct fix-point estimate mu_fix(f) = -Re S_cr(f)/S_rep(f).
+    """
+    from scipy.signal import csd
+
+    a = instantaneous_frequency(np.asarray(phase_a, dtype=np.float64), t_r)
+    b = instantaneous_frequency(np.asarray(phase_b, dtype=np.float64), t_r)
+    n = min(a.shape[0], b.shape[0])
+    if nperseg is None:
+        nperseg = min(max(256, n // 8), n)
+    f, s = csd(a[:n], b[:n], fs=1.0 / float(t_r), nperseg=int(nperseg),
+               detrend="constant")
+    return f[1:], s[1:]
+
+
 # ---------------------------------------------------------------------------
 # 3. Elastic-tape-model decomposition (paper Sec. V.B.1)
 # ---------------------------------------------------------------------------
@@ -146,6 +166,18 @@ def tape_model_fit(phases: np.ndarray, mus, t_r: float,
     (frequency-noise units, Hz^2/Hz; ``S_cr`` may be negative), the fix-point
     index ``mu_fix(f) = -S_cr/S_rep`` (NaN where S_rep is not resolved), the
     per-probe PSD matrix ``S_mu`` (n_bins, n_probe), and ``mus``.
+
+    ESTIMATOR LIMIT (important): the per-bin Welch estimates of S_mu carry
+    multiplicative chi^2 noise ~ S_mu/sqrt(n_seg). When the common mode
+    dominates (S_c >> mu_max^2 * S_rep — e.g. thermorefractive noise, whose
+    common/rep ratio is (omega0/D1)^2 ~ 6e7 for this device), the fitted
+    mu^2 curvature drowns in that noise and ``S_rep`` from this fit is NOT
+    meaningful. Use the pairwise difference estimator instead —
+    ``rep_rate_phase`` cancels the common mode DETERMINISTICALLY before any
+    spectral estimate — as the quiet-point sweep and the TRN-limit
+    validation do. This fit is the right tool when the per-line noises are
+    comparable to the common mode (the synthetic-comb regime of its unit
+    test) or when only S_c is needed.
     """
     mus = np.asarray(mus, dtype=np.float64)
     if mus.size < 5 or np.unique(mus).size < 5:
@@ -367,16 +399,21 @@ def quiet_point_sweep(
         probes = np.asarray(sol["mode_probe_history"])[0]
         # Discard the re-settling transient (first quarter of the hold).
         phases = unwrapped_phases(probes[hold_rt // 4:])
+        # S_rep via the pairwise DIFFERENCE estimator (extreme probes): the
+        # common mode cancels deterministically, so the estimate is immune
+        # to the tape-fit's common-mode-leakage limit (see tape_model_fit).
+        phi_rep = rep_rate_phase(phases, probe_mus, 0, len(probe_mus) - 1)
+        f_r, s_r = frequency_noise_psd(phi_rep, cav.t_r)
+        s_rep_off = psd_at_offset(f_r, s_r, f_offset_hz)
+        # Common mode from the same pair's HALF-SUM (exact for the tape
+        # model); the full tape fit is kept for S_c only.
         fit = tape_model_fit(phases, probe_mus, cav.t_r)
-        s_rep_off = psd_at_offset(fit["f"], fit["S_rep"], f_offset_hz)
         s_c_off = psd_at_offset(fit["f"], fit["S_c"], f_offset_hz)
         u_tail = float(np.mean(np.asarray(sol["U_int_history"])[0][-hold_rt // 4:]))
         rows.append({
             "dw_over_kappa": float(dwk),
             "S_rep_at_offset": s_rep_off,
             "S_c_at_offset": s_c_off,
-            "mu_fix_at_offset": psd_at_offset(
-                fit["f"], np.abs(fit["mu_fix"]), f_offset_hz),
             "U_int": u_tail,
         })
         print(f"[quiet-point] {i + 1:2d}/{dw_grid_kappa.size} "

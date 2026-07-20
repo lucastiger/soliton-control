@@ -75,10 +75,12 @@ from analysis.dks_access import (  # noqa: E402
     sech_soliton_seed,
 )
 from analysis.noise_metrology import (  # noqa: E402
+    cross_frequency_psd,
     effective_linewidth,
     frequency_noise_psd,
     psd_at_offset,
     quiet_point_sweep,
+    rep_rate_phase,
     tape_model_fit,
     timing_jitter,
     unwrapped_phases,
@@ -367,49 +369,70 @@ def fig5_trn_limited_frep(cfg_trn_q: str, cfg_trn_only: str, seed: int,
                      **numerics)
         probes = np.asarray(sol["mode_probe_history"])[0]
         phases = unwrapped_phases(probes[t_slow // 4:])
-        fit = tape_model_fit(phases, probe_mus, cav.t_r,
-                             nperseg=min(1 << 13, phases.shape[0] // 4))
-        results[name] = fit
+        nseg = min(1 << 13, phases.shape[0] // 4)
+        # DIRECT estimators from the extreme probe pair. The tape-model
+        # per-bin fit cannot resolve S_rep here: TRN is fully correlated
+        # between the common and rep components with common/rep power ratio
+        # (omega0/D1)^2 ~ 6e7, far beyond the fit's multiplicative-noise
+        # dynamic range (see tape_model_fit docstring). The half-difference
+        # cancels the common mode DETERMINISTICALLY (exact for the elastic
+        # tape); the half-sum is the common mode.
+        phi_rep = rep_rate_phase(phases, probe_mus, 0, len(probe_mus) - 1)
+        phi_c = 0.5 * (phases[:, 0] + phases[:, -1])
+        f_r, s_rep = frequency_noise_psd(phi_rep, cav.t_r, nperseg=nseg)
+        _, s_c = frequency_noise_psd(phi_c, cav.t_r, nperseg=nseg)
+        results[name] = {"f": f_r, "S_rep": s_rep, "S_c": s_c}
 
     # TRN limit: S_dnu,rep(f) = (D1/omega0)^2 * C_pull^2 * S_dT(f) / (2pi)^2.
     f = results["TRN+FSR only"]["f"]
     s_rep_pred = (d1_over_omega0 ** 2 * trn_kg.c_pull ** 2
                   * np.asarray(trn_kg.delta_t_psd(f)) / (2 * math.pi) ** 2)
+    s_c_pred = (trn_kg.c_pull ** 2
+                * np.asarray(trn_kg.delta_t_psd(f)) / (2 * math.pi) ** 2)
 
     apply_pub_style()
     fig, ax = plt.subplots(figsize=(7.2, 4.6))
-    for name, style in (("quantum+TRN+FSR", "-"), ("TRN+FSR only", "-")):
-        fit = results[name]
-        ax.loglog(fit["f"], np.maximum(fit["S_rep"], 1e-30), style, lw=0.9,
-                  label=f"tape-fit $S_{{rep}}$ ({name})")
+    for name in ("quantum+TRN+FSR", "TRN+FSR only"):
+        r = results[name]
+        ax.loglog(r["f"], r["S_rep"], lw=0.9,
+                  label=rf"$S_{{\delta\nu,rep}}$ ({name})")
+    ax.loglog(results["TRN+FSR only"]["f"], results["TRN+FSR only"]["S_c"],
+              lw=0.9, alpha=0.6, label=r"$S_{\delta\nu,c}$ (TRN+FSR only)")
     ax.loglog(f, s_rep_pred, "k--", lw=1.6,
               label=r"TRN limit $(D_1/\omega_0)^2 C_{pull}^2 "
                     r"S_{\delta T}(f)/(2\pi)^2$")
+    ax.loglog(f, s_c_pred, "k:", lw=1.2,
+              label=r"common TRN $C_{pull}^2 S_{\delta T}(f)/(2\pi)^2$")
     ax.set_xlabel("offset frequency f [Hz]")
-    ax.set_ylabel(r"$S_{\delta\nu,rep}(f)$  [Hz$^2$/Hz]")
-    ax.set_title("Repetition-rate frequency noise vs the TRN(K-G) limit")
+    ax.set_ylabel(r"$S_{\delta\nu}(f)$  [Hz$^2$/Hz]")
+    ax.set_title("Repetition-rate frequency noise vs the TRN(K-G) limit\n"
+                 "(pairwise-difference estimator; quantum per-line floor "
+                 "shown by the full-stack curve)")
     ax.legend(fontsize=7)
     fig.savefig(FIG_DIR / "s_rep_trn_limit.png")
     plt.close(fig)
 
-    # Band-ratio metric on the TRN-only run (low-offset TRN-dominated band).
-    fit = results["TRN+FSR only"]
-    band = (fit["f"] >= fit["f"][2]) & (fit["f"] <= fit["f"][2] * 50)
-    ratio_db = 10.0 * np.log10(
-        np.maximum(fit["S_rep"][band], 1e-300)
-        / np.maximum(s_rep_pred[band], 1e-300))
-    fit_q = results["quantum+TRN+FSR"]
-    band_q = band
+    # Band metrics: ratio of measured to predicted over the low-offset
+    # decade (TRN-dominated band), and the inferred fix point
+    # mu_fix = -sqrt(S_c/S_rep) (fully correlated, positive correlation:
+    # phi_rep = (D1/omega0)*phi_c => mu_fix = -omega0/D1).
+    r0 = results["TRN+FSR only"]
+    band = (f >= f[2]) & (f <= f[2] * 30)
+    ratio_db = 10.0 * np.log10(r0["S_rep"][band] / s_rep_pred[band])
+    ratio_c_db = 10.0 * np.log10(r0["S_c"][band] / s_c_pred[band])
+    mu_fix_inferred = -math.sqrt(
+        float(np.median(r0["S_c"][band]))
+        / float(np.median(r0["S_rep"][band])))
+    rq = results["quantum+TRN+FSR"]
     return {
         "d1_over_omega0": d1_over_omega0,
         "c_pull_rad_s_K": trn_kg.c_pull,
-        "trn_only_band_median_ratio_db": float(np.median(ratio_db)),
-        "trn_only_band_max_abs_ratio_db": float(np.max(np.abs(ratio_db))),
-        "quantum_stack_median_ratio_db": float(np.median(10 * np.log10(
-            np.maximum(fit_q["S_rep"][band_q], 1e-300)
-            / np.maximum(s_rep_pred[band_q], 1e-300)))),
-        "mu_fix_trn_only_band_median": float(np.nanmedian(
-            fit["mu_fix"][band])),
+        "trn_only_srep_band_median_ratio_db": float(np.median(ratio_db)),
+        "trn_only_srep_band_max_abs_ratio_db": float(np.max(np.abs(ratio_db))),
+        "trn_only_sc_band_median_ratio_db": float(np.median(ratio_c_db)),
+        "quantum_stack_srep_band_median_ratio_db": float(np.median(
+            10 * np.log10(rq["S_rep"][band] / s_rep_pred[band]))),
+        "mu_fix_inferred_from_sc_over_srep": mu_fix_inferred,
         "mu_fix_predicted_minus_omega0_over_d1": float(-1.0 / d1_over_omega0),
     }
 
@@ -432,12 +455,21 @@ def fig6_linewidth_parabola(cfg_lw: str, seed: int, n_tau: int, t_slow: int,
                  snapshot_interval=max(t_slow // 16, 1), config_path=cfg_lw,
                  mode_probe_indices=probe_mus, **numerics)
     probes = np.asarray(sol["mode_probe_history"])[0]
-    phases = unwrapped_phases(probes[t_slow // 4:])
+    cut = t_slow // 4
+    phases = unwrapped_phases(probes[cut:])
+    # LAB-FRAME line phases: the solver frame co-rotates with the pump, so
+    # the probes record only the frame-relative (transduced) part. The lab
+    # comb line is nu_mu = nu_pump + Delta_mu; add the pump phase
+    # phi_pump = 2*pi*Int delta_nu_p dt = -cumsum(pump_freq_noise_history)*
+    # t_r (the history stores the -2*pi*delta_nu_p detuning contribution).
+    pump_hist = np.asarray(sol["pump_freq_noise_history"])[0]
+    phi_pump = -np.cumsum(pump_hist) * cav.t_r
+    phases_lab = phases + phi_pump[cut:, None]
     nseg = min(1 << 13, phases.shape[0] // 4)
 
     linewidths = []
     for j in range(len(probe_mus)):
-        f, s = frequency_noise_psd(phases[:, j], cav.t_r, nperseg=nseg)
+        f, s = frequency_noise_psd(phases_lab[:, j], cav.t_r, nperseg=nseg)
         linewidths.append(effective_linewidth(f, s))
     linewidths = np.asarray(linewidths)
     mus = np.asarray(probe_mus, dtype=float)
@@ -449,17 +481,32 @@ def fig6_linewidth_parabola(cfg_lw: str, seed: int, n_tau: int, t_slow: int,
     mu_grid = np.linspace(mus.min() * 1.1, mus.max() * 1.1, 400)
     par = np.polyval(coef, mu_grid)
 
+    # Direct fix-point estimate, immune to the beta-integral's sensitivity
+    # to isolated spectral features: mu_fix(f) = -Re S_cr(f)/S_rep(f) with
+    # S_rep from the extreme-pair half-difference and S_cr from the CSD of
+    # the pair half-sum (common) with the half-difference (rep). Band-median
+    # over the resolved pump band.
+    phi_rep = rep_rate_phase(phases_lab, probe_mus, 0, len(probe_mus) - 1)
+    phi_c = 0.5 * (phases_lab[:, 0] + phases_lab[:, -1])
+    f_r, s_rep_d = frequency_noise_psd(phi_rep, cav.t_r, nperseg=nseg)
+    f_x, s_cr = cross_frequency_psd(phi_c, phi_rep, cav.t_r, nperseg=nseg)
+    band = (f_r > 1e6) & (f_r < 3e7)
+    mu_fix_direct = float(np.median(
+        -np.real(s_cr[band]) / np.maximum(s_rep_d[band], 1e-300)))
+
     apply_pub_style()
     fig, ax = plt.subplots(figsize=(7.2, 4.4))
-    ax.plot(mus, linewidths / 1e3, "o", ms=5, label="per-line effective "
-            "linewidth (beta-separation integral)")
-    ax.plot(mu_grid, np.sqrt(np.maximum(par, 0.0)) / 1e3, "-", lw=1.4,
+    ax.plot(mus, linewidths / 1e6, "o", ms=5, label="per-line effective "
+            "linewidth (beta-separation integral, lab frame)")
+    ax.plot(mu_grid, np.sqrt(np.maximum(par, 0.0)) / 1e6, "-", lw=1.4,
             label="quadratic fit of FWHM$^2(\\mu)$")
     if np.isfinite(mu_fix):
         ax.axvline(mu_fix, color="gray", ls=":",
-                   label=f"fix point $\\mu_{{fix}} = {mu_fix:.0f}$")
+                   label=f"parabola vertex $\\mu_{{fix}} = {mu_fix:.0f}$")
+    ax.axvline(mu_fix_direct, color="C3", ls="--", lw=1.0,
+               label=f"CSD fix point $\\mu_{{fix}} = {mu_fix_direct:.0f}$")
     ax.set_xlabel(r"mode index $\mu$")
-    ax.set_ylabel("effective linewidth [kHz]")
+    ax.set_ylabel("effective linewidth [MHz]")
     ax.set_title("Comb-line linewidth vs mode index "
                  "(quantum + white pump frequency noise, measured $D_{int}$)")
     ax.legend(fontsize=7)
@@ -473,7 +520,8 @@ def fig6_linewidth_parabola(cfg_lw: str, seed: int, n_tau: int, t_slow: int,
         "probe_mus": list(map(int, probe_mus)),
         "linewidths_hz": [float(x) for x in linewidths],
         "parabola_coef_fwhm2": [float(c) for c in coef],
-        "mu_fix": mu_fix,
+        "mu_fix_parabola_vertex": mu_fix,
+        "mu_fix_direct_csd": mu_fix_direct,
         "curvature_positive_and_significant": curvature_significant,
         "pump_h0_hz2_per_hz": LINEWIDTH_H0,
     }
@@ -565,7 +613,16 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--quick", action="store_true")
+    ap.add_argument("--only", type=str, default="",
+                    help="comma list of sections to (re)run: fig1,fig234,"
+                         "fig5,fig6,fig7,perf; default = all. Other "
+                         "sections keep their values from the existing "
+                         "JSON (merged).")
     args = ap.parse_args()
+    only = {s.strip() for s in args.only.split(",") if s.strip()}
+
+    def _want(tag):
+        return not only or tag in only
 
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix="noise_report_"))
@@ -626,32 +683,41 @@ def main() -> None:
         pump_freq_noise_h0_hz2_per_hz=LINEWIDTH_H0)
 
     metrics = {"seed": args.seed, "quick": bool(args.quick)}
+    if only and RESULTS_JSON.exists():
+        metrics.update(json.load(open(RESULTS_JSON, encoding="utf-8")))
+        metrics["seed"], metrics["quick"] = args.seed, bool(args.quick)
 
-    print("[1/6] PSD model overlay ...")
-    metrics["fig1_psd_models"] = fig1_psd_models(tmp, args.seed, n_samp)
+    if _want("fig1"):
+        print("[1/6] PSD model overlay ...")
+        metrics["fig1_psd_models"] = fig1_psd_models(tmp, args.seed, n_samp)
 
-    print("[2/6] soliton OFF vs full stack ON (figs 2-4, 8) ...")
-    metrics["figs234_8_soliton"] = figs2348_soliton_off_on(
-        cfg_off, cfg_full, args.seed, n_tau_big, settle, run_rt, numerics)
+    if _want("fig234"):
+        print("[2/6] soliton OFF vs full stack ON (figs 2-4, 8) ...")
+        metrics["figs234_8_soliton"] = figs2348_soliton_off_on(
+            cfg_off, cfg_full, args.seed, n_tau_big, settle, run_rt, numerics)
 
-    print("[3/6] TRN-limited f_rep (fig 5) ...")
-    frep_numerics = numerics if args.quick else dict(
-        n_substeps=1, dealias_two_thirds=True, edge_absorber=True,
-        dispersion_validity_mask=False)
-    metrics["fig5_trn_frep"] = fig5_trn_limited_frep(
-        cfg_trn_q, cfg_trn_only, args.seed, n_tau_frep, t_frep,
-        frep_mus, frep_numerics)
+    if _want("fig5"):
+        print("[3/6] TRN-limited f_rep (fig 5) ...")
+        frep_numerics = numerics if args.quick else dict(
+            n_substeps=1, dealias_two_thirds=True, edge_absorber=True,
+            dispersion_validity_mask=False)
+        metrics["fig5_trn_frep"] = fig5_trn_limited_frep(
+            cfg_trn_q, cfg_trn_only, args.seed, n_tau_frep, t_frep,
+            frep_mus, frep_numerics)
 
-    print("[4/6] linewidth-vs-mu parabola (fig 6) ...")
-    metrics["fig6_linewidth"] = fig6_linewidth_parabola(
-        cfg_lw, args.seed, n_tau_lw, t_lw, lw_mus, numerics)
+    if _want("fig6"):
+        print("[4/6] linewidth-vs-mu parabola (fig 6) ...")
+        metrics["fig6_linewidth"] = fig6_linewidth_parabola(
+            cfg_lw, args.seed, n_tau_lw, t_lw, lw_mus, numerics)
 
-    print("[5/6] quiet-point sweep (fig 7) ...")
-    metrics["fig7_quiet_point"] = fig7_quiet_point(
-        args.seed, qp_ntau, qp_hold, qp_grid, f_offset=2.0e8)
+    if _want("fig7"):
+        print("[5/6] quiet-point sweep (fig 7) ...")
+        metrics["fig7_quiet_point"] = fig7_quiet_point(
+            args.seed, qp_ntau, qp_hold, qp_grid, f_offset=2.0e8)
 
-    print("[6/6] performance overheads ...")
-    metrics["performance"] = perf_overheads(args.seed, perf_ntau, perf_t)
+    if _want("perf"):
+        print("[6/6] performance overheads ...")
+        metrics["performance"] = perf_overheads(args.seed, perf_ntau, perf_t)
 
     with open(RESULTS_JSON, "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)
