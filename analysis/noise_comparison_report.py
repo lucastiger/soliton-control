@@ -551,6 +551,8 @@ def fig7_quiet_point(seed: int, n_tau: int, hold_rt: int, dw_grid,
                 s.get("quiet_point_dw_over_kappa"),
             "quiet_point_S_rep": s.get("quiet_point_S_rep"),
             "quiet_point_depth_ratio": s.get("quiet_point_depth"),
+            "dw_over_kappa": [float(x) for x in s["dw_over_kappa"]],
+            "S_rep_at_offset": [float(x) for x in s["S_rep_at_offset"]],
         }
     ax.set_xlabel(r"detuning $\delta\omega/\kappa$")
     ax.set_ylabel(rf"$S_{{rep}}$({f_offset:.0e} Hz)  [Hz$^2$/Hz]")
@@ -645,7 +647,7 @@ def main() -> None:
         n_tau_lw, t_lw = 4096, 1 << 16
         frep_mus = (-150, -100, -50, 50, 100, 150)
         lw_mus = (-240, -160, -80, 80, 160, 240)
-        qp_grid = np.linspace(11.0, 7.5, 13)
+        qp_grid = np.linspace(12.5, 7.5, 21)
         qp_ntau, qp_hold = 4096, 12_000
         n_samp = 1 << 17
         numerics = PRODUCTION_NUMERICS
