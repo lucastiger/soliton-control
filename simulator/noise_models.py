@@ -215,6 +215,221 @@ class TotalNoise:
         return (trn_noise - pyroeo_noise + tccr_noise).astype(jnp.float32)
 
 
+def _np_generator_from_key(key) -> np.random.Generator:
+    """Deterministic host-side numpy Generator derived from a JAX PRNG key.
+
+    Pump-noise synthesis is done on the HOST in float64 (FFT synthesis of long
+    sequences is cheap in numpy and must not depend on the jax x64 flag, which
+    may be unset when this module is imported standalone). The full key data is
+    folded into a SeedSequence, so distinct JAX keys give independent, fully
+    reproducible numpy streams.
+    """
+    data = np.asarray(jax.random.key_data(key), dtype=np.uint32).ravel()
+    entropy = int.from_bytes(data.tobytes(), "little")
+    return np.random.default_rng(np.random.SeedSequence(entropy))
+
+
+def _synthesize_from_onesided_psd(rng: np.random.Generator, n: int, psd_fn,
+                                  f_s: float) -> np.ndarray:
+    """Real sequence x (n,) float64 with one-sided target PSD ``psd_fn(f)``.
+
+    FFT synthesis at sample rate ``f_s``: on the rfft grid f_k = k·f_s/n draw
+    Hermitian-symmetric unit-variance complex Gaussians ζ_k (E|ζ_k|² = 1) and
+    set c_k = ζ_k·sqrt(S(f_k)·f_s·n/2); x = irfft(c). Then
+    Var(x) = (2/n²)·Σ_k E|c_k|² = Σ_k S(f_k)·Δf ≈ ∫₀^{f_s/2} S df, i.e. the
+    one-sided convention, and the Welch PSD of x reproduces S(f_k) bin by bin.
+    The DC and (even-n) Nyquist bins must be real for a real x: they get real
+    unit-variance draws with the same amplitude scaling. Whatever value
+    ``psd_fn`` returns at f = 0 sets the DC-bin variance, so 1/f-type inputs
+    must clamp their own DC bin (see PumpNoise: S(f₀) := S(f₁)); those two
+    single bins carry ~1/n of the total variance and are irrelevant to any
+    band-averaged PSD check.
+    """
+    if n < 2:
+        return np.zeros(int(n), dtype=np.float64)
+    f = np.fft.rfftfreq(int(n), d=1.0 / float(f_s))          # (n//2 + 1,)
+    s = np.asarray(psd_fn(f), dtype=np.float64)
+    amp = np.sqrt(np.maximum(s, 0.0) * float(f_s) * int(n) / 2.0)
+    zr = rng.standard_normal(f.size)
+    zi = rng.standard_normal(f.size)
+    z = (zr + 1j * zi) / math.sqrt(2.0)                      # E|z|² = 1
+    z[0] = zr[0]                                             # DC bin real
+    if int(n) % 2 == 0:
+        z[-1] = zi[-1]                                       # Nyquist bin real
+    return np.fft.irfft(z * amp, n=int(n)).astype(np.float64)
+
+
+class PumpNoise:
+    """Pump-laser frequency noise and RIN (arXiv:2604.05897 Secs. V.B.4–V.B.5).
+
+    Two channels, both sampled once per round trip at f_s = 1/t_r and both
+    synthesized HOST-SIDE in float64 (deterministic per JAX key, independent
+    of the jax x64 flag):
+
+    Frequency noise (Sec. V.B.4)
+        One-sided PSD of the instantaneous laser-frequency deviation δν_p(t):
+            S_δν(f) = h₀ + h₋₁/f   [Hz²/Hz]   on f ∈ [1/(N·t_r), 1/(2·t_r)].
+        The white plateau h₀ carries the intrinsic Lorentzian linewidth via
+        the standard identity Δν_L = π·h₀ (exposed as
+        ``lorentzian_linewidth_hz``); h₋₁ is the flicker (1/f) coefficient
+        [Hz³/Hz]. Generation: the white part is i.i.d. Gaussian per round
+        trip with variance h₀·f_s/2 (one-sided convention:
+        var = ∫₀^{f_s/2} S df); the flicker part is FFT-synthesized with
+        S_flicker(f_k) = h₋₁ / max(f_k, f₁) — the DC bin is clamped to the
+        first bin f₁ = f_s/N, so the (single-bin) DC variance is
+        h₋₁/f₁·Δf = h₋₁/N·f_s/N·(N/f_s) = h₋₁ instead of diverging.
+        ``sample_freq`` returns 2π·δν_p(t) in rad/s; the SOLVER subtracts it
+        from the detuning (δω ≡ ω_res − ω_p, so a positive laser-frequency
+        excursion reduces δω).
+
+    RIN (Sec. V.B.5)
+        P_in(t) = P̄_in·(1 + ε(t)) with one-sided PSD
+            S_ε(f) = 10^(floor_dBc/10) + 10^(excess_dBc/10)·(f_c/f)  (f < f_c)
+                   = 10^(floor_dBc/10)                               (f ≥ f_c)
+        [1/Hz]. The floor is i.i.d. Gaussian per round trip (variance
+        floor·f_s/2) and the excess is FFT-synthesized exactly like the
+        flicker part (same DC clamp, zero above the corner). ε is clipped so
+        1 + ε ≥ 0; if more than 0.01% of samples clip, a warning reports the
+        clipped fraction.
+
+    ``pump_noise_enabled`` = 0/False forces BOTH channels inert regardless of
+    the numeric values (samples are exactly zero, PSDs return zero); the value
+    ranges are validated only when enabled. Representative values —
+    ECDL: h₀ ≈ 3e3 Hz²/Hz (Δν_L ≈ 10 kHz), h₋₁ ≈ 1e10 Hz³/Hz;
+    fiber laser: h₀ ≈ 30 Hz²/Hz (Δν_L ≈ 100 Hz).
+    """
+
+    def __init__(self, cfg, enabled: bool | None = None):
+        self.cfg = cfg
+        self.t_r = 1.0 / float(cfg.get("fsr_hz", 2.0e11))
+        self.f_s = 1.0 / self.t_r
+        if enabled is None:
+            enabled = cfg.get("pump_noise_enabled", 0)
+        if not (isinstance(enabled, (bool, int, np.integer)) and int(enabled) in (0, 1)):
+            raise ValueError(
+                f"pump_noise_enabled must be boolean-valued (bool or 0/1), got {enabled!r}."
+            )
+        self.enabled = bool(int(enabled))
+
+        self.h0 = float(cfg.get("pump_freq_noise_h0_hz2_per_hz", 0.0))
+        self.hm1 = float(cfg.get("pump_freq_noise_hm1_hz3_per_hz", 0.0))
+        self.rin_floor_dbc = float(cfg.get("pump_rin_floor_dbc_per_hz", -300.0))
+        self.rin_excess_dbc = float(cfg.get("pump_rin_excess_dbc_per_hz", -300.0))
+        self.rin_corner_hz = float(cfg.get("pump_rin_corner_hz", 1.0e4))
+
+        if self.enabled:
+            if self.h0 < 0.0 or self.hm1 < 0.0:
+                raise ValueError(
+                    f"pump frequency-noise coefficients must be >= 0: "
+                    f"h0 = {self.h0!r} Hz²/Hz, h-1 = {self.hm1!r} Hz³/Hz."
+                )
+            for name, val in (
+                ("pump_rin_floor_dbc_per_hz", self.rin_floor_dbc),
+                ("pump_rin_excess_dbc_per_hz", self.rin_excess_dbc),
+            ):
+                if val > -80.0:
+                    raise ValueError(
+                        f"{name} = {val!r} exceeds -80 dBc/Hz. RIN levels are "
+                        f"dB quantities; a value this large is almost "
+                        f"certainly a LINEAR spectral density entered where "
+                        f"dBc/Hz is expected (physical lasers sit below "
+                        f"-80 dBc/Hz)."
+                    )
+            if self.rin_corner_hz <= 0.0:
+                raise ValueError(
+                    f"pump_rin_corner_hz must be > 0, got {self.rin_corner_hz!r}."
+                )
+
+        # Effective (inert-when-disabled) parameters used by sample_*/psd_*.
+        _on = 1.0 if self.enabled else 0.0
+        self._h0 = self.h0 * _on
+        self._hm1 = self.hm1 * _on
+        self._rin_floor_lin = 10.0 ** (self.rin_floor_dbc / 10.0) * _on   # 1/Hz
+        self._rin_excess_lin = 10.0 ** (self.rin_excess_dbc / 10.0) * _on  # 1/Hz
+
+        # Intrinsic Lorentzian linewidth from the white plateau: Δν_L = π·h₀.
+        self.lorentzian_linewidth_hz = math.pi * self._h0
+
+    # -- closed-form one-sided PSDs (validation targets) ---------------------
+    def psd_freq(self, f) -> np.ndarray:
+        """One-sided S_δν(f) [Hz²/Hz] of the laser-frequency deviation δν_p."""
+        f = np.asarray(f, dtype=np.float64)
+        return self._h0 + self._hm1 / np.maximum(f, np.finfo(np.float64).tiny)
+
+    def psd_rin(self, f) -> np.ndarray:
+        """One-sided S_ε(f) [1/Hz] of the relative intensity fluctuation ε."""
+        f = np.asarray(f, dtype=np.float64)
+        excess = np.where(
+            f < self.rin_corner_hz,
+            self._rin_excess_lin
+            * self.rin_corner_hz
+            / np.maximum(f, np.finfo(np.float64).tiny),
+            0.0,
+        )
+        return self._rin_floor_lin + excess
+
+    # -- samplers ------------------------------------------------------------
+    def sample_freq(self, key, N: int) -> np.ndarray:
+        """2π·δν_p(t) [rad/s], shape (N,), float64, one sample per round trip.
+
+        The caller (solver) applies the sign: δω-noise contribution is
+        −2π·δν_p because δω ≡ ω_res − ω_p.
+        """
+        n = int(N)
+        if not self.enabled or (self._h0 == 0.0 and self._hm1 == 0.0):
+            return np.zeros(n, dtype=np.float64)
+        rng = _np_generator_from_key(key)
+        dnu = np.zeros(n, dtype=np.float64)
+        if self._h0 > 0.0:  # white: var = h0*f_s/2 (one-sided convention)
+            dnu += rng.standard_normal(n) * math.sqrt(self._h0 * self.f_s / 2.0)
+        if self._hm1 > 0.0 and n >= 2:  # flicker via FFT synthesis
+            f1 = self.f_s / n
+            dnu += _synthesize_from_onesided_psd(
+                rng, n, lambda f: self._hm1 / np.maximum(f, f1), self.f_s
+            )
+        return 2.0 * math.pi * dnu
+
+    def sample_rin(self, key, N: int) -> np.ndarray:
+        """ε(t) (dimensionless), shape (N,), float64, one sample per round trip.
+
+        Clipped so 1 + ε ≥ 0; warns if more than 0.01% of samples clip.
+        """
+        n = int(N)
+        if not self.enabled:
+            return np.zeros(n, dtype=np.float64)
+        rng = _np_generator_from_key(key)
+        eps = np.zeros(n, dtype=np.float64)
+        if self._rin_floor_lin > 0.0:
+            eps += rng.standard_normal(n) * math.sqrt(
+                self._rin_floor_lin * self.f_s / 2.0
+            )
+        if self._rin_excess_lin > 0.0 and n >= 2:
+            f1 = self.f_s / n
+            f_c = self.rin_corner_hz
+            eps += _synthesize_from_onesided_psd(
+                rng,
+                n,
+                lambda f: np.where(
+                    f < f_c,
+                    self._rin_excess_lin * f_c / np.maximum(f, f1),
+                    0.0,
+                ),
+                self.f_s,
+            )
+        n_clip = int(np.count_nonzero(eps < -1.0))
+        if n_clip > 1e-4 * n:
+            import warnings
+
+            warnings.warn(
+                f"PumpNoise.sample_rin: {n_clip}/{n} samples "
+                f"({100.0 * n_clip / n:.3f}%) clipped at ε = -1 (P_in >= 0). "
+                f"The configured RIN is so large that the Gaussian model is "
+                f"physically strained; the clipped sequence is returned.",
+                stacklevel=2,
+            )
+        return np.maximum(eps, -1.0)
+
+
 def plot_noise_psd() -> None:
     cfg = _load_config()
     total = TotalNoise(cfg)

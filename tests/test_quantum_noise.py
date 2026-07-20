@@ -470,6 +470,7 @@ def _per_traj_args(n_traj=2, n_tau=64, t_slow=3, qnoise_enabled=False):
         qnoise_scale,             # qnoise_scale
         bool(qnoise_enabled),     # qnoise_enabled (static)
         False,                    # qnoise_roundtrip (static; fine cadence)
+        None,                     # pump_scale_sequence (RIN disabled)
     )
 
 
@@ -503,6 +504,7 @@ def _scan_body_primitives(qnoise_enabled: bool) -> list[str]:
             args[12], args[13], noise_seq[0], e0[0], dt0[0], args[17],
             args[18], args[19], args[20], args[21], args[22], args[23],
             args[24], qnoise_key, args[26], qnoise_enabled, False,
+            None,
         )
 
     jpr = jax.make_jaxpr(_one_traj)(

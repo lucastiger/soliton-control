@@ -112,24 +112,38 @@ class DatasetGenerator:
 
         self.p_th = (self.kappa / 2.0) ** 2 / (self.gamma * self.t_r * self.kappa_c)
 
+        # Optional pump-laser-noise sweep axes (arXiv:2604.05897 V.B.4-V.B.5).
+        # Absent -> the disabled defaults (h0 = 0 Hz²/Hz, RIN floor = -300 dBc/Hz),
+        # so datasets without these keys are bit-identical to the legacy path.
+        pump_h0_grid = [float(x) for x in self.param_grid.get("pump_h0", [0.0])]
+        rin_floor_grid = [
+            float(x) for x in self.param_grid.get("rin_floor", [-300.0])
+        ]
+
         self.full_simulation_list = [
             {
                 "pin": float(pin),
                 "sweep_rate": float(sweep_rate),
                 "Gamma_th": float(gamma_th),
                 "noise_scale": float(noise_scale),
+                "pump_h0": float(pump_h0),
+                "rin_floor": float(rin_floor),
             }
-            for pin, sweep_rate, gamma_th, noise_scale in itertools.product(
-                self.param_grid["pin"],
-                self.param_grid["sweep_rate"],
-                self.param_grid["Gamma_th"],
-                self.param_grid["noise_scale"],
+            for pin, sweep_rate, gamma_th, noise_scale, pump_h0, rin_floor in (
+                itertools.product(
+                    self.param_grid["pin"],
+                    self.param_grid["sweep_rate"],
+                    self.param_grid["Gamma_th"],
+                    self.param_grid["noise_scale"],
+                    pump_h0_grid,
+                    rin_floor_grid,
+                )
             )
         ]
 
     def _make_keys(
         self, batch_global_idx: int, B: int
-    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
         batch_key = jax.random.fold_in(self.base_key, int(batch_global_idx))
         field_key, noise_key = jax.random.split(batch_key)
         key_arr = jax.random.split(field_key, B)
@@ -137,7 +151,10 @@ class DatasetGenerator:
         # Quantum-noise keys from a fold_in of batch_key (NOT a widened split,
         # which would change field_key/noise_key and the legacy RNG stream).
         qnoise_keys = jax.random.split(jax.random.fold_in(batch_key, 2), B)
-        return key_arr, noise_keys, qnoise_keys
+        # Pump-noise keys from an INDEPENDENT fold_in of batch_key (fold-in tag
+        # 3), so enabling pump noise cannot perturb any legacy/quantum stream.
+        pump_keys = jax.random.split(jax.random.fold_in(batch_key, 3), B)
+        return key_arr, noise_keys, qnoise_keys, pump_keys
 
     def _segment_schedule(self, sweep_rate: float) -> list[tuple[float, int]]:
         """(delta_center, t_seg) per segment: the blue->red sweep + final hold.
@@ -173,6 +190,51 @@ class DatasetGenerator:
             lambda k, scale: noise_model.sample(k, int(t_seg)) * scale,
             in_axes=(0, 0),
         )(seg_noise_keys, noise_scale_arr)
+
+    def _segment_pump(self, seg_pump_keys, pump_h0_arr, rin_floor_arr, t_seg):
+        """Per-segment pump-laser noise sequences (freq contribution + RIN scale).
+
+        Returns ``(freq_contrib, pump_scale_seq)`` where ``freq_contrib`` is the
+        -2*pi*delta_nu_p(t) contribution to delta_omega, shape (B, t_seg) rad/s
+        (zeros when frequency noise is inactive), and ``pump_scale_seq`` is the
+        per-round-trip pump-power scale 1 + eps(t), shape (B, t_seg), or ``None``
+        when RIN is inactive for the WHOLE batch (so the solver traces the
+        legacy constant-kick path). Synthesis is host-side float64 via
+        :class:`simulator.noise_models.PumpNoise`, one independent draw per
+        trajectory from the per-segment folded key. Like ``_segment_noise`` the
+        pump sequence restarts per segment (same documented cadence).
+
+        A trajectory's channel is "active" only above a generous off-threshold
+        (h0 > 0 Hz²/Hz; RIN floor > -200 dBc/Hz), so the disabled defaults
+        (h0 = 0, floor = -300) leave the batch on the zero/None fast path.
+        """
+        from simulator.noise_models import PumpNoise
+
+        B = len(pump_h0_arr)
+        freq_contrib = np.zeros((B, int(t_seg)), dtype=np.float64)
+        any_rin = any(float(rf) > -200.0 for rf in rin_floor_arr)
+        scale = np.ones((B, int(t_seg)), dtype=np.float64) if any_rin else None
+
+        for i in range(B):
+            h0 = float(pump_h0_arr[i])
+            rf = float(rin_floor_arr[i])
+            freq_on = h0 > 0.0
+            rin_on = rf > -200.0
+            if not (freq_on or rin_on):
+                continue
+            cfg_i = dict(self.config)
+            cfg_i["pump_noise_enabled"] = 1
+            cfg_i["pump_freq_noise_h0_hz2_per_hz"] = h0 if freq_on else 0.0
+            cfg_i["pump_rin_floor_dbc_per_hz"] = rf if rin_on else -300.0
+            pump_i = PumpNoise(cfg_i, enabled=1)
+            kf, kr = jax.random.split(seg_pump_keys[i], 2)
+            if freq_on:
+                freq_contrib[i] = -np.asarray(pump_i.sample_freq(kf, int(t_seg)))
+            if rin_on:
+                scale[i] = np.maximum(
+                    1.0 + np.asarray(pump_i.sample_rin(kr, int(t_seg))), 0.0
+                )
+        return freq_contrib, scale
 
     def _forward_fill_labels(self, label_history: np.ndarray, t_total: int) -> np.ndarray:
         # Each snapshot label is forward-filled for snapshot_interval round trips.
@@ -214,9 +276,12 @@ class DatasetGenerator:
         gamma_th_scalar = gamma_ths.pop()
 
         noise_scale_arr = jnp.array([float(p["noise_scale"]) for p in params], dtype=jnp.float32)
+        # Optional per-trajectory pump-laser-noise parameters (default: disabled).
+        pump_h0_arr = [float(p.get("pump_h0", 0.0)) for p in params]
+        rin_floor_arr = [float(p.get("rin_floor", -300.0)) for p in params]
         schedule = self._segment_schedule(sweep_rate)
 
-        key_arr, noise_keys, qnoise_keys = self._make_keys(
+        key_arr, noise_keys, qnoise_keys, pump_keys = self._make_keys(
             batch_global_idx=batch_global_idx, B=B
         )
 
@@ -247,8 +312,27 @@ class DatasetGenerator:
             seg_field_keys = _fold_batch(key_arr, seg_idx)
             seg_noise_keys = _fold_batch(noise_keys, seg_idx)
             seg_qnoise_keys = _fold_batch(qnoise_keys, seg_idx)
+            seg_pump_keys = _fold_batch(pump_keys, seg_idx)
             noise_seqs = self._segment_noise(
                 noise_model, seg_noise_keys, noise_scale_arr, t_seg
+            )
+
+            # Pump-laser noise: sum -2*pi*delta_nu_p into the detuning-noise axis
+            # and build the RIN pump-power scale (None when inactive -> legacy
+            # constant-kick path). Both default-off, so legacy datasets are
+            # unaffected. noise_seqs is float32 here (generator convention); the
+            # solver upcasts to float64 internally.
+            pump_freq_contrib, pump_scale_seq = self._segment_pump(
+                np.asarray(seg_pump_keys), pump_h0_arr, rin_floor_arr, t_seg
+            )
+            if np.any(pump_freq_contrib):
+                noise_seqs = noise_seqs + jnp.asarray(
+                    pump_freq_contrib, dtype=noise_seqs.dtype
+                )
+            pump_scale_arg = (
+                None
+                if pump_scale_seq is None
+                else jnp.asarray(pump_scale_seq, dtype=jnp.float64)
             )
 
             out = _PER_TRAJ(
@@ -281,6 +365,7 @@ class DatasetGenerator:
                 self.qnoise_scale,
                 self.enable_quantum_noise,
                 False,          # qnoise_roundtrip: fine cadence (M=1 here, identical)
+                pump_scale_arg,  # RIN pump-power scale (None = legacy constant kick)
             )
             # Carry field and thermal state forward across segment boundary
             e_carry = jnp.array(out["e_final"], dtype=jnp.complex64)

@@ -1,0 +1,42 @@
+{
+  "seed": 7,
+  "n_tau": 8192,
+  "soliton_dw_kappa": 11.0,
+  "ecdl_preset": {
+    "pump_noise_enabled": 1,
+    "pump_freq_noise_h0_hz2_per_hz": 3000.0,
+    "pump_freq_noise_hm1_hz3_per_hz": 10000000000.0,
+    "pump_rin_floor_dbc_per_hz": -300.0,
+    "pump_rin_excess_dbc_per_hz": -300.0,
+    "pump_rin_corner_hz": 10000.0
+  },
+  "psd": {
+    "lorentzian_linewidth_hz": 9424.77796076938,
+    "freq_worst_octave_dB": 0.5983093342914637,
+    "rin_worst_octave_dB": 1.0513952567749942
+  },
+  "dw_recoil": {
+    "taylor": {
+      "frep_wander_hz": 1.237618026642551e-07,
+      "common_mode_wander_hz": 3435466.2967461674,
+      "ratio": 3.6024746562489523e-14
+    },
+    "measured": {
+      "frep_wander_hz": 687.0541444633475,
+      "common_mode_wander_hz": 3476426.597976714,
+      "ratio": 0.00019763228852961087
+    },
+    "enhancement_measured_over_taylor": 5486014681.235645
+  },
+  "rin_thermal": {
+    "R_th_K_per_W": 0.5442897318819556,
+    "P_abs0_W": 1.730058491341386e-05,
+    "eps_amp": 0.1,
+    "f_mod_Hz": 31830.988618379066,
+    "thermal_lowpass_H": 0.7071067811865476,
+    "deltaT_measured_K": 6.677465191684273e-07,
+    "deltaT_predicted_K": 6.658492730137449e-07,
+    "deltaT_dc_R_th_P_abs_eps_K": 9.416530723923037e-07,
+    "rel_error": 0.0028493628086356804
+  }
+}

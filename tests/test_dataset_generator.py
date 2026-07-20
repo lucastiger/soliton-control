@@ -237,7 +237,7 @@ def test_segment_noise_restarts_at_zero_tripwire(tmp_path):
     ``legacy_segment_noise`` migration has a pinned baseline to flip.
     """
     gen = _make_gen(tmp_path)
-    _, noise_keys, _ = gen._make_keys(batch_global_idx=0, B=4)
+    _, noise_keys, _, _ = gen._make_keys(batch_global_idx=0, B=4)
     seg_keys = jax.vmap(jax.random.fold_in, in_axes=(0, None))(noise_keys, 0)
     nm = TotalNoise(nm_load_cfg(None))
     t_seg = 2000

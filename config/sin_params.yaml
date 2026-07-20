@@ -145,6 +145,37 @@ physical_parameters:
   # ~ 5.6 dB); averaging w modes leaves ~5.6/sqrt(w) ~ 2 dB at w = 8.
   labeler_envelope_smooth_modes: 8
 
+  # ---- Pump-laser noise: frequency noise + RIN (arXiv:2604.05897 V.B.4-V.B.5) -
+  # Two channels, both synthesized HOST-SIDE in float64, one sample per round
+  # trip at f_s = 1/t_r, and both fed into the SAME equations of motion the
+  # intracavity dynamics already integrate (the solver IS the transfer
+  # function: cavity low-pass + quadrature rotation emerge automatically, and
+  # RIN -> P_abs -> DeltaT -> detuning is transduced by the existing thermal
+  # pathway with no extra code). Booleans are 0/1 ints (same numeric-leaves
+  # convention as the quantum block; tests/test_config.py locks this in).
+  #
+  # Master switch. 0 = OFF (default): frequency noise adds a zero sequence
+  # (no-op) and the RIN pump scale is None, so the solver is bit-identical to
+  # the legacy path. enabled = 0 forces BOTH channels inert regardless of the
+  # numbers below.
+  pump_noise_enabled: 0
+  # Frequency-noise PSD S_dnu(f) = h0 + h-1/f [Hz^2/Hz], on
+  # f in [1/(t_slow*t_r), 1/(2*t_r)]. The white plateau h0 carries the
+  # intrinsic Lorentzian linewidth via Delta_nu_L = pi*h0. Representative:
+  #   ECDL       ~ 3e3  Hz^2/Hz  -> Delta_nu_L ~ 10 kHz;
+  #   fiber laser ~ 30  Hz^2/Hz  -> Delta_nu_L ~ 100 Hz.
+  pump_freq_noise_h0_hz2_per_hz: 0.0
+  # Flicker (1/f) coefficient h-1 [Hz^3/Hz]. Representative ECDL ~ 1e10.
+  pump_freq_noise_hm1_hz3_per_hz: 0.0
+  # RIN PSD S_eps(f) = 10^(floor/10) + 10^(excess/10)*(f_c/f) for f < f_c
+  # (floor-only above f_c), all in dBc/Hz. Defaults ~ -300 dBc/Hz (= OFF).
+  # Validation rejects values above -80 dBc/Hz (guards against a LINEAR
+  # spectral density accidentally entered where dBc/Hz is expected).
+  pump_rin_floor_dbc_per_hz: -300.0
+  pump_rin_excess_dbc_per_hz: -300.0
+  # RIN corner frequency f_c [Hz] (excess 1/f rolls off above it).
+  pump_rin_corner_hz: 1.0e+4
+
   # ---- chi2 channels: ZERO for SiN (centrosymmetric: no Pockels, no pyroelectric) ----
   eo_r33_m_per_v: 0.0
   pyroelectric_coeff_c_per_m2_k: 0.0
