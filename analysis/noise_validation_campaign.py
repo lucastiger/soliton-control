@@ -580,7 +580,7 @@ def workstream2(out_dir, seeds, quick):
         n_ens = min(seeds, 3)
     else:
         swp = dict(n_tau=4096, n_solitons=5, n_steps=101, settle_rt=6000,
-                   hold_rt=800, dw_start_kappa=12.0, dw_stop_kappa=5.5)
+                   hold_rt=1000, dw_start_kappa=12.0, dw_stop_kappa=5.5)
         n_ens = min(seeds, 6)
 
     cav = attach_dispersion(load_cavity_params(CONFIG_PATH), swp["n_tau"])
@@ -627,31 +627,59 @@ def workstream2(out_dir, seeds, quick):
     ens_pintra = np.array(ens_pintra) if n_ok else np.zeros((0, det_k.size))
     success_rate = float(np.mean(ens_single)) if ens_single else float("nan")
 
-    # --- per-transition bias vs jitter (match by (n_high, n_low) identity) ---
-    trans_rows = []
-    for dt in det_trans:
-        key = (dt["n_high_side"], dt["n_low_side"])
-        locs = []
-        for c in ens_counts:
-            tr = soliton_count_transitions(det_k, c)
-            match = [t["dw_mid"] for t in tr
-                     if (t["n_high_side"], t["n_low_side"]) == key]
-            if match:
-                locs.append(match[0])
-        if not locs:
+    # --- step-location bias vs jitter via ROBUST LEVEL-CROSSINGS ---
+    # A coarse warm-continuation grid merges adjacent annihilations (5->3 instead
+    # of 5->4->3), so exact (n_high, n_low) matching is fragile and low-N. The
+    # soliton-number boundary "detuning at which the count first drops to <= k",
+    # scanning down the sweep, is well-defined for EVERY level k regardless of
+    # merging, giving one matched boundary per level per realization. Bias is the
+    # ensemble-mean offset from the deterministic boundary; jitter is the per-seed
+    # std -- exactly the jitter-vs-bias split the prompt asks for.
+    def _level_crossing(dw_desc, count, k):
+        below = np.where(np.asarray(count) <= k)[0]
+        return float(dw_desc[below[0]]) if below.size else None
+
+    level_rows = []
+    for k in range(int(swp["n_solitons"]) - 1, -1, -1):
+        det_cross = _level_crossing(det_k, det_count, k)
+        if det_cross is None:
             continue
-        locs = np.array(locs)
-        mean_loc = float(locs.mean())
-        jitter = float(locs.std(ddof=1)) if locs.size > 1 else 0.0
-        bias = mean_loc - dt["dw_mid"]
-        trans_rows.append({
-            "transition": f"{key[0]}->{key[1]}",
-            "deterministic_dw_kappa": float(dt["dw_mid"]),
+        on_cross = [x for x in (_level_crossing(det_k, c, k) for c in ens_counts)
+                    if x is not None]
+        if len(on_cross) < 2:
+            continue
+        on_cross = np.array(on_cross)
+        mean_loc = float(on_cross.mean())
+        jitter = float(on_cross.std(ddof=1))
+        bias = mean_loc - det_cross
+        level_rows.append({
+            "boundary": f"N<={k}",
+            "deterministic_dw_kappa": det_cross,
             "ensemble_mean_dw_kappa": mean_loc,
             "bias_kappa": bias,
             "jitter_kappa": jitter,
+            "n_realizations": int(on_cross.size),
+            "per_seed_dw_kappa": [float(x) for x in on_cross],
+            "bias_lt_jitter": bool(abs(bias) < 3.0 * max(jitter, 1e-12)),
+        })
+
+    # Secondary diagnostic: exact (n_high, n_low) matching (kept for provenance).
+    trans_rows = []
+    for dt in det_trans:
+        key = (dt["n_high_side"], dt["n_low_side"])
+        locs = [m[0] for c in ens_counts
+                for m in [[t["dw_mid"] for t in soliton_count_transitions(det_k, c)
+                           if (t["n_high_side"], t["n_low_side"]) == key]] if m]
+        if not locs:
+            continue
+        locs = np.array(locs)
+        trans_rows.append({
+            "transition": f"{key[0]}->{key[1]}",
+            "deterministic_dw_kappa": float(dt["dw_mid"]),
+            "ensemble_mean_dw_kappa": float(locs.mean()),
+            "bias_kappa": float(locs.mean() - dt["dw_mid"]),
+            "jitter_kappa": float(locs.std(ddof=1)) if locs.size > 1 else 0.0,
             "n_realizations": int(locs.size),
-            "bias_lt_jitter": bool(abs(bias) < 3.0 * max(jitter, 1e-9) or jitter == 0.0),
         })
 
     # --- per-detuning soliton-number probability ---
@@ -684,17 +712,17 @@ def workstream2(out_dir, seeds, quick):
     plt.close(fig)
 
     fig, axs = plt.subplots(1, 2, figsize=(9.6, 3.8))
-    if trans_rows:
-        y = np.arange(len(trans_rows))
-        axs[0].errorbar([r["ensemble_mean_dw_kappa"] for r in trans_rows], y,
-                        xerr=[r["jitter_kappa"] for r in trans_rows], fmt="o",
+    if level_rows:
+        y = np.arange(len(level_rows))
+        axs[0].errorbar([r["ensemble_mean_dw_kappa"] for r in level_rows], y,
+                        xerr=[r["jitter_kappa"] for r in level_rows], fmt="o",
                         capsize=3, label=r"ON mean $\pm$ jitter")
-        axs[0].plot([r["deterministic_dw_kappa"] for r in trans_rows], y, "kx",
+        axs[0].plot([r["deterministic_dw_kappa"] for r in level_rows], y, "kx",
                     ms=8, label="deterministic")
         axs[0].set_yticks(y)
-        axs[0].set_yticklabels([r["transition"] for r in trans_rows])
+        axs[0].set_yticklabels([r["boundary"] for r in level_rows])
         axs[0].set_xlabel(r"switching detuning $\delta\omega/\kappa$")
-        axs[0].set_title("Step location: bias vs jitter")
+        axs[0].set_title("Step location: bias vs jitter (level crossings)")
         axs[0].legend(fontsize=7)
     for k in range(max_n + 1):
         if prob[k].max() > 0:
@@ -706,7 +734,7 @@ def workstream2(out_dir, seeds, quick):
     fig.savefig(out_dir / "staircase_step_jitter.png")
     plt.close(fig)
 
-    all_bias_ok = all(r["bias_lt_jitter"] for r in trans_rows) if trans_rows else False
+    all_bias_ok = all(r["bias_lt_jitter"] for r in level_rows) if level_rows else False
     block = {
         "sweep_config": swp, "ensemble_requested": n_ens, "ensemble_ok": n_ok,
         "dropped": dropped,
@@ -714,7 +742,8 @@ def workstream2(out_dir, seeds, quick):
         "deterministic_single_dks_region_kappa": [det_lo, det_hi],
         "deterministic_annihilation_kappa": det_annih,
         "deterministic_power_step_locations_kappa": [float(x) for x in det_steps["step_x"]],
-        "transitions": trans_rows,
+        "level_crossings": level_rows,
+        "exact_transition_matches": trans_rows,
         "all_bias_lt_jitter": all_bias_ok,
         "soliton_number_probability_detuning_kappa": det_k,
         "soliton_number_probability": {str(k): prob[k] for k in range(max_n + 1)},
@@ -727,13 +756,13 @@ def workstream2(out_dir, seeds, quick):
     print(f"  ensemble: {n_ok}/{n_ens} realizations survived pre-settle "
           f"({len(dropped)} dropped)")
     print(f"  single-soliton access success rate: {success_rate:.2%}")
-    print(f"  {'transition':>10} {'determ':>9} {'ON mean':>9} {'bias':>8} "
+    print(f"  {'boundary':>10} {'determ':>9} {'ON mean':>9} {'bias':>8} "
           f"{'jitter':>8} {'bias<jit':>8}  [kappa]")
-    for r in trans_rows:
-        print(f"  {r['transition']:>10} {r['deterministic_dw_kappa']:>9.3f} "
+    for r in level_rows:
+        print(f"  {r['boundary']:>10} {r['deterministic_dw_kappa']:>9.3f} "
               f"{r['ensemble_mean_dw_kappa']:>9.3f} {r['bias_kappa']:>+8.4f} "
               f"{r['jitter_kappa']:>8.4f} {str(r['bias_lt_jitter']):>8}")
-    print(f"\n  all matched transitions have |bias| < 3*jitter: {all_bias_ok}")
+    print(f"\n  all soliton-number boundaries have |bias| < 3*jitter: {all_bias_ok}")
     print("=" * 72 + "\n")
     return block
 

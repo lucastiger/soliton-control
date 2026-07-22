@@ -106,10 +106,10 @@ def test_w2_single_soliton_access_and_bias(report):
     w2 = _need(report, "workstream2_staircase")
     assert w2["single_soliton_success_rate"] >= 0.5
     assert w2["all_bias_lt_jitter"] is True
-    # bias must actually be smaller than jitter for each matched transition.
-    for t in w2["transitions"]:
-        if t["jitter_kappa"] > 0:
-            assert abs(t["bias_kappa"]) < 3.0 * t["jitter_kappa"]
+    # bias must be smaller than 3*jitter for each robust soliton-number boundary.
+    assert len(w2["level_crossings"]) >= 1
+    for t in w2["level_crossings"]:
+        assert abs(t["bias_kappa"]) < 3.0 * max(t["jitter_kappa"], 1e-12)
 
 
 # ---- Workstream 3: cross-realization linewidth ----------------------------
