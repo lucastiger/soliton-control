@@ -410,6 +410,20 @@ def test_dw_recoil_taylor_negative_control(dw_recoil_committed):
         m["s_rep_ratio_measured_over_taylor"])
 
 
+def test_dw_recoil_summary_presets_and_caveat(dw_recoil_committed):
+    """The top-level pump-noise summary presets mirror the per-run sub-dicts
+    (self-consistent, not None), and the curvature-significance caveat string
+    is present so a reader cannot over-read the within-record ~256σ."""
+    m = dw_recoil_committed
+    assert m["pump_h0_hz2_per_hz"] is not None
+    assert m["pump_h0_hz2_per_hz"] == m["measured_D_int"]["pump_h0_hz2_per_hz"]
+    assert m["pump_hm1_hz3_per_hz"] is not None
+    assert m["pump_hm1_hz3_per_hz"] == m["measured_D_int"]["pump_hm1_hz3_per_hz"]
+    caveat = m.get("curvature_significance_caveat")
+    assert isinstance(caveat, str) and caveat.strip(), caveat
+    assert "within-record" in caveat and "Taylor" in caveat, caveat
+
+
 @pytest.mark.skipif(
     not _RUN_SLOW,
     reason="slow (~6 min) DW-recoil re-run; set RUN_SLOW_REGRESSION=1. The "

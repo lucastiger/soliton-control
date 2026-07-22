@@ -184,7 +184,10 @@
     "pump_h0_hz2_per_hz": 3000.0,
     "pump_hm1_hz3_per_hz": 10000000000000.0,
     "operating_dw_over_kappa": 10.0,
+    "curvature_significance_caveat": "The measured-D_int curvature significance (~256 sigma) is a within-record segment-resampling (Welch-segment bootstrap) estimate of how well this record's parabola is resolved above its own noise, not a run-to-run reproducibility bound. The physical discriminator between genuine DW-recoil and a numerical artifact is the flat Taylor-D2 control (a2 = 0, S_rep ratio >= 1e6x), not the sigma magnitude.",
     "measured_D_int": {
+      "pump_h0_hz2_per_hz": 3000.0,
+      "pump_hm1_hz3_per_hz": 10000000000000.0,
       "probe_mus": [
         -750,
         -600,
@@ -224,6 +227,8 @@
       "soliton_contrast": 209.73307735946085
     },
     "taylor_D2": {
+      "pump_h0_hz2_per_hz": 3000.0,
+      "pump_hm1_hz3_per_hz": 10000000000000.0,
       "probe_mus": [
         -750,
         -600,
@@ -268,10 +273,10 @@
   },
   "provenance": {
     "script": "analysis/noise_comparison_report.py",
-    "git_commit": "1aa86522277d",
+    "git_commit": "60ddabe9f7ab",
     "physical_parameters_sha256": "d22dde09b04925b38f58a4078a1b58dc9457796a2ed88e2e67748b0d4feb28d8",
     "seed": 7,
     "quick": false,
-    "generated_utc": "2026-07-22T01:05:25Z"
+    "generated_utc": "2026-07-22T08:41:14Z"
   }
 }
