@@ -22,9 +22,20 @@ figure in ``analysis/results/noise_comparison_report.json``:
    per-line phase floor of this device sits above the TRN S_rep, which the
    figure shows honestly).
 6. ``linewidth_vs_mu.png``         — per-line effective linewidth
-   (beta-separation-line integral) vs mode index with the fitted parabola
-   and fix point annotated (Lei et al. 2021 phenomenology), quantum + white
-   pump frequency noise, measured D_int grid (DW-recoil transduction).
+   (beta-separation-line integral) vs mode index, WHITE-PUMP NULL BASELINE:
+   quantum + white pump frequency noise at the deep operating point
+   transduces almost pure common mode, so the curvature is not significant.
+   The DW-recoil positive result is figure 6b below.
+6b. ``linewidth_vs_mu_dwrecoil.png`` — the DW-recoil positive demonstration
+   (Lei et al. 2021 phenomenology, paper V.B.1): measured-D_int (dispersive-
+   wave recoil transduces pump frequency noise into a repetition-rate shift)
+   gives a resolvable, significant linewidth parabola with fix point
+   mu_fix = -S_cr/S_rep, overlaid against the Taylor-D2 negative control
+   (pure quadratic dispersion -> pure common mode -> S_rep -> 0 -> flat). The
+   pump is flicker-dominated (the beta-line linewidth is a low-frequency
+   probe, where 1/f laser noise and DW recoil both live and the soliton
+   stays healthy). mu_fix from the parabola vertex is cross-checked against
+   the direct -Re S_cr/S_rep estimator.
 7. ``quiet_point_sweep.png``       — S_rep at a fixed offset vs detuning,
    measured D_int vs Taylor D2 (paper Sec. V.B.5 quiet-point signature; the
    minimum may be shallow for this device — whatever the physics gives).
@@ -507,8 +518,9 @@ def fig6_linewidth_parabola(cfg_lw: str, seed: int, n_tau: int, t_slow: int,
                label=f"CSD fix point $\\mu_{{fix}} = {mu_fix_direct:.0f}$")
     ax.set_xlabel(r"mode index $\mu$")
     ax.set_ylabel("effective linewidth [MHz]")
-    ax.set_title("Comb-line linewidth vs mode index "
-                 "(quantum + white pump frequency noise, measured $D_{int}$)")
+    ax.set_title("Comb-line linewidth vs mode index — WHITE-PUMP NULL BASELINE\n"
+                 "(quantum + white pump freq noise, measured $D_{int}$; the "
+                 "DW-recoil positive result is linewidth_vs_mu_dwrecoil)")
     ax.legend(fontsize=7)
     fig.savefig(FIG_DIR / "linewidth_vs_mu.png")
     plt.close(fig)
@@ -517,6 +529,12 @@ def fig6_linewidth_parabola(cfg_lw: str, seed: int, n_tau: int, t_slow: int,
         coef[0] > 0 and (linewidths.max() - linewidths.min())
         > 0.05 * linewidths.mean())
     return {
+        "role": "white-pump null baseline: the white-plateau pump preset at "
+                "the deep operating point transduces almost pure common mode, "
+                "so the β-line curvature is dominated by estimator noise and "
+                "is NOT significant. The DW-recoil positive demonstration "
+                "(flicker pump, low-f-resolved linewidths) is in "
+                "fig6_linewidth_dwrecoil / linewidth_vs_mu_dwrecoil.png.",
         "probe_mus": list(map(int, probe_mus)),
         "linewidths_hz": [float(x) for x in linewidths],
         "parabola_coef_fwhm2": [float(c) for c in coef],
@@ -524,6 +542,232 @@ def fig6_linewidth_parabola(cfg_lw: str, seed: int, n_tau: int, t_slow: int,
         "mu_fix_direct_csd": mu_fix_direct,
         "curvature_positive_and_significant": curvature_significant,
         "pump_h0_hz2_per_hz": LINEWIDTH_H0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Figure 6b: DW-recoil linewidth-vs-mu parabola (measured D_int) + Taylor
+# negative control (Q3 closing validation B)
+# ---------------------------------------------------------------------------
+# Pump preset for the DW-recoil linewidth study: an ECDL white plateau plus a
+# STRONG flicker (1/f) term. The β-separation-line linewidth is dominated by
+# LOW-frequency frequency noise, which is exactly where (a) 1/f laser noise
+# lives and (b) the measured dispersion's dispersive-wave recoil transduces
+# pump frequency noise into a group-velocity / repetition-rate shift. Flicker
+# also keeps the soliton healthy (its high-frequency power — which would
+# destabilize the soliton — stays low, unlike a strong white plateau, which
+# destroys the soliton at the levels needed for a comparable recoil signal).
+DW_RECOIL_H0 = 3.0e3     # Hz^2/Hz (ECDL white plateau, Δν_L = π·h0 ≈ 9.4 kHz)
+DW_RECOIL_HM1 = 1.0e13   # Hz^3/Hz (strong flicker: the low-f DW-recoil driver)
+# Symmetric probe modes kept INSIDE the good-SNR core of the comb (|E_μ| well
+# above the vacuum floor at both dispersions), so the Taylor control's far
+# lines are not spuriously broadened by low-SNR phase noise.
+DW_RECOIL_PROBE_MUS = (-750, -600, -450, -300, -150, 150, 300, 450, 600, 750)
+
+
+def _line_linewidths(phases, t_r, probe_mus, nperseg):
+    """Per-line β-separation-line effective linewidths [Hz], detrend OFF.
+
+    ``detrend=False`` in the Welch estimate is essential: the default
+    per-segment constant detrend removes the low-frequency flicker / DW-recoil
+    content that the β-separation-line linewidth integral fundamentally
+    depends on (with it on, near-fix-point lines floor at 0 and the parabola
+    cannot be located). No metrology-numerics change — the ``detrend`` knob is
+    an existing parameter of ``frequency_noise_psd``.
+    """
+    out = []
+    for j in range(len(probe_mus)):
+        f, s = frequency_noise_psd(phases[:, j], t_r, nperseg=nperseg,
+                                   detrend=False)
+        out.append(effective_linewidth(f, s))
+    return np.asarray(out)
+
+
+def _dw_recoil_run(cfg, measured, seed, n_tau, t_slow, probe_mus, numerics,
+                   n_boot):
+    cav = load_cavity_params(CONFIG_PATH)
+    if measured:
+        cav = attach_dispersion(cav, n_tau)
+    dw = SOLITON_DW_KAPPA * cav.kappa
+    seed_field = sech_soliton_seed(dw, cav, n_tau=n_tau, pin=PIN_W)
+    s0 = _quiet(_run, dw, 2000, cav, e0=seed_field, seed=seed, n_tau=n_tau,
+                pin=PIN_W, snapshot_interval=2000, config_path=cfg, **numerics)
+    sol = _quiet(_run, dw, t_slow, cav, e0=np.asarray(s0["e_final"])[0],
+                 delta_t0=float(np.asarray(s0["delta_t_final"]).ravel()[0]),
+                 seed=seed + 1, n_tau=n_tau, pin=PIN_W,
+                 snapshot_interval=max(t_slow // 16, 1), config_path=cfg,
+                 mode_probe_indices=probe_mus, **numerics)
+    probes = np.asarray(sol["mode_probe_history"])[0][t_slow // 4:]
+    e_final = np.asarray(sol["e_final"])[0]
+    contrast = float((np.abs(e_final) ** 2).max()
+                     / max((np.abs(e_final) ** 2).mean(), 1e-300))
+    phases = unwrapped_phases(probes)
+    mus = np.asarray(probe_mus, dtype=float)
+    nseg = min(1 << 12, phases.shape[0] // 8)
+
+    # Per-line β-separation-line linewidths AND their significance from ONE
+    # consistent estimator: the per-segment frequency-noise periodograms
+    # (Welch segments via scipy.spectrogram, Hann window, no overlap,
+    # detrend OFF so the low-frequency 1/f + DW-recoil content the β-line
+    # integral needs is preserved). The POINT linewidth of each line is the
+    # β-integral of the mean-over-segments PSD; the significance is a
+    # SEGMENT-RESAMPLING bootstrap (resample the intact, continuous segments
+    # with replacement, re-average, refit) — this preserves each segment's
+    # low-f content, unlike a moving-block time bootstrap whose concatenation
+    # discontinuities corrupt it (and unlike the raw parabola-fit covariance,
+    # whose near-zero residual on this deterministic-transduction parabola
+    # overstates significance). No metrology-numerics change: the
+    # β-separation-line rule and the frequency-noise definition are the same
+    # as analysis/noise_metrology.effective_linewidth / frequency_noise_psd.
+    from scipy.signal import spectrogram
+
+    dnu = np.diff(phases, axis=0) / (2.0 * math.pi * cav.t_r)   # (N-1, n_probe)
+    f_sg, _t_sg, sxx = spectrogram(
+        dnu, fs=1.0 / cav.t_r, nperseg=int(nseg), noverlap=0, window="hann",
+        detrend=False, scaling="density", mode="psd", axis=0)   # (nf, n_probe, nseg)
+    n_seg = sxx.shape[-1]
+    keep = f_sg > 0
+    f_pos = f_sg[keep]
+    sxx = sxx[keep]                                             # (nf, n_probe, nseg)
+    beta = 8.0 * math.log(2.0) * f_pos / math.pi ** 2          # β-separation line
+
+    def _lw_from_psd(psd_lines):                                # (nf, n_probe) -> (n_probe,)
+        area = np.trapezoid(np.where(psd_lines > beta[:, None], psd_lines, 0.0),
+                            f_pos, axis=0)
+        return np.sqrt(8.0 * math.log(2.0) * np.maximum(area, 0.0))
+
+    lw = _lw_from_psd(sxx.mean(axis=2))                        # point estimate
+    coef, cov = np.polyfit(mus, lw ** 2, 2, cov=True)
+    a2 = float(coef[0])
+    mu_fix_vertex = float(-coef[1] / (2.0 * coef[0])) if coef[0] != 0 else float("nan")
+
+    rng = np.random.default_rng(0)
+    a2_boot = []
+    for _ in range(max(int(n_boot), 100)):
+        pick = rng.integers(0, n_seg, n_seg)
+        lwb = _lw_from_psd(sxx[:, :, pick].mean(axis=2))
+        a2_boot.append(np.polyfit(mus, lwb ** 2, 2)[0])
+    a2_boot = np.asarray(a2_boot)
+    a2_med = float(np.median(a2_boot))
+    a2_std = float(np.std(a2_boot, ddof=1))
+    # A flat control (all linewidths at the β-floor -> a2 == 0, std == 0) has
+    # ZERO significant curvature, not infinite (0/0). Only a genuinely
+    # nonzero, perfectly reproduced a2 would be infinitely significant.
+    if a2_std > 0:
+        sig = float(a2 / a2_std)
+    elif a2 == 0.0:
+        sig = 0.0
+    else:
+        sig = float("inf")
+
+    # Direct fix point −Re S_cr(f)/S_rep(f) over the low band where the
+    # flicker-driven DW-recoil dominates; S_rep from the extreme-pair
+    # half-difference, S_cr from its CSD with the half-sum common mode.
+    phi_rep = rep_rate_phase(phases, probe_mus, 0, len(probe_mus) - 1)
+    phi_c = 0.5 * (phases[:, 0] + phases[:, -1])
+    f_r, s_rep = frequency_noise_psd(phi_rep, cav.t_r, nperseg=nseg,
+                                     detrend=False)
+    f_x, s_cr = cross_frequency_psd(phi_c, phi_rep, cav.t_r, nperseg=nseg)
+    band = (f_r > 1e5) & (f_r < 1e7)
+    mu_fix_direct = float(np.median(
+        -np.real(s_cr[band]) / np.maximum(np.abs(s_rep[band]), 1e-300)))
+    s_rep_band = float(np.median(s_rep[band]))
+
+    return {
+        "linewidths_hz": lw,
+        "mus": mus,
+        "coef": coef,
+        "a2": a2,
+        "a2_bootstrap_median": a2_med,
+        "a2_bootstrap_std": a2_std,
+        "curvature_significance_sigma": sig,
+        "mu_fix_vertex": mu_fix_vertex,
+        "mu_fix_direct": mu_fix_direct,
+        "s_rep_band_hz2_per_hz": s_rep_band,
+        "soliton_contrast": contrast,
+    }
+
+
+def fig6_linewidth_dwrecoil(cfg_dw: str, seed: int, n_tau: int, t_slow: int,
+                            numerics: dict, *, n_boot: int = 200,
+                            probe_mus=DW_RECOIL_PROBE_MUS) -> dict:
+    """DW-recoil comb-line linewidth parabola (measured D_int) vs Taylor control.
+
+    Physics (paper V.B.1, Lei et al. 2021): the comb-line frequency-noise PSD
+    decomposes as S_μ(f) = S_c(f) + 2μ S_cr(f) + μ² S_rep(f); the β-line
+    effective linewidth is therefore a parabola in μ with vertex at the fix
+    point μ_fix = −S_cr/S_rep. With PURE quadratic dispersion (Taylor) pump
+    frequency noise is transferred equally to every line (pure common mode ⇒
+    S_rep → 0 ⇒ no curvature). With the MEASURED d_int_grid, dispersive-wave
+    recoil converts pump frequency noise into a repetition-rate shift ⇒
+    S_rep > 0 ⇒ a resolvable, significant parabola. This function runs both,
+    fits the parabola, bootstraps the curvature-coefficient significance, and
+    cross-checks μ_fix against the direct −Re S_cr/S_rep estimator.
+    """
+    res = {}
+    for name, measured in (("measured D_int", True), ("Taylor D2", False)):
+        res[name] = _dw_recoil_run(cfg_dw, measured, seed, n_tau, t_slow,
+                                   probe_mus, numerics, n_boot)
+
+    m, t = res["measured D_int"], res["Taylor D2"]
+    a2_ratio = (m["a2"] / t["a2"]) if t["a2"] not in (0.0,) else float("inf")
+    srep_ratio = (m["s_rep_band_hz2_per_hz"]
+                  / max(abs(t["s_rep_band_hz2_per_hz"]), 1e-300))
+
+    apply_pub_style()
+    fig, ax = plt.subplots(figsize=(7.4, 4.6))
+    mus = np.asarray(probe_mus, dtype=float)
+    mu_grid = np.linspace(mus.min() * 1.08, mus.max() * 1.08, 400)
+    colors = {"measured D_int": "C0", "Taylor D2": "C1"}
+    for name in ("measured D_int", "Taylor D2"):
+        r = res[name]
+        ax.plot(mus, r["linewidths_hz"] / 1e6, "o", ms=5, color=colors[name],
+                label=f"{name} (β-line linewidth)")
+        par = np.polyval(r["coef"], mu_grid)
+        ax.plot(mu_grid, np.sqrt(np.maximum(par, 0.0)) / 1e6, "-", lw=1.3,
+                color=colors[name])
+    mf = m["mu_fix_vertex"]
+    if np.isfinite(mf):
+        ax.axvline(mf, color="C3", ls=":", lw=1.1,
+                   label=f"measured $\\mu_{{fix}}$ = {mf:.0f} "
+                         f"(direct {m['mu_fix_direct']:.0f})")
+    ax.set_xlabel(r"mode index $\mu$")
+    ax.set_ylabel("effective linewidth [MHz]")
+    ax.set_title(
+        "Comb-line linewidth vs mode index: DW-recoil parabola "
+        "(measured $D_{int}$) vs Taylor control\n"
+        f"(quantum + flicker pump noise; measured curvature "
+        f"{m['curvature_significance_sigma']:.1f}σ, "
+        f"$a_2$ ratio {a2_ratio:.0f}×, $S_{{rep}}$ ratio {srep_ratio:.1e}×)")
+    ax.legend(fontsize=7, loc="upper center")
+    fig.savefig(FIG_DIR / "linewidth_vs_mu_dwrecoil.png")
+    plt.close(fig)
+
+    def _pack(r):
+        return {
+            "probe_mus": [int(x) for x in probe_mus],
+            "linewidths_hz": [float(x) for x in r["linewidths_hz"]],
+            "parabola_coef_fwhm2": [float(c) for c in r["coef"]],
+            "a2_curvature": r["a2"],
+            "a2_bootstrap_median": r["a2_bootstrap_median"],
+            "a2_bootstrap_std": r["a2_bootstrap_std"],
+            "curvature_significance_sigma": r["curvature_significance_sigma"],
+            "mu_fix_parabola_vertex": r["mu_fix_vertex"],
+            "mu_fix_direct_csd": r["mu_fix_direct"],
+            "s_rep_band_hz2_per_hz": r["s_rep_band_hz2_per_hz"],
+            "soliton_contrast": r["soliton_contrast"],
+        }
+
+    return {
+        "pump_h0_hz2_per_hz": DW_RECOIL_H0,
+        "pump_hm1_hz3_per_hz": DW_RECOIL_HM1,
+        "operating_dw_over_kappa": SOLITON_DW_KAPPA,
+        "measured_D_int": _pack(m),
+        "taylor_D2": _pack(t),
+        "a2_ratio_measured_over_taylor": a2_ratio,
+        "s_rep_ratio_measured_over_taylor": srep_ratio,
+        "mu_fix_vertex_direct_agreement_modes":
+            abs(m["mu_fix_vertex"] - m["mu_fix_direct"]),
     }
 
 
@@ -617,7 +861,7 @@ def main() -> None:
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--only", type=str, default="",
                     help="comma list of sections to (re)run: fig1,fig234,"
-                         "fig5,fig6,fig7,perf; default = all. Other "
+                         "fig5,fig6,fig6dw,fig7,perf; default = all. Other "
                          "sections keep their values from the existing "
                          "JSON (merged).")
     args = ap.parse_args()
@@ -635,6 +879,9 @@ def main() -> None:
         n_tau_lw, t_lw = 256, 4096
         frep_mus = (-60, -40, -20, 20, 40, 60)
         lw_mus = (-60, -40, -20, 20, 40, 60)
+        n_tau_dw, t_dw = 1024, 12_000
+        dw_mus = (-300, -240, -180, -120, -60, 60, 120, 180, 240, 300)
+        dw_boot = 60
         qp_grid = np.linspace(10.5, 9.5, 3)
         qp_ntau, qp_hold = 512, 3000
         n_samp = 1 << 14
@@ -647,6 +894,9 @@ def main() -> None:
         n_tau_lw, t_lw = 4096, 1 << 16
         frep_mus = (-150, -100, -50, 50, 100, 150)
         lw_mus = (-240, -160, -80, 80, 160, 240)
+        n_tau_dw, t_dw = 4096, 50_000
+        dw_mus = DW_RECOIL_PROBE_MUS
+        dw_boot = 240
         qp_grid = np.linspace(12.5, 7.5, 21)
         qp_ntau, qp_hold = 4096, 12_000
         n_samp = 1 << 17
@@ -683,6 +933,16 @@ def main() -> None:
         quantum_noise_enabled=1, quantum_noise_injection_cadence=1,
         pump_noise_enabled=1,
         pump_freq_noise_h0_hz2_per_hz=LINEWIDTH_H0)
+    # Validation-2 (DW recoil): quantum + flicker-dominated pump noise
+    # (thermal off) so the measured-D_int dispersive-wave recoil transduces
+    # pump frequency noise into a resolvable repetition-rate parabola while
+    # the soliton stays healthy; Taylor D2 is the negative control.
+    cfg_dw = _sidecar(
+        cfg_off, "dw",
+        quantum_noise_enabled=1, quantum_noise_injection_cadence=1,
+        pump_noise_enabled=1,
+        pump_freq_noise_h0_hz2_per_hz=DW_RECOIL_H0,
+        pump_freq_noise_hm1_hz3_per_hz=DW_RECOIL_HM1)
 
     metrics = {"seed": args.seed, "quick": bool(args.quick)}
     if only and RESULTS_JSON.exists():
@@ -708,9 +968,15 @@ def main() -> None:
             frep_mus, frep_numerics)
 
     if _want("fig6"):
-        print("[4/6] linewidth-vs-mu parabola (fig 6) ...")
+        print("[4/6] linewidth-vs-mu parabola (fig 6, white-pump null) ...")
         metrics["fig6_linewidth"] = fig6_linewidth_parabola(
             cfg_lw, args.seed, n_tau_lw, t_lw, lw_mus, numerics)
+
+    if _want("fig6dw"):
+        print("[4b] DW-recoil linewidth parabola vs Taylor control (fig 6b) ...")
+        metrics["fig6_linewidth_dwrecoil"] = fig6_linewidth_dwrecoil(
+            cfg_dw, args.seed, n_tau_dw, t_dw, numerics,
+            n_boot=dw_boot, probe_mus=dw_mus)
 
     if _want("fig7"):
         print("[5/6] quiet-point sweep (fig 7) ...")
@@ -720,6 +986,19 @@ def main() -> None:
     if _want("perf"):
         print("[6/6] performance overheads ...")
         metrics["performance"] = perf_overheads(args.seed, perf_ntau, perf_t)
+
+    # Provenance stamp (analysis/_provenance.py; same convention as
+    # quantum_noise_report.json): generating script, short git commit, a hash
+    # of the resolved physical_parameters block the runs derived their
+    # sidecars from, the seed, the quick flag, and a UTC timestamp. Always
+    # refreshed so it reflects the latest (possibly --only) regeneration.
+    from analysis._provenance import provenance_stamp
+
+    metrics["provenance"] = provenance_stamp(
+        "analysis/noise_comparison_report.py", args.seed,
+        physical_params=_load_config(str(CONFIG_PATH)),
+        quick=bool(args.quick),
+    )
 
     with open(RESULTS_JSON, "w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)

@@ -38,6 +38,7 @@
     "mu_fix_predicted_minus_omega0_over_d1": -7862.377602937319
   },
   "fig6_linewidth": {
+    "role": "white-pump null baseline: the white-plateau pump preset at the deep operating point transduces almost pure common mode, so the \u03b2-line curvature is dominated by estimator noise and is NOT significant. The DW-recoil positive demonstration (flicker pump, low-f-resolved linewidths) is in fig6_linewidth_dwrecoil / linewidth_vs_mu_dwrecoil.png.",
     "probe_mus": [
       -240,
       -160,
@@ -178,5 +179,99 @@
     "probe_overhead_pct": -0.08437099383389324,
     "fsr_overhead_pct": -0.6281816244834926,
     "scan_body_primitives_all_new_channels_off": 271
+  },
+  "fig6_linewidth_dwrecoil": {
+    "pump_h0_hz2_per_hz": 3000.0,
+    "pump_hm1_hz3_per_hz": 10000000000000.0,
+    "operating_dw_over_kappa": 10.0,
+    "measured_D_int": {
+      "probe_mus": [
+        -750,
+        -600,
+        -450,
+        -300,
+        -150,
+        150,
+        300,
+        450,
+        600,
+        750
+      ],
+      "linewidths_hz": [
+        63643965.119452864,
+        50917742.440885015,
+        38191080.4133063,
+        25464790.66048205,
+        12738710.749433244,
+        12714367.877679706,
+        25441231.399325624,
+        38167787.51490887,
+        50893810.080608025,
+        63621125.46691109
+      ],
+      "parabola_coef_fwhm2": [
+        7198386786.693073,
+        -1977811569.2053738,
+        -2864796371.492258
+      ],
+      "a2_curvature": 7198386786.693073,
+      "a2_bootstrap_median": 7200098196.777573,
+      "a2_bootstrap_std": 28072003.895761766,
+      "curvature_significance_sigma": 256.42582600880394,
+      "mu_fix_parabola_vertex": 0.137378806377948,
+      "mu_fix_direct_csd": 0.0027707414448865436,
+      "s_rep_band_hz2_per_hz": 434.07346341194364,
+      "soliton_contrast": 209.73307735946085
+    },
+    "taylor_D2": {
+      "probe_mus": [
+        -750,
+        -600,
+        -450,
+        -300,
+        -150,
+        150,
+        300,
+        450,
+        600,
+        750
+      ],
+      "linewidths_hz": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "parabola_coef_fwhm2": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "a2_curvature": 0.0,
+      "a2_bootstrap_median": 0.0,
+      "a2_bootstrap_std": 0.0,
+      "curvature_significance_sigma": 0.0,
+      "mu_fix_parabola_vertex": NaN,
+      "mu_fix_direct_csd": 163.9270887613255,
+      "s_rep_band_hz2_per_hz": 0.0003090890269784744,
+      "soliton_contrast": 197.00617673469566
+    },
+    "a2_ratio_measured_over_taylor": Infinity,
+    "s_rep_ratio_measured_over_taylor": 1404363.8742379989,
+    "mu_fix_vertex_direct_agreement_modes": 0.13460806493306146
+  },
+  "provenance": {
+    "script": "analysis/noise_comparison_report.py",
+    "git_commit": "1aa86522277d",
+    "physical_parameters_sha256": "d22dde09b04925b38f58a4078a1b58dc9457796a2ed88e2e67748b0d4feb28d8",
+    "seed": 7,
+    "quick": false,
+    "generated_utc": "2026-07-22T01:05:25Z"
   }
 }

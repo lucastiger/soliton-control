@@ -406,29 +406,19 @@ def main(argv=None) -> int:
     # Provenance per the repo's artifact conventions (cf.
     # scripts/artifact_manifest.py and dks_artifact_provenance.json): the
     # generating script, the commit the run was made from, a hash of the BASE
-    # config the sidecar was derived from, and the seed.
-    import hashlib
-    import subprocess
+    # config the sidecar was derived from, and the seed. Factored into the
+    # shared analysis/_provenance.py helper (legacy mode reproduces this
+    # exact stamp: full commit hash + whole-file config sha256 + seed, no
+    # quick/timestamp fields), so quantum_noise_report.json's committed
+    # stamp shape is unchanged.
+    from analysis._provenance import provenance_stamp
 
     repo_root = Path(__file__).resolve().parents[1]
-    try:
-        commit = subprocess.run(
-            ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-    except Exception:
-        commit = "unknown"
-    cfg_sha = hashlib.sha256(
-        (repo_root / "config" / "sin_params.yaml").read_bytes()
-    ).hexdigest()
-
     report = {
-        "provenance": {
-            "script": "analysis/quantum_noise_report.py",
-            "git_commit": commit,
-            "base_config_sha256": cfg_sha,
-            "seed": args.seed,
-        },
+        "provenance": provenance_stamp(
+            "analysis/quantum_noise_report.py", args.seed, legacy=True,
+            config_path=repo_root / "config" / "sin_params.yaml",
+        ),
         "seed": args.seed,
         "quick": bool(args.quick),
         "hbar_omega0_j": sol_cmp["hbar_omega0_j"],

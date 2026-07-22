@@ -345,3 +345,99 @@ def test_variance_conserved_across_psd_models(tmp_path):
     print("\n[variance conservation] Eq.129 = %.6e K^2" % var_129)
     for name, var, rel in rows:
         print(f"  {name:<24} integral = {var:.6e} K^2  (rel err {rel:.3%})")
+
+
+# ---------------------------------------------------------------------------
+# DW-recoil comb-line linewidth parabola (Q3 closing validation B)
+#
+# Physics (paper V.B.1, Lei et al. 2021): with the MEASURED d_int_grid,
+# dispersive-wave recoil transduces pump frequency noise into a
+# repetition-rate shift, so the per-line β-separation-line linewidth is a
+# significant parabola in μ with a fix point μ_fix = −S_cr/S_rep; with pure
+# quadratic (Taylor) dispersion the pump noise is pure common mode, S_rep → 0,
+# and the linewidth is flat. Tests 4-5.
+#
+# The committed noise_comparison_report.json carries the production result
+# (n_tau = 4096, 50000 RT); tests 4-5 pin it (always-on, fast). A gated slow
+# test re-runs the physics at CI fidelity to prove reproducibility.
+# ---------------------------------------------------------------------------
+import json  # noqa: E402
+import os  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+_REPORT_JSON = (Path(__file__).resolve().parents[1]
+                / "analysis" / "results" / "noise_comparison_report.json")
+_RUN_SLOW = os.environ.get("RUN_SLOW_REGRESSION", "0") == "1"
+
+
+@pytest.fixture(scope="module")
+def dw_recoil_committed():
+    data = json.loads(_REPORT_JSON.read_text())
+    assert "fig6_linewidth_dwrecoil" in data, (
+        "noise_comparison_report.json lacks fig6_linewidth_dwrecoil; "
+        "regenerate via analysis/noise_comparison_report.py --only fig6dw")
+    return data["fig6_linewidth_dwrecoil"]
+
+
+def test_dw_recoil_parabola_positive_and_significant(dw_recoil_committed):
+    """Test 4: measured-D_int DW-recoil curvature is positive, ≥3σ, and its
+    parabola-vertex fix point agrees with the direct −S_cr/S_rep estimator."""
+    me = dw_recoil_committed["measured_D_int"]
+    assert me["a2_curvature"] > 0.0, me["a2_curvature"]
+    assert me["curvature_significance_sigma"] >= 3.0, (
+        me["curvature_significance_sigma"])
+    assert abs(me["mu_fix_parabola_vertex"] - me["mu_fix_direct_csd"]) <= 5.0, (
+        me["mu_fix_parabola_vertex"], me["mu_fix_direct_csd"])
+    # the linewidths must actually rise with |μ| (a genuine parabola, not a
+    # flat set of coincidentally-fit points)
+    lw = np.asarray(me["linewidths_hz"])
+    mus = np.abs(np.asarray(me["probe_mus"], dtype=float))
+    order = np.argsort(mus)
+    assert lw[order][-1] > 3.0 * max(lw[order][0], 1.0), (lw[order][0], lw[order][-1])
+
+
+def test_dw_recoil_taylor_negative_control(dw_recoil_committed):
+    """Test 5: Taylor-D2 curvature is consistent with zero and ≥10× smaller
+    than the measured-D_int curvature — the contrast is real DW-recoil
+    physics, not an estimator artifact."""
+    m = dw_recoil_committed
+    me, ta = m["measured_D_int"], m["taylor_D2"]
+    assert ta["a2_curvature"] <= 0.1 * me["a2_curvature"], (
+        ta["a2_curvature"], me["a2_curvature"])
+    # the rep-rate transduction (tape S_rep) is present with the measured grid
+    # and absent (float64 floor) with Taylor — the clean physical discriminator
+    assert m["s_rep_ratio_measured_over_taylor"] >= 10.0, (
+        m["s_rep_ratio_measured_over_taylor"])
+
+
+@pytest.mark.skipif(
+    not _RUN_SLOW,
+    reason="slow (~6 min) DW-recoil re-run; set RUN_SLOW_REGRESSION=1. The "
+    "committed-JSON tests above pin the same result and always run.",
+)
+def test_dw_recoil_rerun_reproduces_physics():
+    """Re-run the DW-recoil physics at CI fidelity and re-assert the positive
+    result + Taylor control (reproducibility of the committed artifact)."""
+    from analysis.dks_access import CONFIG_PATH
+    from analysis.noise_comparison_report import (
+        DW_RECOIL_H0, DW_RECOIL_HM1, DW_RECOIL_PROBE_MUS, _dw_recoil_run,
+        _sidecar,
+    )
+
+    cfg = _sidecar(
+        CONFIG_PATH, "citest",
+        quantum_noise_enabled=1, quantum_noise_injection_cadence=1,
+        pump_noise_enabled=1, pump_freq_noise_h0_hz2_per_hz=DW_RECOIL_H0,
+        pump_freq_noise_hm1_hz3_per_hz=DW_RECOIL_HM1)
+    num = dict(n_substeps=4, dealias_two_thirds=True, edge_absorber=True,
+               dispersion_validity_mask=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = _dw_recoil_run(cfg, True, 7, 4096, 44_000, DW_RECOIL_PROBE_MUS,
+                           num, 120)
+        t = _dw_recoil_run(cfg, False, 7, 4096, 44_000, DW_RECOIL_PROBE_MUS,
+                           num, 120)
+    assert m["a2"] > 0.0 and m["curvature_significance_sigma"] >= 3.0
+    assert abs(m["mu_fix_vertex"] - m["mu_fix_direct"]) <= 5.0
+    assert t["a2"] <= 0.1 * m["a2"]
+    assert m["s_rep_band_hz2_per_hz"] >= 10.0 * abs(t["s_rep_band_hz2_per_hz"])
