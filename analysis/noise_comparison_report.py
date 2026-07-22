@@ -745,6 +745,8 @@ def fig6_linewidth_dwrecoil(cfg_dw: str, seed: int, n_tau: int, t_slow: int,
 
     def _pack(r):
         return {
+            "pump_h0_hz2_per_hz": DW_RECOIL_H0,
+            "pump_hm1_hz3_per_hz": DW_RECOIL_HM1,
             "probe_mus": [int(x) for x in probe_mus],
             "linewidths_hz": [float(x) for x in r["linewidths_hz"]],
             "parabola_coef_fwhm2": [float(c) for c in r["coef"]],
@@ -758,12 +760,31 @@ def fig6_linewidth_dwrecoil(cfg_dw: str, seed: int, n_tau: int, t_slow: int,
             "soliton_contrast": r["soliton_contrast"],
         }
 
+    measured_pack, taylor_pack = _pack(m), _pack(t)
+    # Top-level summary presets mirror the per-run sub-dicts (both runs share the
+    # same cfg_dw pump preset), so the summary is self-consistent with the
+    # measured_D_int / taylor_D2 blocks rather than carrying an independent copy.
     return {
-        "pump_h0_hz2_per_hz": DW_RECOIL_H0,
-        "pump_hm1_hz3_per_hz": DW_RECOIL_HM1,
+        "pump_h0_hz2_per_hz": measured_pack["pump_h0_hz2_per_hz"],
+        "pump_hm1_hz3_per_hz": measured_pack["pump_hm1_hz3_per_hz"],
         "operating_dw_over_kappa": SOLITON_DW_KAPPA,
-        "measured_D_int": _pack(m),
-        "taylor_D2": _pack(t),
+        # The measured-D_int curvature significance (~256σ) is a WITHIN-RECORD
+        # segment-resampling (Welch-segment bootstrap) estimate — how reliably
+        # this one record's parabola is resolved above its own noise — NOT a
+        # run-to-run reproducibility bound. The physical discriminator between
+        # genuine DW-recoil and a numerical artifact is the flat Taylor-D2
+        # control (a2 = 0, S_rep ratio >= 1e6x), not the sigma magnitude.
+        "curvature_significance_caveat": (
+            "The measured-D_int curvature significance (~256 sigma) is a "
+            "within-record segment-resampling (Welch-segment bootstrap) "
+            "estimate of how well this record's parabola is resolved above its "
+            "own noise, not a run-to-run reproducibility bound. The physical "
+            "discriminator between genuine DW-recoil and a numerical artifact "
+            "is the flat Taylor-D2 control (a2 = 0, S_rep ratio >= 1e6x), not "
+            "the sigma magnitude."
+        ),
+        "measured_D_int": measured_pack,
+        "taylor_D2": taylor_pack,
         "a2_ratio_measured_over_taylor": a2_ratio,
         "s_rep_ratio_measured_over_taylor": srep_ratio,
         "mu_fix_vertex_direct_agreement_modes":
