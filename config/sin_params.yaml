@@ -176,6 +176,65 @@ physical_parameters:
   # RIN corner frequency f_c [Hz] (excess 1/f rolls off above it).
   pump_rin_corner_hz: 1.0e+4
 
+  # ---- Thermorefractive-noise spectral model (arXiv:2604.05897 Eqs. 129-130) --
+  # Selects the PSD of the temperature fluctuation dT(t) driving the TRN and
+  # Pyro-EO channels (both share ONE dT sequence). String enum — one of:
+  #   single_pole            (default) the historical AR(1)/Lorentzian model;
+  #                          BIT-IDENTICAL to the pre-colored-noise code.
+  #   kondratiev_gorodetsky  analytic WGM PSD, paper Eq. 130, with the total
+  #                          variance renormalized to the Eq. 129 value
+  #                          k_B*T^2/(rho*Cp*V) (the analytic form is
+  #                          asymptotic; renormalization pins the variance to
+  #                          thermodynamics). Requires the geometry keys below.
+  #   csv                    measured/FEM tabulated PSD (Huang et al. 2019
+  #                          style), log-log interpolated, clamped flat
+  #                          outside the tabulated span.
+  # NOTE: this and the three keys marked (string)/(nullable) below are the
+  # documented exceptions to the numeric-leaves rule; tests/test_config.py
+  # carries an explicit allowlist for them.
+  trn_psd_model: single_pole
+  # Kondratiev-Gorodetsky mode geometry [m]: ring radius R and Gaussian mode
+  # half-dimensions d_a (major) >= 1.2*d_b (minor). null = unset; REQUIRED
+  # (positive) iff trn_psd_model = kondratiev_gorodetsky. The Eq. 130
+  # prefactor [R*sqrt(d_a^2-d_b^2)]^-1 degenerates for d_a ~ d_b — see the
+  # paper's rescaling remark. (nullable)
+  trn_R_m: null                     # ring radius [m]
+  trn_da_m: null                    # mode major half-dimension [m]
+  trn_db_m: null                    # mode minor half-dimension [m]
+  # CSV path for trn_psd_model = csv: two columns f [Hz], S. null = unset;
+  # REQUIRED iff the csv model is selected. (nullable string)
+  trn_psd_csv_path: null
+  # Units of the CSV's S column (string enum):
+  #   S_delta_T      temperature PSD [K^2/Hz] (default)
+  #   S_delta_omega  frequency PSD [(rad/s)^2/Hz], mapped to temperature
+  #                  units via S_dT = S_domega / C_pull^2.
+  trn_csv_units: S_delta_T
+  # Linear thermal-expansion coefficient [1/K] folded into the frequency
+  # pull: C_pull = (omega0/n0)*(dn_dT + n0*alpha_L_per_k) — the paper's
+  # "dimensional fluctuation" companion of TRN. 0.0 (default) reproduces the
+  # historical thermo-optic-only pull bit-for-bit.
+  alpha_L_per_k: 0.0
+
+  # ---- TRN-driven FSR (repetition-rate) noise (0/1 int; default 0 = OFF) ----
+  # dD1(t) = D1*domega0(t)/omega0 with domega0(t) = C_pull*dT(t) from the SAME
+  # dT sequence as the TRN channel; each mode mu acquires the extra linear
+  # detuning mu*dD1(t) inside the solver's linear operator. Magnitude: for
+  # domega0 ~ 1e5 rad/s, dD1 ~ 13 rad/s => ~1.3e4 rad/s at |mu| = 1e3 —
+  # perturbative (<< kappa) yet THE TRN-limited f_rep term. T_k = 0 kills it
+  # along with every other dT-derived channel. OFF traces zero extra ops.
+  fsr_noise_enabled: 0
+
+  # ---- Dataset-generator segment-noise cadence (0/1 int; default 1) ----------
+  # 1 = legacy: regenerate the classical noise per segment from x0 = 0
+  #     (BIT-IDENTICAL to the historical dataset generator, including its
+  #     documented decorrelation transient at every segment boundary).
+  # 0 = continuity fix: generate the FULL-trajectory noise once up front
+  #     (host, float64, PSD-synthesized — stationary from sample 0) and slice
+  #     per segment; no boundary transient.
+  # Stays 1 until the staircase regression suite is re-baselined against the
+  # continuous-noise datasets (see the colored-noise PR migration plan).
+  legacy_segment_noise: 1
+
   # ---- chi2 channels: ZERO for SiN (centrosymmetric: no Pockels, no pyroelectric) ----
   eo_r33_m_per_v: 0.0
   pyroelectric_coeff_c_per_m2_k: 0.0

@@ -418,6 +418,8 @@ def _single_trajectory_solver(
     qnoise_enabled: bool,         # static; False traces ZERO extra ops (bit-identical legacy path)
     qnoise_roundtrip: bool,       # static; True = inject once per ROUND TRIP (at fine-step m=0, scale pre-scaled to dt=t_r)
     pump_scale_sequence: jnp.ndarray | None,  # (t_slow,) per-round-trip pump-power scale 1+eps (RIN); None = fixed pump (legacy trace)
+    fsr_noise_sequence: jnp.ndarray | None,   # (t_slow,) per-round-trip FSR fluctuation dD1(t) [rad/s]; None = disabled (legacy trace)
+    mode_probe_indices: tuple[int, ...],      # static; FFT-BIN indices of probed modes, () = no probes (legacy trace)
 ) -> dict[str, jnp.ndarray]:
     """Solve one detuning trajectory with SSFM + thermal Euler update.
 
@@ -459,6 +461,24 @@ def _single_trajectory_solver(
     by construction; validation statistics must restrict to |mu| <= n_tau/3).
     When False, this function traces exactly the legacy computation — no RNG
     calls and no arithmetic are added to the scan body.
+
+    ``fsr_noise_sequence`` (TRN-driven FSR/repetition-rate noise, opt-in) is a
+    per-round-trip FSR fluctuation dD1(t) [rad/s], shape (t_slow,): each mode
+    mu acquires the extra linear detuning mu*dD1(t), applied inside the linear
+    operator as an additional term -1j*(mu_grid*dD1)*dt_sub with
+    ``mu_grid = fftfreq(n_tau)*n_tau`` built once. One fused multiply-add per
+    fine step, vectorized over n_tau, no new FFT. Like the RIN sequence it is
+    held constant across the round trip's fine/sub-steps (thermal bandwidth
+    << FSR). ``None`` (the default) selects the legacy linear operator via a
+    Python branch — the disabled path traces zero extra ops.
+
+    ``mode_probe_indices`` (static tuple of FFT-BIN indices; () = disabled)
+    records the complex FFT amplitudes E~_mu of the probed modes every round
+    trip into the ``mode_probe`` history: one dedicated jnp.fft.fft of the
+    end-of-round-trip field per round trip, ONLY when probes are enabled (a
+    static branch — the sub-step loop's e_w2 is pre-mask/pre-absorber, so a
+    dedicated FFT on the final field is the simple correct choice; cost is
+    one extra FFT per RT, <10% at n_tau = 8192).
 
     ``pump_scale_sequence`` (pump RIN, arXiv:2604.05897 Sec. V.B.5) is a
     per-round-trip pump-POWER scale s_t = 1 + eps(t) >= 0, shape (t_slow,):
@@ -518,8 +538,15 @@ def _single_trajectory_solver(
         phase_sub = jnp.abs(disp - delta_omega[0]) * dt_sub
         over = jnp.maximum(phase_sub / validity_phase_threshold - 1.0, 0.0)
         validity = jnp.exp(-_VALIDITY_STRENGTH * over ** _VALIDITY_POWER)
+    if fsr_noise_sequence is not None:
+        # Integer mode index per FFT bin ([0,1,..,n/2-1,-n/2,..,-1]) for the
+        # per-mode linear detuning mu*dD1(t). Built once per trace.
+        mu_grid = jnp.fft.fftfreq(n_tau) * n_tau
+    if len(mode_probe_indices) > 0:
+        probe_bins = jnp.asarray(mode_probe_indices, dtype=jnp.int32)
 
-    def _fine_step(e_cur, delta_t_cur, dw_step, freq_noise, kick, step_idx, m):
+    def _fine_step(e_cur, delta_t_cur, dw_step, freq_noise, delta_d1, kick,
+                   step_idx, m):
         """Advance the field and thermal state by ONE fine step dt_fine = t_r/M.
 
         The thermal detuning shift is recomputed from the CURRENT ΔT (so the
@@ -542,6 +569,11 @@ def _single_trajectory_solver(
         # SAME sign as -i·delta_omega_eff (they share one detuning axis); for
         # anomalous D₂>0 this supports MI/soliton formation.
         lin_exp = (-kappa / 2.0 - 1j * disp - 1j * delta_omega_eff) * dt_sub
+        if delta_d1 is not None:
+            # TRN-driven FSR noise: per-mode linear detuning mu*dD1(t) — one
+            # fused multiply-add over n_tau, no new FFT. Same -1j sign as
+            # disp/delta_omega_eff (all three share the detuning axis).
+            lin_exp = lin_exp - 1j * (mu_grid * delta_d1) * dt_sub
         h_half = jnp.exp(lin_exp / 2.0).astype(jnp.complex128)
 
         # n_substeps Strang sub-steps over dt_sub: pump kick, L·N·L (unrolled).
@@ -607,6 +639,13 @@ def _single_trajectory_solver(
         # needs no extra handling here.
         freq_noise = noise_sequence[step_idx]
 
+        # TRN-driven FSR noise: per-round-trip dD1(t), held across the fine/
+        # sub-steps like the detuning noise. None = legacy trace (zero ops).
+        if fsr_noise_sequence is not None:
+            delta_d1_t = fsr_noise_sequence[step_idx]
+        else:
+            delta_d1_t = None
+
         # Pump RIN: per-round-trip pump-power scale s_t = 1 + eps(t) >= 0.
         # P_in(t) = pin*s_t and the kick becomes sqrt(max(kappa_c*pin*s_t,0))*
         # dt_sub, held constant over the round trip's fine/sub-steps (RIN
@@ -630,7 +669,8 @@ def _single_trajectory_solver(
         delta_omega_eff = dw_step
         for m in range(fine_cadence_M):
             e_next, delta_t_next, u_int, delta_omega_eff = _fine_step(
-                e_next, delta_t_next, dw_step, freq_noise, kick_t, step_idx, m
+                e_next, delta_t_next, dw_step, freq_noise, delta_d1_t, kick_t,
+                step_idx, m
             )
 
         # Through-port power via energy balance, on the end-of-round-trip field.
@@ -661,6 +701,12 @@ def _single_trajectory_solver(
             "DeltaT": delta_t_next,
             "delta_omega_eff": delta_omega_eff,
         }
+        # Per-mode probes: complex FFT amplitudes E~_mu of the probed modes,
+        # recorded EVERY round trip on the end-of-round-trip field. One
+        # dedicated FFT per RT, traced only when probes are enabled (static
+        # branch; disabled path adds zero ops).
+        if len(mode_probe_indices) > 0:
+            out["mode_probe"] = jnp.fft.fft(e_next)[probe_bins]
         return (e_next, delta_t_next, e_snapshots, label_history, next_snap_count), out
         
     # CW steady state: e_ss = sqrt(κ_c·P_in) / (κ/2 + i·δω)
@@ -705,7 +751,7 @@ def _single_trajectory_solver(
     )
     e_final, delta_t_final, e_snapshots, label_history, _ = final_carry
 
-    return {
+    result = {
         "E_snapshots": e_snapshots,
         "label_history": label_history,
         "P_trans_history": hist["P_trans"],
@@ -715,6 +761,9 @@ def _single_trajectory_solver(
         "delta_t_final": delta_t_final,
         "e_final": e_final,           # ← exact field at step t_slow-1
     }
+    if len(mode_probe_indices) > 0:
+        result["mode_probe_history"] = hist["mode_probe"]   # (t_slow, n_probe)
+    return result
 
 
 # Fallback labeler (conservative literal floor); the solver builds a
@@ -787,10 +836,21 @@ def _detuning_noise_sequences(
     detuning-noise channel is bit-independent of the quantum-noise channel.
     Noise models emit float32; upcast to float64 so the delta_omega_eff axis
     (and thus the linear-operator phase) is fully double precision in the loop.
+
+    Colored ``trn_psd_model`` selections synthesize HOST-SIDE (numpy float64,
+    see simulator.colored_noise) and are looped over trajectories; the
+    default ``single_pole`` model keeps the historical vmapped AR(1) path —
+    bit-identical stream, key-for-key.
     """
     from simulator.noise_models import TotalNoise, _load_config as _nm_load_cfg
 
     _noise_model = TotalNoise(_nm_load_cfg(config_path))
+    if _noise_model.is_colored:
+        rows = [
+            np.asarray(_noise_model.sample(k, int(t_slow)))
+            for k in noise_keys
+        ]
+        return jnp.asarray(np.stack(rows), dtype=jnp.float64)
 
     def _gen_noise(key):
         return _noise_model.sample(key, int(t_slow))
@@ -798,23 +858,57 @@ def _detuning_noise_sequences(
     return jax.vmap(_gen_noise)(noise_keys).astype(jnp.float64)
 
 
+def _delta_t_sequences(
+    noise_keys: jax.Array, t_slow: int, config_path: str | Path | None = None
+) -> jnp.ndarray:
+    """Per-trajectory temperature sequences dT(t) [K], (n_traj, t_slow) f64.
+
+    BIT-CONSISTENT with :func:`_detuning_noise_sequences`: the same
+    ``noise_keys`` drive the same ``TotalNoise.sample_with_delta_t`` split
+    ladder, so the dT returned here is exactly the sequence underlying the
+    detuning-noise channel — the FSR-noise term dD1(t) = (D1/omega0)*
+    C_pull*dT(t) therefore shares the identical dT realization (regenerated
+    deterministically rather than threaded, so the pinned
+    ``_detuning_noise_sequences`` call surface stays untouched). Colored PSD
+    models synthesize host-side and are looped; the legacy AR(1) model is
+    vmapped.
+    """
+    from simulator.noise_models import TotalNoise, _load_config as _nm_load_cfg
+
+    _noise_model = TotalNoise(_nm_load_cfg(config_path))
+    if _noise_model.is_colored:
+        rows = [
+            np.asarray(_noise_model.sample_with_delta_t(k, int(t_slow))[1])
+            for k in noise_keys
+        ]
+        return jnp.asarray(np.stack(rows), dtype=jnp.float64)
+    dts = jax.vmap(
+        lambda k: _noise_model.sample_with_delta_t(k, int(t_slow))[1]
+    )(noise_keys)
+    return dts.astype(jnp.float64)
+
+
 # Argument order mirrors _single_trajectory_solver. Vmapped (axis 0):
 # delta_omega(0), rng_key(11), noise_sequence(14), e0_override(15),
-# delta_t0_override(16), qnoise_key(25), pump_scale_sequence(29). Static:
+# delta_t0_override(16), qnoise_key(25), pump_scale_sequence(29),
+# fsr_noise_sequence(30). Static:
 # t_slow(2), beta(3), n_tau(7), snapshot_interval(10), state_labeler(13),
 # n_substeps(18), dealias_two_thirds(19), edge_absorber(20),
 # dispersion_validity_mask(22), fine_cadence_M(24), qnoise_enabled(27),
-# qnoise_roundtrip(28). pump_scale_sequence(29) is a traced per-trajectory
-# array OR None (RIN disabled): the Python `is not None` branch in the solver
-# resolves it at trace time WITHOUT static_argnums, exactly like d_int_grid(17)
-# — a None value under in_axes=0 is treated as broadcast (not mapped), so the
-# disabled path traces the legacy constant-kick computation with zero extra ops.
+# qnoise_roundtrip(28), mode_probe_indices(31). pump_scale_sequence(29) and
+# fsr_noise_sequence(30) are traced per-trajectory arrays OR None (channel
+# disabled): the Python `is not None` branch in the solver resolves them at
+# trace time WITHOUT static_argnums, exactly like d_int_grid(17) — a None
+# value under in_axes=0 is treated as broadcast (not mapped), so each disabled
+# path traces the legacy computation with zero extra ops.
+# mode_probe_indices(31) is a static tuple of FFT-bin indices; () disables the
+# per-round-trip probe FFT entirely (static branch, zero extra traced ops).
 _PER_TRAJ = jax.jit(
     jax.vmap(
         _single_trajectory_solver,
-        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0, 0, 0, None, None, None, None, None, None, None, None, 0, None, None, None, 0),
+        in_axes=(0, None, None, None, None, None, None, None, None, None, None, 0, None, None, 0, 0, 0, None, None, None, None, None, None, None, None, 0, None, None, None, 0, 0, None),
     ),
-    static_argnums=(2, 3, 7, 10, 13, 18, 19, 20, 22, 24, 27, 28),
+    static_argnums=(2, 3, 7, 10, 13, 18, 19, 20, 22, 24, 27, 28, 31),
 )
 
 
@@ -846,6 +940,9 @@ def solve_lle_ssfm_jax(
     pump_noise_enabled: bool | None = None,
     pump_freq_noise_override: np.ndarray | jnp.ndarray | None = None,
     pump_rin_epsilon_override: np.ndarray | jnp.ndarray | None = None,
+    fsr_noise_enabled: bool | None = None,
+    fsr_delta_d1_override: np.ndarray | jnp.ndarray | None = None,
+    mode_probe_indices: tuple[int, ...] | list[int] | None = None,
 ) -> dict[str, np.ndarray]:
     """Batch-capable SSFM solver for the generalized LLE using JAX.
 
@@ -1025,12 +1122,43 @@ def solve_lle_ssfm_jax(
             deviation eps(t), shape (t_slow,) or (n_traj, t_slow), used INSTEAD
             of the stochastic RIN synthesis. The pump-power scale is
             1 + eps(t); returned as ``pump_rin_epsilon_history``.
+        fsr_noise_enabled: Master switch for the TRN-driven FSR
+            (repetition-rate) noise term. ``None`` (default) = read the
+            ``fsr_noise_enabled`` config key (itself defaulting to off); an
+            explicit bool overrides the config. When on, the FSR fluctuation
+            dD1(t) = (D1/omega0)*C_pull*dT(t) is built from the SAME
+            temperature sequence dT(t) that drives the TRN/Pyro-EO detuning
+            noise (regenerated deterministically from the same noise keys),
+            with D1 = 2*pi*fsr_hz, omega0 = 2*pi*c/pump_wavelength_m and
+            C_pull = (omega0/n0)*(dn_dT + n0*alpha_L_per_k); each mode mu
+            then acquires the extra linear detuning mu*dD1(t) inside the
+            linear operator. T_k = 0 zeroes dT and hence this channel. OFF
+            (and no override) traces zero extra ops (Python None branch).
+            Returned as ``fsr_delta_d1_history`` [rad/s] when active.
+        fsr_delta_d1_override: Optional DETERMINISTIC dD1(t) [rad/s], shape
+            (t_slow,) or (n_traj, t_slow), used INSTEAD of the TRN-derived
+            synthesis (forces the channel on). Used by the exact spectral-
+            shift validation test (mode mu acquires phase -mu*dD1*t).
+        mode_probe_indices: Optional tuple of MODE numbers mu (relative to
+            the pump; negatives allowed) whose complex FFT amplitudes E~_mu
+            are recorded EVERY round trip into ``mode_probe_history``
+            (n_traj, t_slow, n_probe) complex128 — the raw material of the
+            noise-metrology suite (analysis/noise_metrology.py). At most 16
+            probes (asserted); for n_probe <= 8 and t_slow = 5e5 the history
+            is <= 128 MB. Cost: ONE dedicated jnp.fft.fft of the
+            end-of-round-trip field per round trip, traced only when probes
+            are requested (default None/() = no probes, zero extra ops).
 
     Returns:
         Dictionary containing requested histories. When pump noise is active
         it additionally contains ``pump_freq_noise_history`` (the
         -2*pi*delta_nu_p contribution to delta_omega, rad/s) and
         ``pump_rin_epsilon_history`` (eps), both shape (n_traj, t_slow).
+        When FSR noise is active: ``fsr_delta_d1_history`` (dD1(t), rad/s),
+        shape (n_traj, t_slow). When probes are requested:
+        ``mode_probe_history`` (complex128, shape (n_traj, t_slow, n_probe)),
+        the per-round-trip FFT amplitudes E~_mu of the probed modes in the
+        order given by ``mode_probe_indices``.
     """
 
     if int(n_substeps) < 1:
@@ -1396,6 +1524,64 @@ def solve_lle_ssfm_jax(
     else:
         pump_scale_sequence = None
 
+    # --- TRN-driven FSR (repetition-rate) noise (opt-in, default off) --------
+    # dD1(t) = (D1/omega0)*C_pull*dT(t) from the SAME dT sequence as the
+    # TRN/Pyro-EO channels (regenerated deterministically from noise_keys via
+    # _delta_t_sequences). None when the channel is inert -> the scan traces
+    # the legacy linear operator with zero extra ops.
+    if fsr_noise_enabled is None:
+        fsr_noise_enabled = physical.get("fsr_noise_enabled", 0)
+    fsr_on = _as_flag("fsr_noise_enabled", fsr_noise_enabled)
+    if fsr_delta_d1_override is not None:
+        fsr_delta_d1_history = _broadcast_pump_seq(
+            fsr_delta_d1_override, "fsr_delta_d1_override"
+        ).astype(np.float64)
+        fsr_noise_sequences = jnp.asarray(fsr_delta_d1_history, dtype=jnp.float64)
+    elif fsr_on:
+        from simulator.noise_models import TRNoise as _TRNoise
+
+        _trn = _TRNoise(physical)
+        _d1 = 2.0 * math.pi * thermal["fsr_hz"]              # rad/s
+        _omega0_fsr = 2.0 * math.pi * 299_792_458.0 / thermal["pump_wavelength_m"]
+        _dt_seqs = _delta_t_sequences(noise_keys, int(t_slow), config_path)
+        fsr_noise_sequences = (
+            (_d1 / _omega0_fsr) * _trn.c_pull * _dt_seqs
+        ).astype(jnp.float64)                                # (n_traj, t_slow)
+        fsr_delta_d1_history = np.asarray(fsr_noise_sequences)
+        # Magnitude sanity log: dD1/domega0 = D1/omega0 ~ 1.27e-4 here, so a
+        # domega0 ~ 1e5 rad/s TRN excursion gives dD1 ~ 13 rad/s and
+        # |mu| = 1e3 sees ~1.3e4 rad/s << kappa (perturbative) — yet this IS
+        # the TRN-limited f_rep term.
+        _dd1_rms = float(np.sqrt(np.mean(fsr_delta_d1_history**2)))
+        print(
+            f"[fsr noise] D1/omega0 = {float(_d1 / _omega0_fsr):.3e}, "
+            f"C_pull = {_trn.c_pull:.3e} rad/s/K, rms dD1 = {_dd1_rms:.3e} "
+            f"rad/s, at |mu|=1e3: {1e3 * _dd1_rms:.3e} rad/s vs kappa = "
+            f"{float(kappa):.3e} rad/s "
+            f"({1e3 * _dd1_rms / float(kappa):.2e}*kappa)"
+        )
+    else:
+        fsr_noise_sequences = None
+        fsr_delta_d1_history = None
+
+    # --- Per-mode probes (noise metrology) -----------------------------------
+    # Mode numbers mu -> FFT-bin indices (static tuple; () disables). The
+    # probe history is (n_traj, t_slow, n_probe) complex128: bound the probe
+    # count so the memory stays modest (8 probes at t_slow = 5e5 is 128 MB).
+    if mode_probe_indices is None:
+        mode_probe_indices = ()
+    probe_mu = tuple(int(m) for m in mode_probe_indices)
+    assert len(probe_mu) <= 16, (
+        f"mode_probe_indices supports at most 16 probes "
+        f"(got {len(probe_mu)}): the per-RT complex128 history grows as "
+        f"n_traj*t_slow*n_probe*16 bytes."
+    )
+    assert all(-(int(n_tau) // 2) <= m < int(n_tau) // 2 for m in probe_mu), (
+        f"mode_probe_indices must satisfy -n_tau/2 <= mu < n_tau/2 "
+        f"(n_tau = {n_tau}), got {probe_mu}."
+    )
+    probe_bins = tuple(int(m) % int(n_tau) for m in probe_mu)
+
     # Warm-start handling. Cold start (override None) uses an all-zero e0, which the
     # low-level solver detects (via jnp.all(e0 == 0)) to build the analytic CW state
     # plus seeding noise. A non-zero e0_override is passed through verbatim as the
@@ -1525,6 +1711,8 @@ def solve_lle_ssfm_jax(
         qn_enabled,
         qn_roundtrip,
         pump_scale_sequence,
+        fsr_noise_sequences,
+        probe_bins,
     )
 
     result = {k: np.asarray(v) for k, v in out.items()}
@@ -1534,6 +1722,8 @@ def solve_lle_ssfm_jax(
         result["pump_freq_noise_history"] = pump_freq_noise_history
     if pump_scale_sequence is not None:
         result["pump_rin_epsilon_history"] = pump_rin_epsilon_history
+    if fsr_delta_d1_history is not None:
+        result["fsr_delta_d1_history"] = np.asarray(fsr_delta_d1_history)
     return result
 
 
